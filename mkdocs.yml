@@ -1,0 +1,35 @@
+site_name: GPPlus
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)" # get system preference
+      primary: black
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)" # get system preference
+      primary: black
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: false
+            members: true
+
+nav:
+  - Reference:
+    - Models: reference/models.md
+    - Kernels: reference/kernels.md
+
+repo_url: https://github.com/Bostanabad-Research-Group/GP-Plus
+
+copyright: Copyright &copy; 2024 Bostanabad Research Group
