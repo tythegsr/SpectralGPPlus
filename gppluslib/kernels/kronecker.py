@@ -9,10 +9,16 @@ class KroneckerKernel(Kernel):
     """
     Computes the covariance matrix based on a Kronecker structure.
 
-    :param ard_num_dims: Set this if you want a separate lengthscale for each input
-        dimension. It should be `d` if :math:`\mathbf{x_1}` is a `n x d` matrix. (Default: `None`.)
-    :param kernels: Ordered list of kernels to perform Kronecker product.
-    :param column_indices: List with start and end indices for the input columns corresponding to each kernel features.
+    Args:
+        ard_num_dims (int, optional): Set this if you want a separate lengthscale for 
+            each input dimension. It should be `d` if :math:`\mathbf{x_1}` is a `n x d` 
+            matrix. Defaults to `None`.
+        kernels (list): Ordered list of kernels to perform the Kronecker product.
+        column_indices (list): List with start and end indices for the input columns 
+            corresponding to each kernel features.
+
+    Returns:
+        CovarianceMatrix: The resulting covariance matrix.
     """
     def __init__(
         self,
@@ -29,7 +35,31 @@ class KroneckerKernel(Kernel):
 
     def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         """
-        Compute covariance matrix.
+        Compute the covariance matrix using a Kronecker structure.
+
+        This method computes the covariance matrix by combining multiple kernels 
+        through a Kronecker product. Each kernel operates on specific features 
+        of the input tensors `x1` and `x2`. The method supports diagonal extraction 
+        if `diag` is set to `True`.
+
+        Args:
+            x1 (torch.Tensor): The first input tensor of shape `(n, d1, ...)`, 
+                where `d1` is the number of dimensions used by the first kernel.
+            x2 (torch.Tensor): The second input tensor of shape `(m, d2, ...)`, 
+                where `d2` is the number of dimensions used by the first kernel.
+            diag (bool, optional): If `True`, only the diagonal of the covariance matrix is returned.
+                Defaults to `False`.
+            last_dim_is_batch (bool, optional): If `True`, treats the last dimension of inputs as batch dimensions.
+                This argument is not supported and will raise a `RuntimeError` if used. Defaults to `False`.
+            **params: Additional keyword arguments for compatibility (currently unused).
+
+        Returns:
+            torch.Tensor or KroneckerProductLinearOperator: 
+                - If `diag` is `True`, returns the diagonal of the covariance matrix as a tensor.
+                - Otherwise, returns a `KroneckerProductLinearOperator` representing the full covariance matrix.
+
+        Raises:
+            RuntimeError: If `last_dim_is_batch` is set to `True`.
         """
         if last_dim_is_batch:
             raise RuntimeError("KroneckerKernel does not accept the last_dim_is_batch argument.")
@@ -51,6 +81,19 @@ class KroneckerKernel(Kernel):
     
     def get_kernel(self, idx: int) -> Kernel:
         """
-        Get Kronecker Kernel based on order index.
+        Retrieve a Kronecker kernel by its index.
+
+        This method returns the kernel corresponding to the specified order index 
+        in the Kronecker structure.
+
+        Args:
+            idx (int): The index of the kernel to retrieve. Must be within the range 
+                `[0, len(self._kernels) - 1]`.
+
+        Returns:
+            Kernel: The kernel at the specified index.
+
+        Raises:
+            IndexError: If the provided index is out of range.
         """
         return self._kernels[idx]

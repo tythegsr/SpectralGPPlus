@@ -1,2 +1,1 @@
-## Kernels
-::: gppluslib.kernels.kronecker
+::: gppluslib.kernels
