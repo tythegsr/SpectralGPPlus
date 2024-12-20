@@ -1,2 +1,1 @@
-## Models
 ::: gppluslib.models
