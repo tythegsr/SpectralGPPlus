@@ -1,0 +1,41 @@
+site_name: GPPlus
+
+theme:
+  name: readthedocs
+  palette:
+    - media: "(prefers-color-scheme: light)" # get system preference
+      primary: black
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)" # get system preference
+      primary: black
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          docstring_style: "google"  # or "numpy" or "sphinx"
+          options:
+            show_root_heading: true
+            show_source: true
+            members: true
+            filters:
+              - "!^__"
+              - "!^import"
+              - "!^_"
+
+nav:
+  - Reference:
+    - reference/models.md
+    - reference/kernels.md
+
+repo_url: https://github.com/Bostanabad-Research-Group/GP-Plus
+
+copyright: Copyright &copy; 2024 Bostanabad Research Group

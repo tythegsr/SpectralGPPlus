@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gppluslib"
+version = "0.2"
+description = "Python library for Generalized Gaussian Process Modeling"
+readme = "README.md"  # optional
+authors = [{ name = "Your Name", email = "youremail@example.com" }]
+license = { file = "LICENSE" }  # optional
+dependencies = []  # Add your dependencies here
+
+[tool.setuptools.packages.find]
+where = ["."]

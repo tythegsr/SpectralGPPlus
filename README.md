@@ -1,1 +1,3 @@
-# gp-private
+# gpplus
+
+GP Plus library
