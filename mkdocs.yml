@@ -84,6 +84,7 @@ nav:
     - Models:
       - Base: reference/models/base.md
       - Multioutput: reference/models/multioutput.md
+    - Priors: reference/priors/priors.md
 
 repo_url: https://github.com/Bostanabad-Research-Group/GP-Plus
 
