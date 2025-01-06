@@ -17,6 +17,8 @@ pip install gpplus
 
 ## Contributing
 
+We welcome contributions from the community! Please, check our [contributing guideline](https://github.com/Bostanabad-Research-Group/gp-private/blob/main/CONTRIBUTING.md).
+
 ## Citation
 
 ```bibtex
