@@ -1,7 +1,7 @@
 import torch
 import matplotlib.pyplot as plt
 
-from gppluslib.eval.evaluator import Evaluator
+from gpplus.eval.evaluator import Evaluator
 
 def plot_2d(
     test_x: torch.Tensor,

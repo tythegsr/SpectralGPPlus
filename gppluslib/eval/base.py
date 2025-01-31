@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import torch
 
-from gppluslib.models.gpr import GPR
+from gpplus.models.gpr import GPR
 
 class BaseEvaluator(torch.nn.Module, ABC):
     """
