@@ -1,1 +1,1 @@
-::: gppluslib.models.GPR
+::: gpplus.models.GPR

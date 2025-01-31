@@ -1,7 +1,7 @@
 import torch
 
-from gppluslib.models.gpr import GPR
-from gppluslib.eval.base import BaseEvaluator
+from gpplus.models.gpr import GPR
+from gpplus.eval.base import BaseEvaluator
 
 class Evaluator(BaseEvaluator):
     """
