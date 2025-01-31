@@ -7,10 +7,10 @@ from gpytorch.priors import NormalPrior
 from gpytorch.kernels import ScaleKernel
 from gpytorch.constraints import Positive
 
-from gppluslib.models.mogp import KroneckerMOGP
-from gppluslib.priors.horseshoe import LogHalfHorseshoePrior
-from gppluslib.kernels.factory import KernelFactory, KernelType
-from gppluslib.utils.transforms import softplus, inv_softplus
+from gpplus.models.mogp import KroneckerMOGP
+from gpplus.priors.horseshoe import LogHalfHorseshoePrior
+from gpplus.kernels.factory import KernelFactory, KernelType
+from gpplus.utils.transforms import softplus, inv_softplus
 
 class FileldModel(KroneckerMOGP):
     """ Multi output Kronecker Gaussian Process

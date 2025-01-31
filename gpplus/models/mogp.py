@@ -5,8 +5,8 @@ from gpytorch.likelihoods import Likelihood
 from gpytorch.means import Mean
 from gpytorch.kernels import Kernel
  
-from gppluslib.kernels.kronecker import KroneckerKernel
-from gppluslib.models.gpr import GPR
+from gpplus.kernels.kronecker import KroneckerKernel
+from gpplus.models.gpr import GPR
 
 class KroneckerMOGP(GPR):
     """

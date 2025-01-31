@@ -1,4 +1,4 @@
-from gppluslib.eval.evaluator import Evaluator
+from gpplus.eval.evaluator import Evaluator
 
 from model import FileldModel
 from data import generate_data

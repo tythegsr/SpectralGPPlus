@@ -1,1 +1,1 @@
-::: gppluslib.priors.horseshoe.LogHalfHorseshoePrior
+::: gpplus.priors.horseshoe.LogHalfHorseshoePrior

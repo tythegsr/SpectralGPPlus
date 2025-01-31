@@ -1,1 +1,1 @@
-::: gppluslib.models.KroneckerMOGP
+::: gpplus.models.KroneckerMOGP

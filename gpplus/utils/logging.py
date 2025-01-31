@@ -3,7 +3,7 @@ import logging.config
 import os
 
 # Global logger
-logger = logging.getLogger("gppluslib")
+logger = logging.getLogger("gpplus")
 logger.setLevel(logging.INFO)  # Default level is INFO
 _formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -26,7 +26,7 @@ def set_console_logger():
     console_handler.setFormatter(_formatter)
     logger.addHandler(console_handler)
 
-_log_filename = "./gppluslib.log"
+_log_filename = "./gpplus.log"
 
 def set_file_logger(filename):
     """

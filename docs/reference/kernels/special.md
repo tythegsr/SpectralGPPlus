@@ -1,1 +1,1 @@
-::: gppluslib.kernels.KroneckerKernel
+::: gpplus.kernels.KroneckerKernel

@@ -2,8 +2,8 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import MultiStepLR
 import numpy as np
 
-from gppluslib.train.trainer import TorchTrainer
-from gppluslib.loss.mll import ExactMarginalLogLikelihoodLoss
+from gpplus.train.trainer import TorchTrainer
+from gpplus.loss.mll import ExactMarginalLogLikelihoodLoss
 
 from model import FileldModel
 from data import generate_data

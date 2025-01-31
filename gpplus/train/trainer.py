@@ -2,9 +2,9 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from tqdm import tqdm
 
-from gppluslib.train.base import BaseTrainer
-from gppluslib.models.gpr import GPR
-from gppluslib.loss.base import Loss
+from gpplus.train.base import BaseTrainer
+from gpplus.models.gpr import GPR
+from gpplus.loss.base import Loss
 
 class TorchTrainer(BaseTrainer):
     """
