@@ -33,10 +33,13 @@ markdown_extensions:
   - toc:
       permalink: "¤"  # Adds a clickable permalink to each section heading
       toc_depth: 4
+  - pymdownx.highlight
+  - pymdownx.superfences
 
 plugins:
   - search
   - autorefs
+  - mkdocs-jupyter
   - mkdocstrings:
       handlers:
         python:
@@ -76,6 +79,7 @@ nav:
   - Examples:
     - Introductory:
       - Ex1: examples/introductory/ex1.md
+      - Notebook: examples/introductory/notebook.ipynb
     - Advanced:
       - Ex2: examples/advanced/ex2.md
   - API Reference:
