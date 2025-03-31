@@ -9,7 +9,9 @@ description = "Python library for Generalized Gaussian Process Modeling"
 readme = "README.md"  # optional
 authors = [{ name = "Your Name", email = "youremail@example.com" }]
 license = { file = "LICENSE" }  # optional
-dependencies = []  # Add your dependencies here
+dependencies = [
+    "gpytorch>=1.11"
+]  # Add your dependencies here
 
 [tool.setuptools.packages.find]
 where = ["."]
