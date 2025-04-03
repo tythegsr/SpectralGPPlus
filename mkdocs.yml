@@ -92,7 +92,6 @@ nav:
       - Kronecker: reference/kernels/kronecker.md
     - Models:
       - Base: reference/models/base.md
-      - Multioutput: reference/models/multioutput.md
     - Training:
       - Trainer: reference/training/trainer.md
       - Eval: reference/training/eval.md
