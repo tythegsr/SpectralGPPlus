@@ -1,8 +1,9 @@
 import torch
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from gpplus.models.gpr import GPR
 from gpplus.loss.base import Loss
+from gpplus.models.gpr import GPR
+
 
 class ExactMarginalLogLikelihoodLoss(Loss):
     """
@@ -13,7 +14,6 @@ class ExactMarginalLogLikelihoodLoss(Loss):
         self,
         model: GPR,
     ):
-
         super().__init__(model)
 
         self.mll = ExactMarginalLogLikelihood(self.model.likelihood, self.model)

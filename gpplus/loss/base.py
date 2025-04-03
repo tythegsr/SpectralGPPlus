@@ -1,7 +1,9 @@
 from abc import ABC, abstractmethod
+
 import torch
 
 from gpplus.models.gpr import GPR
+
 
 class Loss(torch.nn.Module, ABC):
     """
@@ -13,7 +15,7 @@ class Loss(torch.nn.Module, ABC):
         model: GPR,
     ):
         super().__init__()
-        
+
         self.model = model
 
     @abstractmethod

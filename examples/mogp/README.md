@@ -1,1 +1,0 @@
-# Multi output Gaussian Process example
