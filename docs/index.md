@@ -15,10 +15,7 @@ Once you have installed the appropriate version of PyTorch, install GP+ latest p
 pip install gpplus
 ```
 
-If you want to install the latest version locally, clone the Github repo and run:
-```bash
-pip install .
-```
+For more detailed information on the installation process please refer to our [Installing GPPlus guideline](installing.md).
 
 ## Contributing
 

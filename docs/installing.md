@@ -1,6 +1,4 @@
-# Getting started
-
-## Installation
+# Installing GPPlus
 
 **Requirements**:
 

@@ -78,8 +78,7 @@ plugins:
 
 nav:
   - Welcome to GPPlus: "index.md"
-  - Getting Started: "gettingstarted.md"
-  - Contributing: "CONTRIBUTING.md"
+  - Installing GPPlus: "installing.md"
   - Examples:
     - Basic:
       - GP Regression: examples/basic/basic_gp_regression.ipynb
@@ -96,6 +95,9 @@ nav:
       - Trainer: reference/training/trainer.md
       - Eval: reference/training/eval.md
     - Priors: reference/priors/priors.md
+  - GPPlus Developer's Guide:
+    - Developer setup: "developerguide/setup.md"
+    - Contributing: "developerguide/CONTRIBUTING.md"
 
 repo_url: https://github.com/Bostanabad-Research-Group/GP-Plus
 

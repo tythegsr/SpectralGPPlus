@@ -1,6 +1,6 @@
 # GPPlus Contribution Guide
 
-## Introduction
+## 0. Introduction
 
 We welcome contributions from the community! This guide outlines how you can submit a pull request (PR) to contribute to the GPPlus project.
 
@@ -8,7 +8,7 @@ We welcome contributions from the community! This guide outlines how you can sub
 
 We are happy to talk about your ideas for contributing to GPPlus. Please, for any new contribution, create an issue to discuss your thoughts through [issue](https://github.com/Bostanabad-Research-Group/GP-Plus/issues) section.
 
-## Contribute to GPPlus
+## 1. Contribute to GPPlus
 
 ### Pull requests (PR)
 
@@ -35,10 +35,10 @@ Developer workflow for code contribution is as follows:
 - The PR will be accepted after adequate review and testing has been completed and the corresponding issue will be closed. Note that every PR should correspond to an open issue and should be linked on Github.
 
 
-## Code Quality and Formatting
+## 2. Code Quality and Formatting
 We use Ruff to maintain code quality and ensure consistent formatting in this project. Ruff is a fast, Python-focused linter and formatter.
 
-### Checking the Code with ruff check
+### 2.1. Liniting
 To check the code for any linting issues, run the following command:
 
 ```bash
@@ -46,7 +46,7 @@ ruff check . --fix
 ```
 This command will analyze the Python code in the current directory (.) and report any issues such as style violations or potential errors.
 
-### Formatting the Code with ruff format
+### 2.2. Formatting
 To automatically format the code and fix any formatting issues, run:
 
 ```bash
@@ -54,18 +54,18 @@ ruff format .
 ```
 This will reformat the Python files in the current directory to conform to standard style guidelines.
 
-### Installation
+#### Installation
 To use ruff, first, make sure it is installed in your environment. You can install it via pip:
 
 ```bash
 pip install ruff
 ```
 
-## Running Tests and Checking Code Coverage
+### 2.3. Running Tests and Checking Code Coverage
 
 This guide explains how to run unit tests and integration tests and check the code coverage for the project.
 
-### Installing Dependencies
+#### Installing Dependencies
 
 To install the required dependencies for running tests and checking coverage, use the following command:
 
@@ -73,7 +73,7 @@ To install the required dependencies for running tests and checking coverage, us
 pip install pytest pytest-cov
 ```
 
-### Running Tests
+#### Running Tests
 To run the tests, follow these steps:
 
 - Open a terminal and navigate to the root directory of the project.
@@ -89,7 +89,7 @@ pytest test/integration
 ```
 This will run all the unit tests or integration tests and `pytest` will automatically discover and run any files that start with test_ or end with _test.py.
 
-### Checking Code Coverage
+#### Checking Code Coverage
 To check the code coverage while running the tests, use the --cov option with pytest. For example:
 
 ```bash
@@ -98,11 +98,11 @@ pytest --cov=gpplus test
 
 For specific coverage of unit or intergation tests, use `pytest --cov=gpplus test/unit` or `pytest --cov=gpplus test/integration`
 
-## Generating Requirements File with pipreqs
+#### Generating Requirements File with pipreqs
 
 To automatically generate a requirements.txt file containing only the dependencies used in your project, follow these steps:
 
-### Installation
+##### Installation
 
 Ensure you have pipreqs installed. If not, install it using:
 
@@ -110,7 +110,7 @@ Ensure you have pipreqs installed. If not, install it using:
 pip install pipreqs
 ```
 
-### Usage
+##### Usage
 
 Run the following command in your project's root directory:
 
@@ -121,3 +121,19 @@ pipreqs . --force
 The . specifies the current directory.
 
 The --force flag overwrites any existing requirements.txt file.
+
+## 3. Documentation
+
+We use [MkDocs](https://www.mkdocs.org/) to geneate our documentation. To run it locally, please follow the next steps.
+
+- Install required dependencies.
+
+```bash
+pip install mkdocs mkdocs-material mkdocs-autorefs mkdocs-jupyter mkdocs-include-markdown-plugin mkdocstrings[python]
+```
+
+- Run locally at `localhost:8000`.
+
+```bash
+mkdocs serve
+```
