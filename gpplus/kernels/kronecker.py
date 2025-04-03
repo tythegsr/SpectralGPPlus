@@ -1,33 +1,34 @@
 from typing import List
 
-import torch
 import numpy as np
-from linear_operator.operators import KroneckerProductLinearOperator
+import torch
 from gpytorch.kernels import Kernel
+from linear_operator.operators import KroneckerProductLinearOperator
+
 
 class KroneckerKernel(Kernel):
     """
     Computes the covariance matrix based on a Kronecker structure.
 
     Args:
-        ard_num_dims (int, optional): Set this if you want a separate lengthscale for 
-            each input dimension. It should be `d` if :math:`\mathbf{x_1}` is a `n x d` 
+        ard_num_dims (int, optional): Set this if you want a separate lengthscale for
+            each input dimension. It should be `d` if :math:`\mathbf{x_1}` is a `n x d`
             matrix. Defaults to `None`.
         kernels (list): Ordered list of kernels to perform the Kronecker product.
-        column_indices (list): List with start and end indices for the input columns 
+        column_indices (list): List with start and end indices for the input columns
             corresponding to each kernel features.
 
     Returns:
         CovarianceMatrix: The resulting covariance matrix.
     """
+
     def __init__(
         self,
         ard_num_dims,
         kernels: List[Kernel],
         column_indices: List[List[int]],
-        **kwargs
+        **kwargs,
     ):
-        
         super(KroneckerKernel, self).__init__(ard_num_dims=ard_num_dims, **kwargs)
 
         self._kernels = kernels
@@ -37,15 +38,15 @@ class KroneckerKernel(Kernel):
         """
         Compute the covariance matrix using a Kronecker structure.
 
-        This method computes the covariance matrix by combining multiple kernels 
-        through a Kronecker product. Each kernel operates on specific features 
-        of the input tensors `x1` and `x2`. The method supports diagonal extraction 
+        This method computes the covariance matrix by combining multiple kernels
+        through a Kronecker product. Each kernel operates on specific features
+        of the input tensors `x1` and `x2`. The method supports diagonal extraction
         if `diag` is set to `True`.
 
         Args:
-            x1 (torch.Tensor): The first input tensor of shape `(n, d1, ...)`, 
+            x1 (torch.Tensor): The first input tensor of shape `(n, d1, ...)`,
                 where `d1` is the number of dimensions used by the first kernel.
-            x2 (torch.Tensor): The second input tensor of shape `(m, d2, ...)`, 
+            x2 (torch.Tensor): The second input tensor of shape `(m, d2, ...)`,
                 where `d2` is the number of dimensions used by the first kernel.
             diag (bool, optional): If `True`, only the diagonal of the covariance matrix is returned.
                 Defaults to `False`.
@@ -54,7 +55,7 @@ class KroneckerKernel(Kernel):
             **params: Additional keyword arguments for compatibility (currently unused).
 
         Returns:
-            torch.Tensor or KroneckerProductLinearOperator: 
+            torch.Tensor or KroneckerProductLinearOperator:
                 - If `diag` is `True`, returns the diagonal of the covariance matrix as a tensor.
                 - Otherwise, returns a `KroneckerProductLinearOperator` representing the full covariance matrix.
 
@@ -78,16 +79,16 @@ class KroneckerKernel(Kernel):
         unique_rows = a_np[np.sort(unique_indices)]
         res = torch.tensor(unique_rows).unsqueeze(0)
         return res
-    
+
     def get_kernel(self, idx: int) -> Kernel:
         """
         Retrieve a Kronecker kernel by its index.
 
-        This method returns the kernel corresponding to the specified order index 
+        This method returns the kernel corresponding to the specified order index
         in the Kronecker structure.
 
         Args:
-            idx (int): The index of the kernel to retrieve. Must be within the range 
+            idx (int): The index of the kernel to retrieve. Must be within the range
                 `[0, len(self._kernels) - 1]`.
 
         Returns:
