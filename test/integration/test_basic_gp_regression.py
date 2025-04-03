@@ -38,7 +38,7 @@ def test_gpr_training():
 
     # Assertions to verify training
     assert final_loss < initial_loss, f"Loss did not decrease! Initial: {initial_loss}, Final: {final_loss}"
-    assert model.train_inputs[0].equal(train_x), "Model's stored train_x does not match input!"
+    assert model.train_inputs[0].equal(train_x.unsqueeze(1)), "Model's stored train_x does not match input!"
     assert model.train_targets.equal(train_y), "Model's stored train_y does not match input!"
 
     # Switch to eval mode
