@@ -1,3 +1,4 @@
+# ruff: noqa
 from .advanced_kernels import (
     CompositeKernel,
     CompositeScaleKernel,
