@@ -97,3 +97,27 @@ pytest --cov=gpplus test
 ```
 
 For specific coverage of unit or intergation tests, use `pytest --cov=gpplus test/unit` or `pytest --cov=gpplus test/integration`
+
+## Generating Requirements File with pipreqs
+
+To automatically generate a requirements.txt file containing only the dependencies used in your project, follow these steps:
+
+### Installation
+
+Ensure you have pipreqs installed. If not, install it using:
+
+```bash
+pip install pipreqs
+```
+
+### Usage
+
+Run the following command in your project's root directory:
+
+```bash
+pipreqs . --force
+```
+
+The . specifies the current directory.
+
+The --force flag overwrites any existing requirements.txt file.
