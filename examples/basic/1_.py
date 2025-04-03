@@ -1,7 +1,8 @@
-import gpplus.models
-import torch
 import gpytorch
+import torch
+
 import gpplus
+import gpplus.models
 
 # 1. Define a toy dataset
 train_x = torch.linspace(0, 1, 10)
@@ -38,8 +39,8 @@ for i in range(training_iter):
     loss = -mll(output, train_y)
     loss.backward()
     optimizer.step()
-    if (i+1) % 10 == 0:
-        print(f"Iter {i+1}/{training_iter} - Loss: {loss.item():.3f}")
+    if (i + 1) % 10 == 0:
+        print(f"Iter {i + 1}/{training_iter} - Loss: {loss.item():.3f}")
 
 # 4. Check the training data from inside the model
 #    Note: train_inputs is a tuple. If you had multiple training inputs, they’d be in here as well.
@@ -64,4 +65,8 @@ with torch.no_grad(), gpytorch.settings.fast_pred_var():
 # 6. Print out the predictions for demonstration
 print("\nPredictions on test_x:")
 for i, x in enumerate(test_x):
-    print(f"x = {x.item():.3f} | mean = {mean[i].item():.3f} | lower = {lower[i].item():.3f} | upper = {upper[i].item():.3f}")
+    print(
+        f"x = {x.item():.3f} | mean = {mean[i].item():.3f} | "
+        f"lower = {lower[i].item():.3f} | "
+        f"upper = {upper[i].item():.3f}"
+    )

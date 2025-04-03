@@ -1,14 +1,15 @@
-from gpytorch.kernels import Kernel
 import torch
-from gpplus.utils import InputTransformNet
+from gpytorch.kernels import Kernel
+from linear_operator.operators import DenseLinearOperator  # Convert tensors back to LazyTensor
 
-    
+from gpplus.utils import InputTransformNet
 
 ################################
 
+
 class CompositeKernel(Kernel):
     """
-    Custom kernel where inputs are transformed using a provided transformation module 
+    Custom kernel where inputs are transformed using a provided transformation module
     before applying a base kernel.
 
     The transformation (`input_transform`) can be any valid mapping function, such as:
@@ -16,9 +17,10 @@ class CompositeKernel(Kernel):
       - Neural network module
       - Other custom transformations
 
-    As long as `input_transform` is a callable or `torch.nn.Module` that 
+    As long as `input_transform` is a callable or `torch.nn.Module` that
     takes in `x` and returns a transformed tensor, it can be used here.
     """
+
     def __init__(self, base_kernel, input_transform, **kwargs):
         """
         Args:
@@ -33,11 +35,11 @@ class CompositeKernel(Kernel):
     def forward(self, x1, x2, **params):
         """
         Transforms inputs and computes the base kernel matrix.
-        
+
         Args:
             x1 (torch.Tensor): First input tensor.
             x2 (torch.Tensor): Second input tensor.
-        
+
         Returns:
             torch.Tensor: Kernel matrix after transforming the inputs.
         """
@@ -45,7 +47,9 @@ class CompositeKernel(Kernel):
         x2_transformed = self.input_transform(x2)
         return self.base_kernel.forward(x1_transformed, x2_transformed, **params)
 
+
 ################################
+
 
 class NeuralKernel(Kernel):
     """
@@ -59,9 +63,10 @@ class NeuralKernel(Kernel):
             2: {"dims": 16, "activation": nn.Tanh},
         }
 
-    This will create a feedforward network with the specified layer sizes 
+    This will create a feedforward network with the specified layer sizes
     and activations in sequence.
     """
+
     def __init__(self, base_kernel, input_dim, layer_config, **kwargs):
         """
         Args:
@@ -76,36 +81,37 @@ class NeuralKernel(Kernel):
     def forward(self, x1, x2, **params):
         """
         Transforms inputs and computes the base kernel matrix.
-        
+
         Args:
             x1 (torch.Tensor): First input tensor.
             x2 (torch.Tensor): Second input tensor.
-        
+
         Returns:
             torch.Tensor: Kernel matrix after transforming the inputs.
         """
         x1_transformed = self.input_transform(x1)
         x2_transformed = self.input_transform(x2)
         return self.base_kernel.forward(x1_transformed, x2_transformed, **params)
-    
+
 
 ################################
 
 
 class NeuralScaleKernel(Kernel):
     """
-    Custom kernel that constructs an InputTransformNet internally based on a layer configuration 
+    Custom kernel that constructs an InputTransformNet internally based on a layer configuration
     and computes the dot product between transformed inputs.
-    
+
     The kernel function is defined as:
         k(x, x') = f(x) . f(x')
     where f is the internally constructed input transformation network.
-    
+
     Args:
         input_dim (int): Input dimension of the data.
         layer_config (dict): Configuration dictionary for constructing the InputTransformNet.
         **kwargs: Additional keyword arguments for the Kernel base class.
     """
+
     def __init__(self, input_dim, layer_config, **kwargs):
         super().__init__(**kwargs)
         self.input_transform = InputTransformNet(input_dim, layer_config)
@@ -113,41 +119,40 @@ class NeuralScaleKernel(Kernel):
     def forward(self, x1, x2, **params):
         """
         Compute the dot product kernel matrix between transformed inputs.
-        
+
         Args:
             x1 (torch.Tensor): First input tensor of shape (n1, d).
             x2 (torch.Tensor): Second input tensor of shape (n2, d).
             **params: Additional parameters (unused).
-        
+
         Returns:
             torch.Tensor: Kernel matrix of shape (n1, n2).
         """
         # Apply the input transformation
         f_x1 = self.input_transform(x1)  # Shape: (n1, m)
         f_x2 = self.input_transform(x2)  # Shape: (n2, m)
-        
+
         # Compute the dot product between transformed inputs
         return torch.mm(f_x1, f_x2.t())
-    
 
 
 ################################
 
 
-
 class CompositeScaleKernel(Kernel):
     """
-    Custom kernel that applies an input transformation and computes the dot product 
+    Custom kernel that applies an input transformation and computes the dot product
     between transformed inputs.
-    
+
     The kernel function is defined as:
         k(x, x') = f(x) . f(x')
     where f is the input_transform neural network.
-    
+
     Args:
         input_transform (callable or torch.nn.Module): The transformation to apply to inputs.
         **kwargs: Additional keyword arguments for the Kernel base class.
     """
+
     def __init__(self, input_transform, **kwargs):
         super().__init__(**kwargs)
         self.input_transform = input_transform  # Predefined transformation module
@@ -155,22 +160,22 @@ class CompositeScaleKernel(Kernel):
     def forward(self, x1, x2, **params):
         """
         Compute the dot product kernel matrix between transformed inputs.
-        
+
         Args:
             x1 (torch.Tensor): First input tensor of shape (n1, d).
             x2 (torch.Tensor): Second input tensor of shape (n2, d).
             **params: Additional parameters (unused).
-        
+
         Returns:
             torch.Tensor: Kernel matrix of shape (n1, n2).
         """
         # Apply the input transformation
         f_x1 = self.input_transform(x1)  # Shape: (n1, m)
         f_x2 = self.input_transform(x2)  # Shape: (n2, m)
-        
+
         # Compute the dot product between transformed inputs
         return torch.mm(f_x1, f_x2.t())
-    
+
 
 ################################
 
@@ -180,6 +185,7 @@ class GibbsKernel(Kernel):
     A custom Gibbs (nonstationary) kernel in D dimensions with ARD.
     Each input x in R^D maps to a lengthscale vector ell(x) in R^D.
     """
+
     has_lengthscale = False  # We'll handle our own lengthscales
 
     def __init__(self, input_dim=None, layer_config=None, input_transform=None, **kwargs):
@@ -226,15 +232,13 @@ class GibbsKernel(Kernel):
 
         # Distance term in the exponent: sum_d [ (x_d - x'_d)^2 / ell_d^2(x) + ell_d^2(x') ]
         sq_diff = (x1_ - x2_).pow(2)  # [..., N1, N2, D]
-        exponent_term = - sq_diff / ell_sum
+        exponent_term = -sq_diff / ell_sum
         exponent_term = exponent_term.sum(dim=-1)  # sum over D => [..., N1, N2]
 
         # Prefactor: product_d sqrt( 2 * ell_d(x1) * ell_d(x2) / [ell_d^2(x1)+ell_d^2(x2)] )
         # We'll do this in log-space for numerical stability:
         log_prefactor = 0.5 * (  # because of the sqrt
-            torch.log(torch.tensor(2.0)) 
-            + torch.log(ell_1_ * ell_2_ + 1e-9) 
-            - torch.log(ell_sum)
+            torch.log(torch.tensor(2.0)) + torch.log(ell_1_ * ell_2_ + 1e-9) - torch.log(ell_sum)
         )
         # sum over dimension D
         log_prefactor = log_prefactor.sum(dim=-1)  # => [..., N1, N2]
@@ -245,12 +249,8 @@ class GibbsKernel(Kernel):
         return covar
 
 
-
 ################################
 
-
-
-from gpytorch.lazy import NonLazyTensor  # Convert tensors back to LazyTensor
 
 class ExponentialKernel(Kernel):
     # has_lengthscale = True  # Enables automatic hyperparameter handling
@@ -266,12 +266,11 @@ class ExponentialKernel(Kernel):
             # If diagonal, base_output is already a tensor
             exp_output = torch.exp(base_output)
             return exp_output  # No need for LazyTensor wrapping on diag case
-        
+
         base_evaluated = base_output.evaluate()  # Convert LazyTensor to actual tensor
         exp_evaluated = torch.exp(base_evaluated)  # Apply exp function
 
-        return NonLazyTensor(exp_evaluated)  # Convert back to LazyTensor
-
+        return DenseLinearOperator(exp_evaluated)  # Convert back to LazyTensor
 
 
 class SinhKernel(Kernel):
@@ -282,7 +281,7 @@ class SinhKernel(Kernel):
         self.base_kernel = base_kernel
 
     def forward(self, x1, x2, diag=False, **params):
-        base_output = self.base_kernel(x1, x2, diag=diag, **params)  
+        base_output = self.base_kernel(x1, x2, diag=diag, **params)
         if diag:
             # If diagonal, base_output is already a tensor
             return torch.sinh(base_output)
@@ -292,8 +291,7 @@ class SinhKernel(Kernel):
             # Apply sinh
             sinh_evaluated = torch.sinh(base_evaluated)
             # Convert back to LazyTensor
-            return NonLazyTensor(sinh_evaluated)
-
+            return DenseLinearOperator(sinh_evaluated)
 
 
 class CoshKernel(Kernel):
@@ -314,5 +312,4 @@ class CoshKernel(Kernel):
             # Apply cosh
             cosh_evaluated = torch.cosh(base_evaluated)
             # Convert back to LazyTensor
-            return NonLazyTensor(cosh_evaluated)    
-
+            return DenseLinearOperator(cosh_evaluated)

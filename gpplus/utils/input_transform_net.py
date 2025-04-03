@@ -1,9 +1,11 @@
 import torch.nn as nn
 
+
 class InputTransformNet(nn.Module):
     """
     Defines a neural network for input transformation based on a layer configuration dictionary.
     """
+
     def __init__(self, input_dim, layer_config):
         """
         Args:
@@ -17,20 +19,20 @@ class InputTransformNet(nn.Module):
         prev_dim = input_dim
 
         # Construct the network layers
-        for layer_idx, layer_params in layer_config.items():
+        for layer_params in layer_config.values():
             layers.append(nn.Linear(prev_dim, layer_params["dims"]))  # Linear layer
-            layers.append(layer_params["activation"]())               # Activation function
+            layers.append(layer_params["activation"]())  # Activation function
             prev_dim = layer_params["dims"]
-        
+
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
         """
         Transforms the input tensor using the defined network.
-        
+
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, input_dim).
-        
+
         Returns:
             torch.Tensor: Transformed input tensor.
         """

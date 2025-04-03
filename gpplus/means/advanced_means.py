@@ -1,14 +1,15 @@
 # import torch
 from gpytorch.means import Mean
+
 from gpplus.utils import InputTransformNet
 
-
 ################################
+
 
 class CompositeMean(Mean):
     """
     A mean function that applies a user-provided transformation module
-    to the input. The transformation is expected to yield a single-dimensional 
+    to the input. The transformation is expected to yield a single-dimensional
     output (shape (batch_size, 1) or (batch_size,)) which represents the mean.
 
     This can be any valid callable or nn.Module, including:
@@ -19,6 +20,7 @@ class CompositeMean(Mean):
     Unlike a typical 'base_mean', this class just returns the
     output of the provided transformation.
     """
+
     def __init__(self, input_transform):
         """
         Args:
@@ -46,6 +48,7 @@ class CompositeMean(Mean):
 
 ################################
 
+
 class NeuralMean(Mean):
     """
     A mean function that builds its own MLP internally using InputTransformNet.
@@ -60,9 +63,10 @@ class NeuralMean(Mean):
             2: {"dims": 1,  "activation": nn.Identity},
         }
 
-    This ensures the network outputs shape (batch_size, 1), which we 
+    This ensures the network outputs shape (batch_size, 1), which we
     then squeeze to (batch_size,).
     """
+
     def __init__(self, input_dim, layer_config):
         """
         Args:
@@ -79,8 +83,7 @@ class NeuralMean(Mean):
         last_layer_dims = layer_config[last_layer_idx]["dims"]
         if last_layer_dims != 1:
             raise ValueError(
-                f"For NeuralMean, the final layer in `layer_config` must have dims=1, "
-                f"but got {last_layer_dims}."
+                f"For NeuralMean, the final layer in `layer_config` must have dims=1, but got {last_layer_dims}."
             )
 
     def forward(self, x):
@@ -94,4 +97,4 @@ class NeuralMean(Mean):
             torch.Tensor: Mean predictions of shape (batch_size,).
         """
         out = self.transform_net(x)  # shape (batch_size, 1)
-        return out.squeeze(-1)       # shape (batch_size,)
+        return out.squeeze(-1)  # shape (batch_size,)

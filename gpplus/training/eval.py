@@ -1,21 +1,22 @@
-import torch
-import gpytorch
 import logging
 
+import torch
+
 logger = logging.getLogger(__name__)
+
 
 def evaluate_gp_model(model, test_x: torch.Tensor):
     """
     Evaluates the Gaussian Process model on test data.
 
     Args:
-        model (GPModel): 
+        model (GPModel):
             The Gaussian Process model to evaluate.
-        test_x (torch.Tensor): 
+        test_x (torch.Tensor):
             Test data features.
 
     Returns:
-        tuple: 
+        tuple:
             A tuple containing:
                 - **mean** (torch.Tensor): Predictive mean for each test point.
                 - **lower** (torch.Tensor): Lower confidence bound for each test point.
@@ -24,11 +25,11 @@ def evaluate_gp_model(model, test_x: torch.Tensor):
     """
     # Set the model to evaluation mode
     model.eval()
-    #model.likelihood.eval()   # Uncomment if you are using likelihood explicitly
+    # model.likelihood.eval()   # Uncomment if you are using likelihood explicitly
 
-    with torch.no_grad():        #gpytorch.settings.fast_pred_var():
+    with torch.no_grad():  # gpytorch.settings.fast_pred_var():
         # Make predictions
-        observed_pred = model(test_x)     # observed_pred = model.likelihood(model(test_x))
+        observed_pred = model(test_x)  # observed_pred = model.likelihood(model(test_x))
 
         # Get the mean, lower and upper confidence bounds
         mean = observed_pred.mean

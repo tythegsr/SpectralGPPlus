@@ -9,15 +9,20 @@ GP+ is an open-source library for kernel-based learning via Gaussian processes (
 For more detailed information, refer to our paper: ["GP+: A Python Library for Kernel-based Learning via Gaussian Processes"](https://www.sciencedirect.com/science/article/pii/S0965997824000930?dgcid=author).
 
 ## Install GP+
-Once you have installed the appropriate version of PyTorch, install GP+ using pip:
+Once you have installed the appropriate version of PyTorch, install GP+ latest published version in PyPI using pip:
 
 ```bash
 pip install gpplus
 ```
 
+If you want to install the latest version locally, clone the Github repo and run:
+```bash
+pip install .
+```
+
 ## Contributing
 
-We welcome contributions from the community! Please, check our [contributing guideline](https://github.com/Bostanabad-Research-Group/gp-private/blob/main/CONTRIBUTING.md).
+We welcome contributions from the community! Please, check our [contributing guideline](CONTRIBUTING.md).
 
 ## Citation
 

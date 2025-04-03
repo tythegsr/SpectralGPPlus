@@ -4,7 +4,7 @@ GPPlus library
 
 ## Overview
 
-GPPlus is a Python library that provides [a brief description of what it does]. This repository contains the source code and documentation for the library.
+GPPlus is a Python library that provides generalized Gaussian Process modeling. This repository contains the source code and documentation for the library.
 
 ## Installation
 
@@ -31,8 +31,8 @@ import gpplus  # or the appropriate module name
 
 ## Contributing
 
-Contributions are welcome! Please open issues or submit pull requests if you have suggestions or improvements.
+We welcome contributions from the community! Please, check our [contributing guideline](CONTRIBUTING.md).
 
 ## License
 
-[Include your license information here, e.g., MIT License, Apache 2.0, etc.]
+MIT License

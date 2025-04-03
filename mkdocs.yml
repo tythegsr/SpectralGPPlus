@@ -40,6 +40,9 @@ plugins:
   - search
   - autorefs
   - mkdocs-jupyter
+  - include-markdown:
+      include:
+        - 'CONTRIBUTING.md'
   - mkdocstrings:
       handlers:
         python:
@@ -74,20 +77,25 @@ plugins:
             #  - "!^_"
 
 nav:
-  - "index.md"
-  - "gettingstarted.md"
+  - Welcome to GPPlus: "index.md"
+  - Getting Started: "gettingstarted.md"
+  - Contributing: "CONTRIBUTING.md"
   - Examples:
-    - Introductory:
-      - Ex1: examples/introductory/ex1.md
-      - Notebook: examples/introductory/notebook.ipynb
-    - Advanced:
-      - Ex2: examples/advanced/ex2.md
+    - Basic:
+      - GP Regression: examples/basic/basic_gp_regression.ipynb
   - API Reference:
+    - Means:
+      - Advanced: reference/means/advanced.md
     - Kernels:
-      - Special: reference/kernels/special.md
+      - Unconstrained: reference/kernels/unconstrained.md
+      - Advanced: reference/kernels/advanced.md
+      - Kronecker: reference/kernels/kronecker.md
     - Models:
       - Base: reference/models/base.md
       - Multioutput: reference/models/multioutput.md
+    - Training:
+      - Trainer: reference/training/trainer.md
+      - Eval: reference/training/eval.md
     - Priors: reference/priors/priors.md
 
 repo_url: https://github.com/Bostanabad-Research-Group/GP-Plus

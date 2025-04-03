@@ -1,19 +1,18 @@
 from abc import ABC, abstractmethod
+
 import torch
 
 from gpplus.models.gpr import GPR
+
 
 class BaseEvaluator(torch.nn.Module, ABC):
     """
     Evaluator base class.
     """
 
-    def __init__(
-        self,
-        model: GPR
-    ):
+    def __init__(self, model: GPR):
         super().__init__()
-        
+
         self.model = model
 
     @abstractmethod

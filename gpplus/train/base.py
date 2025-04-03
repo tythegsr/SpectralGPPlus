@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+
 import torch
+
 
 class BaseTrainer(torch.nn.Module, ABC):
     """
@@ -7,9 +9,8 @@ class BaseTrainer(torch.nn.Module, ABC):
     """
 
     def __init__(self):
-        
         super().__init__()
-    
+
     @abstractmethod
     def fit(self):
         raise NotImplementedError

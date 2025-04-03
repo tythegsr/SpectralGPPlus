@@ -1,5 +1,6 @@
 import torch
 
+
 class StandardScaler:
     """A utility class for standardizing data by subtracting the mean and dividing by the standard deviation.
 

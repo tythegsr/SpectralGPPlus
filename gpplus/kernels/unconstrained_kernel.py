@@ -1,13 +1,11 @@
+import warnings
+from typing import Optional, Tuple
+
 import torch
 from gpytorch.kernels import Kernel
-
-import warnings
-from typing import Callable, Dict, Iterable, Optional, Tuple, Union
-
-# from gpytorch.constraints import Interval, Positive
-from gpytorch.module import Module
 from gpytorch.priors import Prior
 from torch import Tensor
+
 
 class UnconstrainedKernel(Kernel):
     has_lengthscale = False
@@ -59,16 +57,13 @@ class UnconstrainedKernel(Kernel):
                 # self.register_prior(
                 #     "lengthscale_prior", lengthscale_prior, self._lengthscale_param, self._lengthscale_closure
                 # )
-                self.register_prior(
-                     "lengthscale_prior", lengthscale_prior, "lengthscale"
-                )
+                self.register_prior("lengthscale_prior", lengthscale_prior, "lengthscale")
 
             # self.register_constraint("raw_lengthscale", lengthscale_constraint)
 
         self.distance_module = None
         # TODO: Remove this on next official PyTorch release.
         self.__pdist_supports_batch = True
-
 
     def covar_dist(
         self,

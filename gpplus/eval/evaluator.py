@@ -1,17 +1,15 @@
 import torch
 
-from gpplus.models.gpr import GPR
 from gpplus.eval.base import BaseEvaluator
+from gpplus.models.gpr import GPR
+
 
 class Evaluator(BaseEvaluator):
     """
     Evaluator class.
     """
 
-    def __init__(
-        self,
-        model: GPR
-    ):
+    def __init__(self, model: GPR):
         super().__init__(model)
 
     def evaluate(self, x: torch.Tensor):

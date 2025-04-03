@@ -1,12 +1,13 @@
 import logging
 import os
-import torch
+
 import gpytorch
-import gpplus
+import torch
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 class GPR(gpytorch.models.ExactGP):
     """Gaussian Process model for regression using GPyTorch.
@@ -22,21 +23,22 @@ class GPR(gpytorch.models.ExactGP):
     """
 
     def __init__(
-        self, 
-        train_x: torch.Tensor, 
-        train_y: torch.Tensor, 
+        self,
+        train_x: torch.Tensor,
+        train_y: torch.Tensor,
         likelihood: gpytorch.likelihoods.Likelihood = None,
-        mean_module: gpytorch.means.Mean = None, 
-        kernel_module: gpytorch.kernels.Kernel = None
+        mean_module: gpytorch.means.Mean = None,
+        kernel_module: gpytorch.kernels.Kernel = None,
     ):
         """Initializes GPR.
 
         Args:
             train_x (torch.Tensor): Training data features.
             train_y (torch.Tensor): Training data targets.
-            likelihood (gpytorch.likelihoods.Likelihood, optional): The likelihood function. Defaults to GaussianLikelihood if None.
+            likelihood (gpytorch.likelihoods.Likelihood, optional): The likelihood function. Defaults to \
+                GaussianLikelihood if None.
             mean_module (gpytorch.means.Mean, optional): Mean function. Defaults to ConstantMean if None.
-            kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function. 
+            kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
                 Defaults to a ScaleKernel * Gaussian combo if None.
 
         Raises:
@@ -45,7 +47,6 @@ class GPR(gpytorch.models.ExactGP):
         if likelihood is None:
             likelihood = gpytorch.likelihoods.GaussianLikelihood()
             logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
-
 
         if mean_module is None:
             mean_module = gpytorch.means.ConstantMean()
@@ -84,8 +85,8 @@ class GPR(gpytorch.models.ExactGP):
             x (torch.Tensor): Test data features for prediction.
 
         Returns:
-            gpytorch.distributions.MultivariateNormal: 
-                Multivariate normal distribution containing 
+            gpytorch.distributions.MultivariateNormal:
+                Multivariate normal distribution containing
                 the mean and covariance of the predictions.
 
         Raises:
@@ -98,7 +99,7 @@ class GPR(gpytorch.models.ExactGP):
         mean = self.mean_module(x)
         covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)
-    
+
     def save(self, filepath: str = "model_weights.pth") -> None:
         """Saves this model's state dictionary to the specified file.
 

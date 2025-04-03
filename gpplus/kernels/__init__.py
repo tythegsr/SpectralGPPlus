@@ -1,12 +1,18 @@
-from .unconstrained_kernel import UnconstrainedKernel
-
+from .advanced_kernels import (
+    CompositeKernel,
+    CompositeScaleKernel,
+    CoshKernel,
+    ExponentialKernel,
+    GibbsKernel,
+    NeuralKernel,
+    NeuralScaleKernel,
+    SinhKernel,
+)
+from .factory import KernelFactory, KernelType
 from .gaussian_kernel import GaussianKernel
-
-from .power_exponential_kernel import PowerExponentialKernelFixed, PowerExponentialKernel
-
-from .advanced_kernels import CompositeKernel, NeuralKernel, NeuralScaleKernel, CompositeScaleKernel
-from .advanced_kernels import ExponentialKernel, SinhKernel, CoshKernel
-from .advanced_kernels import GibbsKernel
-
 from .kronecker import KroneckerKernel
-from .factory import KernelType, KernelFactory
+from .power_exponential_kernel import (
+    PowerExponentialKernel,
+    PowerExponentialKernelFixed,
+)
+from .unconstrained_kernel import UnconstrainedKernel

@@ -33,3 +33,67 @@ Developer workflow for code contribution is as follows:
 4. Merging your Pull Request
 
 - The PR will be accepted after adequate review and testing has been completed and the corresponding issue will be closed. Note that every PR should correspond to an open issue and should be linked on Github.
+
+
+## Code Quality and Formatting
+We use Ruff to maintain code quality and ensure consistent formatting in this project. Ruff is a fast, Python-focused linter and formatter.
+
+### Checking the Code with ruff check
+To check the code for any linting issues, run the following command:
+
+```bash
+ruff check . --fix
+```
+This command will analyze the Python code in the current directory (.) and report any issues such as style violations or potential errors.
+
+### Formatting the Code with ruff format
+To automatically format the code and fix any formatting issues, run:
+
+```bash
+ruff format .
+```
+This will reformat the Python files in the current directory to conform to standard style guidelines.
+
+### Installation
+To use ruff, first, make sure it is installed in your environment. You can install it via pip:
+
+```bash
+pip install ruff
+```
+
+## Running Tests and Checking Code Coverage
+
+This guide explains how to run unit tests and integration tests and check the code coverage for the project.
+
+### Installing Dependencies
+
+To install the required dependencies for running tests and checking coverage, use the following command:
+
+```bash
+pip install pytest pytest-cov
+```
+
+### Running Tests
+To run the tests, follow these steps:
+
+- Open a terminal and navigate to the root directory of the project.
+
+- Run the unit tests or integration tests using pytest.
+
+```bash
+pytest test/unit
+```
+
+```bash
+pytest test/integration
+```
+This will run all the unit tests or integration tests and `pytest` will automatically discover and run any files that start with test_ or end with _test.py.
+
+### Checking Code Coverage
+To check the code coverage while running the tests, use the --cov option with pytest. For example:
+
+```bash
+pytest --cov=gpplus test
+```
+
+For specific coverage of unit or intergation tests, use `pytest --cov=gpplus test/unit` or `pytest --cov=gpplus test/integration`

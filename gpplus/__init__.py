@@ -1,9 +1,1 @@
-from . import models
-
-from . import optim
-
-from . import kernels
-
-from . import means
-
-from . import utils
+from . import kernels, means, models, training, utils
