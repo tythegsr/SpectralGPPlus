@@ -4,12 +4,20 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpplus"
-version = "0.2"
+version = "0.0.1"
 description = "Python library for Generalized Gaussian Process Modeling"
-readme = "README.md"                                                     # optional
+readme = "README.md" # optional
 authors = [{ name = "PMACS Lab", email = "raminb@uci.edu" }]
-license = { file = "LICENSE" }                                           # optional
-dependencies = ["gpytorch>=1.11"]                                        # Add your dependencies here
+license = { file = "LICENSE" } # optional
+dependencies = [
+    "gpytorch>=1.14",
+    "linear_operator>=0.6",
+    "joblib>=1.4.2",
+    "matplotlib>=3.10.1",
+    "numpy>=2.2.4",
+    "torch>=2.5.1",
+    "tqdm>=4.67.1",
+] # Add your dependencies here
 
 [tool.setuptools.packages.find]
 where = ["."]

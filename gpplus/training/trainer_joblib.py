@@ -20,8 +20,6 @@ class GPTrainer:
 
     Parameters:
         model (GPModel): The Gaussian Process model to train.
-        train_x (torch.Tensor): Training data features.
-        train_y (torch.Tensor): Training data targets.
         optimizer_class (torch.optim.Optimizer, optional): The optimizer class to use for training.
         optimizer_kwargs (dict, optional): The arguments for the optimizer, excluding 'params'.
         num_epochs (int, optional): Number of epochs to train the model. Defaults to 50.
@@ -32,8 +30,6 @@ class GPTrainer:
     def __init__(
         self,
         model,
-        train_x: torch.Tensor,
-        train_y: torch.Tensor,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
         num_epochs: int = 50,
@@ -42,8 +38,8 @@ class GPTrainer:
         num_runs: int = 64,
     ):
         self.model = model
-        self.train_x = train_x
-        self.train_y = train_y
+        self.train_x = self.model.train_inputs[0]
+        self.train_y = self.model.train_targets
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
         self.num_runs = num_runs
