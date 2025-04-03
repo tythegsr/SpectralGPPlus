@@ -25,6 +25,13 @@ jobs:
       - name: Run Ruff Linter
         run: ruff check .
 
+      - name: Run Ruff Formatter
+        run: ruff format .
+
+      - name: Check if formatting was applied
+        run: git diff --exit-code
+        continue-on-error: false  # Fail if there are uncommitted changes
+
   test:
     name: Run Tests with Coverage
     runs-on: ubuntu-latest
@@ -42,6 +49,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt  # Install project dependencies
+          pip install .  # Install the package itself
           pip install pytest pytest-cov  # Install pytest and coverage tool
 
       - name: Run Tests with Coverage
