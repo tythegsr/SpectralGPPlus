@@ -1,8 +1,6 @@
-import logging
-
 import torch
 
-logger = logging.getLogger(__name__)
+from ..config import logger
 
 
 def evaluate_gp_model(model, test_x: torch.Tensor):

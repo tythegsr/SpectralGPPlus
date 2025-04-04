@@ -1,15 +1,14 @@
 import copy
-import logging
 import os  # Required to get the number of CPU cores
+from typing import List, Optional
 
 import gpytorch
 import torch
 from joblib import Parallel, delayed
 from torch.quasirandom import SobolEngine
 
-# Configure logging
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
+from ..config import logger
+from ..training.callbacks import Callback, CallbackEpochContext
 
 
 ###############################################
@@ -32,6 +31,7 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
+        callbacks: Optional[List[Callback]] = None,
         num_epochs: int = 50,
         convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
@@ -40,15 +40,12 @@ class GPTrainer:
         self.model = model
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
+        self.callbacks = callbacks or []
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
-        self.num_runs = num_runs
         self.seed = seed
-        """
-        # Initialize model parameters if requested
-        if initialize_params:
-            self.initialize_parameters(seed)
-        """
+        self.num_runs = num_runs
+
         # Get the number of learnable parameters
         self.num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -57,8 +54,8 @@ class GPTrainer:
 
         # Generate all initialization points at once
         self.sobol_samples = sobol_engine.draw(self.num_runs)
-        print(f"self.sobol_samples: {self.sobol_samples}")
-        print(f"self.sobol_samples.shape: {self.sobol_samples.shape}")
+        logger.debug(f"self.sobol_samples: {self.sobol_samples}")
+        logger.debug(f"self.sobol_samples.shape: {self.sobol_samples.shape}")
 
         # Handle optimizer class
         if optimizer_class is None:
@@ -82,7 +79,6 @@ class GPTrainer:
             self._train_single_instance_epoch = self._train_standard_epoch
 
         # Use the GPytorch MLL (marginal log likelihood) as the loss function
-        # self.mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.model.likelihood, self.model)
         self.mll = gpytorch.mlls.ExactMarginalLogLikelihood
 
     def initialize_parameters(self, model, num_run):
@@ -92,10 +88,6 @@ class GPTrainer:
         Parameters:
             seed (int, optional): Random seed for reproducibility. Defaults to None.
         """
-        # Set the random seed for reproducibility, if provided
-        # if seed is not None:
-        # torch.manual_seed(self.seed)
-
         idx = 0
 
         # Loop over each parameter in the model and initialize based on name
@@ -107,8 +99,6 @@ class GPTrainer:
 
                 if param.requires_grad:
                     if ".lengthscale" in name:
-                        # Initialize lengthscale and outputscale to 1.0
-                        # torch.nn.init.normal_(param, mean=1.0, std=2.0)
                         scale = 3
                         initial_values = initial_values * 2 * scale - scale
                         logger.info(f"lengthscale before for #{num_run}: {param}")
@@ -116,32 +106,16 @@ class GPTrainer:
                         logger.info(f"lengthscale after for #{num_run}: {param}")
 
                     elif ".outputscale" in name:
-                        # Initialize outputscale to 1.0
-                        # torch.nn.init.normal_(param, mean=1.0, std=2.0)
                         lower = 0.1
                         upper = 10
                         initial_values = lower + (upper - lower) * initial_values
                         param.data = initial_values
 
-                    # elif '.noise' in name:
-                    #     # Initialize noise parameter to a small positive constant
-                    #     # torch.nn.init.constant_(param, 0.0)
-                    #     lower = 1e-5
-                    #     upper = 1e-2
-                    #     initial_values = lower + (upper - lower) * initial_values
-                    #     param.data = initial_values
-
                     elif "weight" in name:
-                        # Xavier uniform initialization for weight parameters
-                        # torch.nn.init.xavier_uniform_(param)
-                        # print(f'param.shape: {name}: {param.shape[0]}, {param.shape[1]}, {param.shape}')
-
                         logger.info(f"weights before for #{num_run}: {param}")
                         # Xavier/Glorot scaling
-                        limit = torch.sqrt(
-                            torch.tensor(0.2 / (param.size(1) + param.size(0)))
-                        )  # torch.tensor(6.0 / (fan_in + fan_out))
-                        print(f"limit: {limit}")
+                        limit = torch.sqrt(torch.tensor(0.2 / (param.size(1) + param.size(0))))
+                        logger.debug(f"limit: {limit}")
 
                         initial_values = (initial_values * 2 - 1) * limit
 
@@ -154,18 +128,14 @@ class GPTrainer:
                         torch.nn.init.zeros_(param)
 
                     elif "power" in name:
-                        # Initialize power to 1.0
-                        # torch.nn.init.normal_(param, mean=1.0, std=2.0)
                         lower = -5
                         upper = 10
                         initial_values = lower + (upper - lower) * initial_values
                         param.data = initial_values
 
                     elif ".raw_noise" in name:
-                        # Initialize noise parameter to a small positive constant
-                        # torch.nn.init.constant_(param, 0.0)
-                        lower = -6 + 0  # Nima  -6 +
-                        upper = -6 + 1e-2  # Nima   -6 +
+                        lower = -6 + 0
+                        upper = -6 + 1e-2
                         initial_values = lower + (upper - lower) * initial_values
                         param.data = initial_values
 
@@ -240,20 +210,6 @@ class GPTrainer:
         loss = optimizer.step(closure)
         return loss.item()
 
-    # def _train_single_instance(self, model, optimizer, mll):
-    #     """
-    #     Train the GP model using the specified number of epochs.
-    #     """
-    #     # Set the model to training mode
-    #     model.train()
-    #     #self.likelihood.train()
-
-    #     for epoch in range(self.num_epochs):
-    #         # Train for a single epoch
-    #         loss = self._train_single_instance_epoch(model, optimizer, mll)
-
-    #     return loss
-
     def _train_single_instance(self, model, optimizer, mll):
         """
         Train the GP model using the specified number of epochs, with optional early stopping.
@@ -266,9 +222,10 @@ class GPTrainer:
         Returns:
             float: The best loss value achieved during training.
         """
-        with gpytorch.settings.cholesky_jitter(1e-6):  # Nima
+        with gpytorch.settings.cholesky_jitter(1e-6):
             # Set the model to training mode
             model.train()
+            model.likelihood.train()
 
             # Local variables for early stopping
             best_loss = float("inf")
@@ -277,6 +234,16 @@ class GPTrainer:
             for epoch in range(self.num_epochs):
                 # Train for a single epoch
                 loss = self._train_single_instance_epoch(model, optimizer, mll)
+
+                # Epoch callbacks
+                ctx: CallbackEpochContext = {
+                    "epoch": epoch,
+                    "loss": loss,
+                    "model": self.model,
+                    "trainer": self,
+                }
+                for callback in self.callbacks:
+                    callback.on_epoch_end(ctx)
 
                 # Check for early stopping
                 if self.convergence_patience is not None:
@@ -309,12 +276,12 @@ class GPTrainer:
         # Train the model copy
         loss = self._train_single_instance(model_copy, optimizer_copy, mll_copy)
 
-        print(f"num_run: {num_run}, loss: {loss}")
+        logger.info(f"num_run: {num_run}, loss: {loss}")
         return {
             "num_run": num_run,
             "state_dict": model_copy.state_dict(),
             "loss": loss,
-        }  # {seed: model_copy.state_dict(),} # 'loss': loss}
+        }
 
     def multiple_process(self):
         """
@@ -341,9 +308,7 @@ class GPTrainer:
                 }
 
         # Cap the number of parallel jobs to the lesser of available cores or number of runs
-        max_jobs = min(
-            self.num_runs, max(1, (os.cpu_count() or 1) - 2)
-        )  # min(self.num_runs, os.cpu_count() or 1)    # Use 1 if os.cpu_count() returns None
+        max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
 
         # Log the number of jobs being used
         logger.info(f"Using {max_jobs} parallel jobs out of {os.cpu_count()} available CPU cores.")
@@ -354,30 +319,6 @@ class GPTrainer:
 
         logger.info("Training completed.")
         return results
-
-    # def multiple_process(self):
-    #     # Use joblib to run the worker function in parallel
-    #     """
-    #     Train the model in parallel using different seeds.
-
-    #     Parameters:
-    #         seeds (list[int]): A list of seeds for initializing the model parameters.
-
-    #     Returns:
-    #         list[dict]: A list of dictionaries containing training results for each seed.
-    #     """
-    #     # Cap the number of parallel jobs to the lesser of available cores or number of seeds
-    #     #max_jobs = min(len(seeds), os.cpu_count())
-    #     max_jobs = min(self.num_runs, os.cpu_count() or 1)  # Use 1 if os.cpu_count() returns None
-
-    #     # Log the number of jobs being used
-    #     logger.info(f"Using {max_jobs} parallel jobs out of {os.cpu_count()} available CPU cores.")
-
-    #      # Run the training in parallel
-    #     results = Parallel(n_jobs=max_jobs)(delayed(self.single_process)(num_run) for num_run in range(self.num_runs))
-
-    #     logger.info("Training completed.")
-    #     return results
 
     def train(self):
         # Call the multiple_process() method that trains using different initializations
@@ -402,11 +343,11 @@ class GPTrainer:
         #  If a valid best run was found, load it into self.model
         # ------------------------------------------------------
         if best_run is not None and best_run["state_dict"] is not None:
-            print(f"self_model_before:{self.model.state_dict()}")
-            print(f"best_model:{best_run['state_dict']}")
+            logger.info(f"self_model_before:{self.model.state_dict()}")
+            logger.info(f"best_model:{best_run['state_dict']}")
 
             self.model.load_state_dict(best_run["state_dict"])
-            print(f"self_model_after:{self.model.state_dict()}")
+            logger.info(f"self_model_after:{self.model.state_dict()}")
 
             logger.info(
                 f"Best run found: #{best_run['num_run']} with loss={best_loss:.4f}. "
