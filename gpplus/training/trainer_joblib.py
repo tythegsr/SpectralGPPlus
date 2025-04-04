@@ -227,8 +227,9 @@ class GPTrainer:
             model.train()
             model.likelihood.train()
 
-            # Local variables for early stopping
+            # Local variables for early stopping & Track best values
             best_loss = float("inf")
+            best_state_dict = None
             no_improvement_epochs = 0
 
             for epoch in range(self.num_epochs):
@@ -244,20 +245,21 @@ class GPTrainer:
                 }
                 for callback in self.callbacks:
                     callback.on_epoch_end(ctx)
+                # Update best-loss and best-state tracking
+                if loss < best_loss:
+                    best_loss = loss
+                    best_state_dict = copy.deepcopy(model.state_dict())
+                    no_improvement_epochs = 0
+                else:
+                    no_improvement_epochs += 1
 
                 # Check for early stopping
-                if self.convergence_patience is not None:
-                    if loss < best_loss:
-                        best_loss = loss
-                        no_improvement_epochs = 0  # Reset counter
-                    else:
-                        no_improvement_epochs += 1
+                if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
+                    logger.info(f"Early stopping triggered at epoch {epoch + 1}. Best loss: {best_loss}")
+                    break  # Stop training
 
-                    if no_improvement_epochs >= self.convergence_patience:
-                        logger.info(f"Early stopping triggered at epoch {epoch + 1}. Best loss: {best_loss}")
-                        break  # Stop training
-
-        return best_loss
+        # Return the best loss AND the best set of parameters
+        return best_loss, best_state_dict
 
     def single_process(self, num_run):
         # Copy the model
@@ -274,13 +276,13 @@ class GPTrainer:
 
         logger.info(f"Starting training for {self.num_epochs} epochs.")
         # Train the model copy
-        loss = self._train_single_instance(model_copy, optimizer_copy, mll_copy)
+        best_loss, best_state_dict = self._train_single_instance(model_copy, optimizer_copy, mll_copy)
 
-        logger.info(f"num_run: {num_run}, loss: {loss}")
+        logger.info(f"num_run: {num_run}, loss: {best_loss}")
         return {
             "num_run": num_run,
             "state_dict": model_copy.state_dict(),
-            "loss": loss,
+            "loss": best_loss,
         }
 
     def multiple_process(self):
