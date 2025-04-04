@@ -1,2 +1,2 @@
 from .eval import evaluate_gp_model
-from .trainer_joblib import GPTrainer
+from .trainer import GPTrainer
