@@ -1,12 +1,9 @@
-import logging
 import os
 
 import gpytorch
 import torch
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from ..config import logger
 
 
 class GPR(gpytorch.models.ExactGP):

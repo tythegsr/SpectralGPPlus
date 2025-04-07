@@ -2,7 +2,7 @@ import torch
 from gpytorch.kernels import Kernel
 from linear_operator.operators import DenseLinearOperator  # Convert tensors back to LazyTensor
 
-from gpplus.utils import InputTransformNet
+from ..utils import InputTransformNet
 
 ################################
 

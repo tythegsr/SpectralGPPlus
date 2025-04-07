@@ -1,7 +1,7 @@
 # import torch
 from gpytorch.means import Mean
 
-from gpplus.utils import InputTransformNet
+from ..utils import InputTransformNet
 
 ################################
 

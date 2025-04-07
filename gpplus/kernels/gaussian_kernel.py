@@ -1,7 +1,7 @@
 import torch
 
 # from gpytorch.kernels import Kernel
-from gpplus.kernels import UnconstrainedKernel
+from ..kernels import UnconstrainedKernel
 
 
 def postprocess_gaussian(dist_mat):

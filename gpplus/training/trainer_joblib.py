@@ -8,8 +8,7 @@ from joblib import Parallel, delayed
 from torch.quasirandom import SobolEngine
 
 # Configure logging
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger(__name__)
+from ..config import logger
 
 
 ###############################################
@@ -38,8 +37,11 @@ class GPTrainer:
         num_runs: int = 64,
     ):
         self.model = model
+
+        # Retrieve training data from the model
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
+
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
         self.num_runs = num_runs
@@ -111,9 +113,9 @@ class GPTrainer:
                         # torch.nn.init.normal_(param, mean=1.0, std=2.0)
                         scale = 3
                         initial_values = initial_values * 2 * scale - scale
-                        logger.info(f"lengthscale before for #{num_run}: {param}")
+                        logger.debug(f"lengthscale before for #{num_run}: {param}")
                         param.data = initial_values
-                        logger.info(f"lengthscale after for #{num_run}: {param}")
+                        logger.debug(f"lengthscale after for #{num_run}: {param}")
 
                     elif ".outputscale" in name:
                         # Initialize outputscale to 1.0
@@ -136,7 +138,7 @@ class GPTrainer:
                         # torch.nn.init.xavier_uniform_(param)
                         # print(f'param.shape: {name}: {param.shape[0]}, {param.shape[1]}, {param.shape}')
 
-                        logger.info(f"weights before for #{num_run}: {param}")
+                        logger.debug(f"weights before for #{num_run}: {param}")
                         # Xavier/Glorot scaling
                         limit = torch.sqrt(
                             torch.tensor(0.2 / (param.size(1) + param.size(0)))
@@ -147,7 +149,7 @@ class GPTrainer:
 
                         param.data = initial_values
 
-                        logger.info(f"weights after for #{num_run}: {param}")
+                        logger.debug(f"weights after for #{num_run}: {param}")
 
                     elif "bias" in name:
                         # Zero initialization for bias parameters
@@ -170,12 +172,12 @@ class GPTrainer:
                         param.data = initial_values
 
                     else:  # variants of means and all raws
-                        logger.info("*Else*")
+                        logger.debug("*Else*")
                         param.data = 10 * initial_values - 5
 
                     idx += param_length
 
-                logger.info("Num Param #: {}".format(param_length))
+                logger.debug("Num Param #: {}".format(param_length))
 
         logger.info("Model parameters initialized with run #: {}".format(num_run))
 
