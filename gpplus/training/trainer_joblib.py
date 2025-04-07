@@ -1,5 +1,4 @@
 import copy
-import logging
 import os  # Required to get the number of CPU cores
 
 import gpytorch
@@ -22,8 +21,13 @@ class GPTrainer:
         optimizer_class (torch.optim.Optimizer, optional): The optimizer class to use for training.
         optimizer_kwargs (dict, optional): The arguments for the optimizer, excluding 'params'.
         num_epochs (int, optional): Number of epochs to train the model. Defaults to 50.
-        initialize_params (bool, optional): Whether to initialize model parameters. Defaults to False.
+        convergence_patience (int, optional): Early stopping patience. Defaults to 20.
         seed (int, optional): Random seed for parameter initialization. Defaults to None.
+        num_runs (int, optional): Number of runs (initializations). Defaults to 64.
+        mll_class (gpytorch.mlls.MarginalLogLikelihood, optional): The Marginal Log Likelihood class to use.
+        cholesky_jitter (float, optional): Jitter term for numerical stability in Cholesky. Defaults to 1e-6.
+        device (str, optional): Device to run on. Defaults to "cpu", but set to "cuda" or "cuda:0"
+                                if you have a GPU and want GPU training.
     """
 
     def __init__(
@@ -35,17 +39,37 @@ class GPTrainer:
         convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
         num_runs: int = 64,
+        mll_class: gpytorch.mlls.MarginalLogLikelihood = None,
+        cholesky_jitter: float = 1e-6,
+        device: str = "cpu",
     ):
-        self.model = model
 
-        # Retrieve training data from the model
-        self.train_x = self.model.train_inputs[0]
-        self.train_y = self.model.train_targets
+        # -------------------------------------------------------
+        # Set up the device (CPU or CUDA)
+        # -------------------------------------------------------
+        # If the user sets device="cuda" but CUDA is not available, fall back to CPU.
+        if device.startswith("cuda") and not torch.cuda.is_available():
+            logger.warning("CUDA not available. Falling back to CPU.")
+            device = "cpu"
+        self.device = torch.device(device)
+        logger.info(f"Using device: {self.device}")
+
+        # Keep the original model on CPU
+        self.model = model  # no .to(self.device) here
+        logger.info("Model stays on CPU in the constructor.")
+
+        # Move only the training data to device
+        # (assuming the model has train_inputs[0], train_targets)
+        # If you have multiple train_inputs, adapt accordingly.
+        self.train_x = self.model.train_inputs[0].to(self.device)
+        self.train_y = self.model.train_targets.to(self.device)
 
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
         self.num_runs = num_runs
         self.seed = seed
+        self.cholesky_jitter = cholesky_jitter
+
         """
         # Initialize model parameters if requested
         if initialize_params:
@@ -59,8 +83,8 @@ class GPTrainer:
 
         # Generate all initialization points at once
         self.sobol_samples = sobol_engine.draw(self.num_runs)
-        print(f"self.sobol_samples: {self.sobol_samples}")
-        print(f"self.sobol_samples.shape: {self.sobol_samples.shape}")
+        logger.debug(f"self.sobol_samples: {self.sobol_samples}")
+        logger.warning(f"self.sobol_samples.shape: {self.sobol_samples.shape}")
 
         # Handle optimizer class
         if optimizer_class is None:
@@ -83,9 +107,16 @@ class GPTrainer:
         else:
             self._train_single_instance_epoch = self._train_standard_epoch
 
+        # Handle MLL class
+        if mll_class is None:
+            self.mll_class = gpytorch.mlls.ExactMarginalLogLikelihood
+            logger.warning("No MLL class passed. Defaulting to ExactMarginalLogLikelihood.")
+        else:
+            self.mll_class = mll_class
+
         # Use the GPytorch MLL (marginal log likelihood) as the loss function
         # self.mll = gpytorch.mlls.ExactMarginalLogLikelihood(self.model.likelihood, self.model)
-        self.mll = gpytorch.mlls.ExactMarginalLogLikelihood
+        # self.mll = gpytorch.mlls.ExactMarginalLogLikelihood
 
     def initialize_parameters(self, model, num_run):
         """
@@ -143,7 +174,7 @@ class GPTrainer:
                         limit = torch.sqrt(
                             torch.tensor(0.2 / (param.size(1) + param.size(0)))
                         )  # torch.tensor(6.0 / (fan_in + fan_out))
-                        print(f"limit: {limit}")
+                        logger.debug(f"limit: {limit}")
 
                         initial_values = (initial_values * 2 - 1) * limit
 
@@ -268,7 +299,7 @@ class GPTrainer:
         Returns:
             float: The best loss value achieved during training.
         """
-        with gpytorch.settings.cholesky_jitter(1e-6):  # Nima
+        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
             # Set the model to training mode
             model.train()
 
@@ -298,23 +329,34 @@ class GPTrainer:
         return best_loss, best_state_dict
 
     def single_process(self, num_run):
-        # Copy the model
+        """
+        Runs training for a single initialization (num_run).
+        - Copy the master CPU-based model
+        - Initialize on CPU
+        - Move the copy to GPU (if device is CUDA)
+        - Train the copy
+        - Return best loss + best state
+        """
+        # Copy the model (which is on CPU)
         model_copy = copy.deepcopy(self.model)
 
-        # Initialize parameters for the model copy
+        # Initialize parameters for the model copy on CPU
         self.initialize_parameters(model_copy, num_run)
+
+        # Move model_copy to device
+        model_copy = model_copy.to(self.device)
 
         # Create a new optimizer instance for the model copy
         optimizer_copy = self.optimizer_class(model_copy.parameters(), **self.optimizer_kwargs)
 
         # Create a new MLL for the model copy
-        mll_copy = self.mll(model_copy.likelihood, model_copy)
+        mll_copy = self.mll_class(model_copy.likelihood, model_copy)
 
         logger.info(f"Starting training for {self.num_epochs} epochs.")
         # Train the model copy
         best_loss, best_state_dict = self._train_single_instance(model_copy, optimizer_copy, mll_copy)
 
-        print(f"num_run: {num_run}, loss: {best_loss}")
+        logger.warning(f"num_run: {num_run}, loss: {best_loss}")
         return {
             "num_run": num_run,
             "state_dict": best_state_dict,  # model_copy.state_dict(),
@@ -345,18 +387,48 @@ class GPTrainer:
                     "error": str(e),
                 }
 
-        # Cap the number of parallel jobs to the lesser of available cores or number of runs
-        max_jobs = min(
-            self.num_runs, max(1, (os.cpu_count() or 1) - 2)
-        )  # min(self.num_runs, os.cpu_count() or 1)    # Use 1 if os.cpu_count() returns None
+        # defining a small wrapper to handle errors gracefully    
+        def safe_single_process(num_run, device_override=None):
+            try:
+                # Run the actual training job
+                original_device = self.device
+                if device_override is not None:
+                    # Temporarily override the device for this run.
+                    self.device = device_override
+                result = self.single_process(num_run)
+                # Restore the original device.
+                self.device = original_device
+                return result
+            except Exception as e:
+                # Log and return an error record for that run
+                logger.exception(f"Error in training run #{num_run}: {e}")
+                return {
+                    "num_run": num_run,
+                    "state_dict": None,
+                    "loss": None,
+                    "error": str(e),
+                }
+    
+        
+        # Cap the number of parallel jobs
+        if self.device.type == "cpu":
+            max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
+            logger.info(f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores.")
+            results = Parallel(n_jobs=max_jobs)(
+                delayed(safe_single_process)(num_run) for num_run in range(self.num_runs)
+            )
+        elif str(self.device).startswith("cuda"):
+            num_gpus = torch.cuda.device_count()
+            # Allow as many parallel jobs as there are GPUs.
+            max_jobs = min(self.num_runs, num_gpus)
+            logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
+            results = Parallel(n_jobs=max_jobs)(
+                # For each run, choose a GPU device based on the run index.
+                delayed(safe_single_process)(num_run, device_override=torch.device(f"cuda:{num_run % num_gpus}"))
+                for num_run in range(self.num_runs)
+            )
 
-        # Log the number of jobs being used
-        logger.info(f"Using {max_jobs} parallel jobs out of {os.cpu_count()} available CPU cores.")
-
-        # Run all the jobs in parallel. If any single job fails in `safe_single_process`,
-        # it will just return an error record instead of crashing the entire pool.
-        results = Parallel(n_jobs=max_jobs)(delayed(safe_single_process)(num_run) for num_run in range(self.num_runs))
-
+        
         logger.info("Training completed.")
         return results
 
@@ -407,11 +479,11 @@ class GPTrainer:
         #  If a valid best run was found, load it into self.model
         # ------------------------------------------------------
         if best_run is not None and best_run["state_dict"] is not None:
-            print(f"self_model_before:{self.model.state_dict()}")
-            print(f"best_model:{best_run['state_dict']}")
+            logger.debug(f"self_model_before:{self.model.state_dict()}")
+            logger.debug(f"best_model:{best_run['state_dict']}")
 
             self.model.load_state_dict(best_run["state_dict"])
-            print(f"self_model_after:{self.model.state_dict()}")
+            logger.debug(f"self_model_after:{self.model.state_dict()}")
 
             logger.info(
                 f"Best run found: #{best_run['num_run']} with loss={best_loss:.4f}. "
