@@ -83,7 +83,7 @@ class GPTrainer:
         """
         # Set up the initializer; use a default one if none is provided.
         if initializer_class is None:
-            self.initializer = ParameterInitializer(num_runs=self.num_runs, seed=self.seed)
+            self.initializer = DefaultParameterInitializer(num_runs=self.num_runs, seed=self.seed)
         else:
             self.initializer = initializer_class(num_runs=self.num_runs, seed=self.seed)
 
