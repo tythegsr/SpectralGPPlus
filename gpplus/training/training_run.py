@@ -5,7 +5,13 @@ import gpytorch
 import torch
 
 from ..config import logger
-from .callbacks import Callback, CallbackEpochContext
+from .callbacks import (
+    Callback,
+    CallbackOnEpochEndContext,
+    CallbackOnEpochStartContext,
+    CallbackOnTrainEndContext,
+    CallbackOnTrainStartContext,
+)
 
 
 class GPTrainingRun:
@@ -50,21 +56,46 @@ class GPTrainingRun:
         best_state_dict = None
         no_improvement_epochs = 0
 
+        # ---------------------------
+        # on_train_start
+        # ---------------------------
+        ctx: CallbackOnTrainStartContext = {
+            "model": self.model,
+            "trainer": self,
+            "device": self.device,
+        }
+        for cb in self.callbacks:
+            cb.on_train_start(ctx)
+
         with gpytorch.settings.cholesky_jitter(1e-6):
             # Set the model to training mode
             self.model.train()
             self.model.likelihood.train()
 
             for epoch in range(self.num_epochs):
+                # ---------------------------
+                # on_epoch_start
+                # ---------------------------
+                ctx: CallbackOnEpochStartContext = {
+                    "epoch": epoch,
+                    "model": self.model,
+                    "trainer": self,
+                    "device": self.device,
+                }
+                for cb in self.callbacks:
+                    cb.on_epoch_start(self, ctx)
+
                 # Train for a single epoch
                 loss = train_epoch(optimizer, mll)
 
-                # Epoch callbacks
-                ctx: CallbackEpochContext = {
+                # ---------------------------
+                # on_epoch_end
+                # ---------------------------
+                ctx: CallbackOnEpochEndContext = {
                     "epoch": epoch,
-                    "loss": loss,
                     "model": self.model,
                     "trainer": self,
+                    "loss": loss,
                     "device": self.device,
                 }
                 for cb in self.callbacks:
@@ -82,6 +113,19 @@ class GPTrainingRun:
                 if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
                     logger.info(f"Early stopping triggered at epoch {epoch + 1}. Best loss: {best_loss}")
                     break  # Stop training
+
+        # ---------------------------
+        # on_train_end
+        # ---------------------------
+        ctx: CallbackOnTrainEndContext = {
+            "model": self.model,
+            "trainer": self,
+            "best_loss": best_loss,
+            "best_state_dict": best_state_dict,
+            "device": self.device,
+        }
+        for cb in self.callbacks:
+            cb.on_train_end(self, self.model, best_loss, best_state_dict)
 
         return {"loss": best_loss, "state_dict": best_state_dict}
 
