@@ -357,6 +357,7 @@ class GPTrainer:
         best_loss, best_state_dict = self._train_single_instance(model_copy, optimizer_copy, mll_copy)
 
         logger.warning(f"num_run: {num_run}, loss: {best_loss}")
+        print(f"num_run: {num_run}, loss: {best_loss}")
         return {
             "num_run": num_run,
             "state_dict": best_state_dict,  # model_copy.state_dict(),
