@@ -6,14 +6,12 @@ import torch
 
 from ..config import logger
 from .callbacks import Callback, CallbackEpochContext
-from .parameter_initializer import ParameterInitializer
 
 
 class GPTrainingRun:
     def __init__(
         self,
         model,
-        sobol_sample,
         optimizer_class,
         optimizer_kwargs,
         mll_class,
@@ -25,7 +23,6 @@ class GPTrainingRun:
         self.model = model
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
-        self.sobol_sample = sobol_sample
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.mll_class = mll_class
@@ -38,8 +35,6 @@ class GPTrainingRun:
         """
         Train the GP model.
         """
-        ParameterInitializer.initialize_parameters(self.model, self.sobol_sample)
-
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
         # Create mll instance

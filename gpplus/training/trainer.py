@@ -5,10 +5,10 @@ from typing import List, Optional
 import gpytorch
 import torch
 from joblib import Parallel, delayed
-from torch.quasirandom import SobolEngine
 
 from ..config import logger
 from .callbacks import Callback
+from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
 from .training_run import GPTrainingRun
 
 
@@ -20,6 +20,7 @@ class GPTrainer:
         optimizer_kwargs=None,
         mll_class: gpytorch.mlls.MarginalLogLikelihood = None,
         callbacks: Optional[List[Callback]] = None,
+        initializer_class: ParameterInitializer = None,
         num_epochs=50,
         convergence_patience=20,
         seed=None,
@@ -41,14 +42,22 @@ class GPTrainer:
         self.mll_class = mll_class or gpytorch.mlls.ExactMarginalLogLikelihood
 
         self.num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
-        self.sobol_samples = sobol_engine.draw(self.num_runs)
+
+        # Set up the initializer; use a default one if none is provided.
+        if initializer_class is None:
+            self.initializer = DefaultParameterInitializer(num_runs=self.num_runs, seed=self.seed)
+        else:
+            self.initializer = initializer_class(num_runs=self.num_runs, seed=self.seed)
+
+        # Precompute number of parameters and Sobol samples.
+        self.initializer.setup(model)
 
     def train_single_process(self, run_index):
-        sobol_sample = self.sobol_samples[run_index]
-
         # Copy the model and move the internal model inputs and targets to the same device as the model
         base_model = copy.deepcopy(self.model).to(self.device)
+        # Initialize parameters for the model copy on CPU using the initializer
+        self.initializer.initialize(base_model, run_index)
+
         base_model.likelihood.to(self.device)
         base_model.train_inputs = [x.to(self.device) for x in self.model.train_inputs]  # Move each input tensor
         base_model.train_targets = self.model.train_targets.to(self.device)  # Move targets to the same device
@@ -56,7 +65,6 @@ class GPTrainer:
         # Train the model
         run = GPTrainingRun(
             model=base_model,
-            sobol_sample=sobol_sample,
             optimizer_class=self.optimizer_class,
             optimizer_kwargs=self.optimizer_kwargs,
             mll_class=self.mll_class,
