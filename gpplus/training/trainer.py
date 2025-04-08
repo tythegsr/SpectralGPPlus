@@ -140,7 +140,6 @@ class GPTrainer:
         # Move model_copy to device
         base_model = base_model.to(self.device)
 
-
         # Train the model
         run = GPTrainerSingleRun(
             model=base_model,
@@ -233,7 +232,6 @@ class GPTrainer:
         #  If a valid best run was found, load it into self.model
         # ------------------------------------------------------
         if best_run is not None and best_run["state_dict"] is not None:
-
             self.model.load_state_dict(best_run["state_dict"])
 
             logger.info(
