@@ -28,7 +28,7 @@ class CallbackOnTrainEndContext(TypedDict):
     model: Any
     trainer: Any
     best_loss: float
-    best_state_dict: float
+    best_state_dict: Any
     device: str
 
 

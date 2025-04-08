@@ -14,7 +14,7 @@ from .callbacks import (
 )
 
 
-class GPTrainingRun:
+class GPTrainerSingleRun:
     def __init__(
         self,
         model,
@@ -23,6 +23,7 @@ class GPTrainingRun:
         mll_class,
         num_epochs,
         convergence_patience,
+        cholesky_jitter: float,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
     ):
@@ -34,6 +35,7 @@ class GPTrainingRun:
         self.mll_class = mll_class
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
+        self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
         self.device = device
 
@@ -44,7 +46,7 @@ class GPTrainingRun:
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
         # Create mll instance
-        mll = self.mll_class(self.model.likelihood, self.model).to(self.device)
+        mll = self.mll_class(self.model.likelihood, self.model)
 
         if isinstance(optimizer, torch.optim.LBFGS):
             train_epoch = self._train_lbfgs_epoch
@@ -67,10 +69,11 @@ class GPTrainingRun:
         for cb in self.callbacks:
             cb.on_train_start(ctx)
 
-        with gpytorch.settings.cholesky_jitter(1e-6):
+        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
             # Set the model to training mode
             self.model.train()
-            self.model.likelihood.train()
+
+            logger.info(f"Starting training for {self.num_epochs} epochs.")
 
             for epoch in range(self.num_epochs):
                 # ---------------------------
@@ -118,6 +121,7 @@ class GPTrainingRun:
         # on_train_end
         # ---------------------------
         ctx: CallbackOnTrainEndContext = {
+            "epoch": epoch,
             "model": self.model,
             "trainer": self,
             "best_loss": best_loss,
