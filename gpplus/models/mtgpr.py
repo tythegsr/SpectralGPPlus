@@ -46,7 +46,8 @@ class MTGPR(gpytorch.models.ExactGP):
         """
         # Attributes
         self.num_tasks = num_tasks
-        self.rank = rank
+        self.rank_likelihood = rank_likelihood
+        self.rank_kernel = rank_kernel
 
         if likelihood is None:
             likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks, rank=rank)
