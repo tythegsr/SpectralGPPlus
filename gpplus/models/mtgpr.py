@@ -24,8 +24,8 @@ class MTGPR(gpytorch.models.ExactGP):
         train_x: torch.Tensor,
         train_y: torch.Tensor,
         num_tasks: int = 1,
-    rank_likelihood: int = 0,
-    rank_kernel: int = 1,
+        rank_likelihood: int = 0,
+        rank_kernel: int = 1,
         likelihood: gpytorch.likelihoods.Likelihood = None,
         mean_module: gpytorch.means.MultitaskMean = None,
         kernel_module: gpytorch.kernels.MultitaskKernel = None,
@@ -50,7 +50,9 @@ class MTGPR(gpytorch.models.ExactGP):
         self.rank_kernel = rank_kernel
 
         if likelihood is None:
-            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks, rank=self.rank_likelihood)
+            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
+                num_tasks=num_tasks, rank=self.rank_likelihood
+            )
             logger.warning("No likelihood provided. Using MultitaskGaussianLikelihood as default.")
 
         if mean_module is None:
@@ -60,7 +62,9 @@ class MTGPR(gpytorch.models.ExactGP):
 
         if kernel_module is None:
             base_kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
-            kernel_module = gpytorch.kernels.MultitaskKernel(base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel)
+            kernel_module = gpytorch.kernels.MultitaskKernel(
+                base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel
+            )
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
