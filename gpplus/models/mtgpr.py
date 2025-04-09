@@ -50,7 +50,7 @@ class MTGPR(gpytorch.models.ExactGP):
         self.rank_kernel = rank_kernel
 
         if likelihood is None:
-            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks, rank=rank)
+            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(num_tasks=num_tasks, rank=self.rank_likelihood)
             logger.warning("No likelihood provided. Using MultitaskGaussianLikelihood as default.")
 
         if mean_module is None:
