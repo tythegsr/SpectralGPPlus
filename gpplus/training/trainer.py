@@ -9,7 +9,7 @@ from joblib import Parallel, delayed
 from ..config import logger
 from .callbacks import Callback
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
-from .training_single_run import GPTrainerSingleRun
+from .training_single_run import GPTrainerSingleProcess
 
 
 class GPTrainer:
@@ -60,12 +60,6 @@ class GPTrainer:
         self.model = model  # no .to(self.device) here
         logger.info("Model stays on CPU in the constructor.")
 
-        # Move only the training data to device
-        # (assuming the model has train_inputs[0], train_targets)
-        # If you have multiple train_inputs, adapt accordingly.
-        self.train_x = self.model.train_inputs[0].to(self.device)
-        self.train_y = self.model.train_targets.to(self.device)
-
         # --------------------------------------------------
         #  CORE CONFIG
         # --------------------------------------------------
@@ -102,17 +96,10 @@ class GPTrainer:
 
         # Handle optimizer arguments
         if optimizer_kwargs is None:
-            # self.optimizer_kwargs = {'lr': 0.01} # , 'line_search_fn': 'strong_wolfe'}
             self.optimizer_kwargs = {"lr": 0.01, "line_search_fn": "strong_wolfe"}
             logger.warning("No optimizer arguments passed. Defaulting to learning rate of 0.01")
         else:
             self.optimizer_kwargs = optimizer_kwargs
-
-        # # Select epoch training method based on optimizer
-        # if self.optimizer_class == torch.optim.LBFGS:
-        #     self._train_single_instance_epoch = self._train_lbfgs_epoch
-        # else:
-        #     self._train_single_instance_epoch = self._train_standard_epoch
 
         # Handle MLL class
         if mll_class is None:
@@ -141,7 +128,7 @@ class GPTrainer:
         base_model = base_model.to(self.device)
 
         # Train the model
-        run = GPTrainerSingleRun(
+        run = GPTrainerSingleProcess(
             model=base_model,
             optimizer_class=self.optimizer_class,
             optimizer_kwargs=self.optimizer_kwargs,

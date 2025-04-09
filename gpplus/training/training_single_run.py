@@ -14,7 +14,7 @@ from .callbacks import (
 )
 
 
-class GPTrainerSingleRun:
+class GPTrainerSingleProcess:
     def __init__(
         self,
         model,
@@ -28,8 +28,6 @@ class GPTrainerSingleRun:
         device: str = None,
     ):
         self.model = model
-        self.train_x = self.model.train_inputs[0]
-        self.train_y = self.model.train_targets
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.mll_class = mll_class
@@ -38,6 +36,11 @@ class GPTrainerSingleRun:
         self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
         self.device = device
+        # Move only the training data to device
+        # (assuming the model has train_inputs[0], train_targets)
+        # If you have multiple train_inputs, adapt accordingly.
+        self.train_x = self.model.train_inputs[0].to(self.device)
+        self.train_y = self.model.train_targets.to(self.device)
 
     def train(self):
         """
