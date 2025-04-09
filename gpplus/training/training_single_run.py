@@ -14,7 +14,7 @@ from .callbacks import (
 )
 
 
-class GPTrainingRun:
+class GPTrainerSingleProcess:
     def __init__(
         self,
         model,
@@ -23,19 +23,24 @@ class GPTrainingRun:
         mll_class,
         num_epochs,
         convergence_patience,
+        cholesky_jitter: float,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
     ):
         self.model = model
-        self.train_x = self.model.train_inputs[0]
-        self.train_y = self.model.train_targets
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.mll_class = mll_class
         self.num_epochs = num_epochs
         self.convergence_patience = convergence_patience
+        self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
         self.device = device
+        # Move only the training data to device
+        # (assuming the model has train_inputs[0], train_targets)
+        # If you have multiple train_inputs, adapt accordingly.
+        self.train_x = self.model.train_inputs[0].to(self.device)
+        self.train_y = self.model.train_targets.to(self.device)
 
     def train(self):
         """
@@ -44,7 +49,7 @@ class GPTrainingRun:
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
         # Create mll instance
-        mll = self.mll_class(self.model.likelihood, self.model).to(self.device)
+        mll = self.mll_class(self.model.likelihood, self.model)
 
         if isinstance(optimizer, torch.optim.LBFGS):
             train_epoch = self._train_lbfgs_epoch
@@ -67,10 +72,11 @@ class GPTrainingRun:
         for cb in self.callbacks:
             cb.on_train_start(ctx)
 
-        with gpytorch.settings.cholesky_jitter(1e-6):
+        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
             # Set the model to training mode
             self.model.train()
-            self.model.likelihood.train()
+
+            logger.info(f"Starting training for {self.num_epochs} epochs.")
 
             for epoch in range(self.num_epochs):
                 # ---------------------------
@@ -118,6 +124,7 @@ class GPTrainingRun:
         # on_train_end
         # ---------------------------
         ctx: CallbackOnTrainEndContext = {
+            "epoch": epoch,
             "model": self.model,
             "trainer": self,
             "best_loss": best_loss,
