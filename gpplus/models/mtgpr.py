@@ -59,8 +59,7 @@ class MTGPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            base_kernel = gpytorch.kernels.RBFKernel()
-            kernel_scaled = gpytorch.kernels.ScaleKernel(base_kernel=base_kernel)
+            base_kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
             kernel_module = gpytorch.kernels.MultitaskKernel(kernel_scaled, num_tasks=self.num_tasks, rank=self.rank)
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
