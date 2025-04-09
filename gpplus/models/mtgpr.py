@@ -60,7 +60,7 @@ class MTGPR(gpytorch.models.ExactGP):
 
         if kernel_module is None:
             base_kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
-            kernel_module = gpytorch.kernels.MultitaskKernel(kernel_scaled, num_tasks=self.num_tasks, rank=self.rank)
+            kernel_module = gpytorch.kernels.MultitaskKernel(base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel)
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
