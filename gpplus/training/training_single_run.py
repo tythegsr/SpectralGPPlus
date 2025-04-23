@@ -132,7 +132,7 @@ class GPTrainerSingleProcess:
             "device": self.device,
         }
         for cb in self.callbacks:
-            cb.on_train_end(self, self.model, best_loss, best_state_dict)
+            cb.on_train_end(self.model, best_loss, best_state_dict)
 
         return {"loss": best_loss, "state_dict": best_state_dict}
 
