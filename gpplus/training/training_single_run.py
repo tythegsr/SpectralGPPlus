@@ -89,7 +89,7 @@ class GPTrainerSingleProcess:
                     "device": self.device,
                 }
                 for cb in self.callbacks:
-                    cb.on_epoch_start(self, ctx)
+                    cb.on_epoch_start(ctx)
 
                 # Train for a single epoch
                 loss = train_epoch(optimizer, mll)
