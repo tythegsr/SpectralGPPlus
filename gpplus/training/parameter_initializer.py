@@ -6,8 +6,6 @@ from torch.quasirandom import SobolEngine
 # Configure logging
 from ..config import logger
 
-# def initialize_parameters(self, model, num_run):
-
 
 class ParameterInitializer(ABC):
     @abstractmethod
@@ -19,7 +17,7 @@ class ParameterInitializer(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def initialize(self, model: torch.nn.Module):
+    def initialize(self, model: torch.nn.Module, run_index: int):
         raise NotImplementedError
 
 
