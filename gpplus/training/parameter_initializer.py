@@ -40,7 +40,7 @@ class DefaultParameterInitializer(ParameterInitializer):
         # Count only parameters that are not weight or bias
         self.num_params = 0
         for name, p in model.named_parameters():
-            if p.requires_grad and not any(k in name for k in ('.weight', '.bias')):
+            if p.requires_grad and not any(k in name for k in (".weight", ".bias")):
                 self.num_params += p.numel()
 
         # Handle case where there are no Sobol-driven parameters
@@ -78,7 +78,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     continue
 
                 # Handle weight parameters with Xavier uniform
-                if '.weight' in name:
+                if ".weight" in name:
                     # reproducible per‐run, on CPU
                     g = torch.Generator().manual_seed(self.seed + run_index)
                     torch.nn.init.xavier_uniform_(param, generator=g)
@@ -86,7 +86,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     continue
 
                 # Handle bias parameters with zeros
-                if '.bias' in name:
+                if ".bias" in name:
                     torch.nn.init.zeros_(param)
                     logger.debug(f"Initialized bias parameter '{name}' with zeros")
                     continue
