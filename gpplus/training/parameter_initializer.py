@@ -104,17 +104,6 @@ class DefaultParameterInitializer(ParameterInitializer):
                 elif ".outputscale" in name:
                     lower, upper = 0.1, 10
                     param.data = lower + (upper - lower) * sample
-                # elif "weight" in name:
-                #     # Xavier uniform initialization for weight parameters
-                #     # torch.nn.init.xavier_uniform_(param)
-                #     # print(f'param.shape: {name}: {param.shape[0]}, {param.shape[1]}, {param.shape}')
-                #     fan_in, fan_out = param.size(1), param.size(0)
-                #     # Xavier/Glorot scaling
-                #     # torch.tensor(6.0 / (fan_in + fan_out))
-                #     limit = torch.sqrt(torch.tensor(0.2 / (fan_in + fan_out)))
-                #     param.data = (sample * 2 - 1) * limit
-                # elif "bias" in name:
-                #     torch.nn.init.zeros_(param)
                 elif "power" in name:
                     lower, upper = -5, 10
                     param.data = lower + (upper - lower) * sample
