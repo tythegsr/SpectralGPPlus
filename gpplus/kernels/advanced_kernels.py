@@ -1,7 +1,7 @@
 import torch
 from gpytorch.kernels import Kernel
-from linear_operator.operators import DenseLinearOperator  # Convert tensors back to LazyTensor
 
+# from linear_operator.operators import DenseLinearOperator  # Convert tensors back to LazyTensor
 from ..utils import InputTransformNet
 
 ################################
@@ -260,17 +260,19 @@ class ExponentialKernel(Kernel):
         self.base_kernel = base_kernel
 
     def forward(self, x1, x2, diag=False, **params):
+        # Compute the base kernel (this gives you either a Tensor for diag
+        # or a LazyEvaluatedKernelTensor / LinearOperator for full covar).
         base_output = self.base_kernel(x1, x2, diag=diag, **params)  # Returns a LazyTensor
 
         if diag:
             # If diagonal, base_output is already a tensor
-            exp_output = torch.exp(base_output)
-            return exp_output  # No need for LazyTensor wrapping on diag case
+            # No need for LazyTensor wrapping on diag case
+            return torch.exp(base_output)
 
-        base_evaluated = base_output.evaluate()  # Convert LazyTensor to actual tensor
-        exp_evaluated = torch.exp(base_evaluated)  # Apply exp function
+        # Full-covar case: first get a dense Tensor
+        dense_base = base_output.to_dense()
 
-        return DenseLinearOperator(exp_evaluated)  # Convert back to LazyTensor
+        return torch.exp(dense_base)  # Apply exp function; GPyTorch will lazily wrap this
 
 
 class SinhKernel(Kernel):
@@ -281,17 +283,19 @@ class SinhKernel(Kernel):
         self.base_kernel = base_kernel
 
     def forward(self, x1, x2, diag=False, **params):
-        base_output = self.base_kernel(x1, x2, diag=diag, **params)
+        # Compute the base kernel (this gives you either a Tensor for diag
+        # or a LazyEvaluatedKernelTensor / LinearOperator for full covar).
+        base_output = self.base_kernel(x1, x2, diag=diag, **params)  # Returns a LazyTensor
+
         if diag:
             # If diagonal, base_output is already a tensor
+            # No need for LazyTensor wrapping on diag case
             return torch.sinh(base_output)
-        else:
-            # Convert LazyTensor to actual tensor
-            base_evaluated = base_output.evaluate()
-            # Apply sinh
-            sinh_evaluated = torch.sinh(base_evaluated)
-            # Convert back to LazyTensor
-            return DenseLinearOperator(sinh_evaluated)
+
+        # Full-covar case: first get a dense Tensor
+        dense_base = base_output.to_dense()
+
+        return torch.sinh(dense_base)  # Apply sinh function; GPyTorch will lazily wrap this
 
 
 class CoshKernel(Kernel):
@@ -302,14 +306,16 @@ class CoshKernel(Kernel):
         self.base_kernel = base_kernel
 
     def forward(self, x1, x2, diag=False, **params):
-        base_output = self.base_kernel(x1, x2, diag=diag, **params)
+        # Compute the base kernel (this gives you either a Tensor for diag
+        # or a LazyEvaluatedKernelTensor / LinearOperator for full covar).
+        base_output = self.base_kernel(x1, x2, diag=diag, **params)  # Returns a LazyTensor
+
         if diag:
             # If diagonal, base_output is already a tensor
+            # No need for LazyTensor wrapping on diag case
             return torch.cosh(base_output)
-        else:
-            # Convert LazyTensor to actual tensor
-            base_evaluated = base_output.evaluate()
-            # Apply cosh
-            cosh_evaluated = torch.cosh(base_evaluated)
-            # Convert back to LazyTensor
-            return DenseLinearOperator(cosh_evaluated)
+
+        # Full-covar case: first get a dense Tensor
+        dense_base = base_output.to_dense()
+
+        return torch.cosh(dense_base)  # Apply cosh function; GPyTorch will lazily wrap this
