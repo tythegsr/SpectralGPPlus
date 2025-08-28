@@ -110,34 +110,34 @@ for seed in range(42,52):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    source_encoder = SourceMatrixEncoder(
-               num_sources=4,
-               z_dim=2,
-               initialization='normal',
-               init_std=0.1
-           )
-    print("Using A matrix encoder")
+    # source_encoder = SourceMatrixEncoder(
+    #            num_sources=4,
+    #            z_dim=2,
+    #            initialization='normal',
+    #            init_std=0.1
+    #        )
+    # print("Using A matrix encoder")
 
     source_architecture = {
         'hidden_dims': [4],
         'activation': 'hardtanh',
         'dropout': 0.0
     }
-    # # use_probabilistic_embedding = True
-    # # n_samples = 10 if use_probabilistic_embedding else 1
-    # # source_encoder = None
-    # # if (data['column_indices']['source']):
-    # source_encoder = OneHotToLatent(
-    #     input_dim=4,
-    #     architecture_config=source_architecture,
-    #     z_dim=2,
-    #     num_passes=1,
-    #     # probabilistic=True
-    #     # num_passes_pred=20,
-    #     # device=device,
-    #     # dtype=torch.float32
-    # )
-    # print("Using MLP encoder")
+# use_probabilistic_embedding = True
+# n_samples = 10 if use_probabilistic_embedding else 1
+# source_encoder = None
+# if (data['column_indices']['source']):
+source_encoder = OneHotToLatent(
+    input_dim=4,
+    architecture_config=source_architecture,
+    z_dim=2,
+    num_passes=1,
+    # probabilistic=True
+    # num_passes_pred=20,
+    # device=device,
+    # dtype=torch.float32
+)
+print("Using MLP encoder")
     
     kernel = gpplus.kernels.CombinedKernel_MVMF(
         cont_cols=np.arange(4,10),
