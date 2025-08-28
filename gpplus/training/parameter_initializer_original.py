@@ -57,10 +57,6 @@ class DefaultParameterInitializer(ParameterInitializer):
         param_shape = param.shape
         param_dim = param.dim()
         
-        # Debug: Print parameter name for raw_lengthscales
-        # if "raw_lengthscales" in name:
-            # print(f"[DEBUG] Found raw_lengthscales parameter: {name}")
-        
         # Matrix encoder parameters
         if "projection_matrix" in name:
             return {
@@ -69,24 +65,20 @@ class DefaultParameterInitializer(ParameterInitializer):
                 'description': 'Matrix encoder projection matrix'
             }
         
-
-        
-
-        
-        # Kernel lengthscales (for all other cases)
+        # Kernel lengthscales
         if "lengthscale" in name:
             if param_dim == 1:  # ARD lengthscales
                 return {
                     'method': 'uniform',
-                    'lower': -6.0,
-                    'upper': 3.0,
+                    'lower': 0.5,
+                    'upper': 2.0,
                     'description': 'Kernel lengthscale'
                 }
             else:  # Single lengthscale
                 return {
                     'method': 'uniform',
-                    'lower': -6.0,
-                    'upper': 3.0,
+                    'lower': 0.5,
+                    'upper': 2.0,
                     'description': 'Kernel lengthscale'
                 }
         
@@ -94,8 +86,8 @@ class DefaultParameterInitializer(ParameterInitializer):
         if "outputscale" in name:
             return {
                 'method': 'uniform',
-                'lower': 1e-6,
-                'upper': 1e0,
+                'lower': 0.1,
+                'upper': 2.0,
                 'description': 'Kernel outputscale'
             }
         
@@ -161,18 +153,8 @@ class DefaultParameterInitializer(ParameterInitializer):
             # Uniform initialization in specified range
             lower = config.get('lower', -1.0)
             upper = config.get('upper', 1.0)
-            # Check if parameter has a constraint and respect it
-            # if hasattr(param, 'constraint') and param.constraint is not None:
-            #     # Use the constraint's inverse transform to get the raw value
-            #     raw_value = lower + (upper - lower) * sample
-            #     # Apply the constraint's transform to get the constrained value
-            #     constrained_value = param.constraint.transform(raw_value)
-            #     param.data = constrained_value
-            # else:
-            #     # No constraint, set directly
-            #     param.data = lower + (upper - lower) * sample
-            random_value = lower + (upper - lower) * sample
-            param.data = random_value
+            param.data = lower + (upper - lower) * sample
+            
         elif method == 'zeros':
             # Zero initialization
             torch.nn.init.zeros_(param)
@@ -183,15 +165,6 @@ class DefaultParameterInitializer(ParameterInitializer):
             std = config.get('std', 0.1)
             torch.nn.init.normal_(param, mean=mean, std=std)
             
-        elif method == 'constant':
-            # Constant initialization
-            value = config.get('value', 0.0)
-            param.data = torch.full_like(param, value)
-            
-        elif method == 'skip':
-            # Skip initialization for this parameter
-            pass
-
         else:
             # Fallback to uniform
             param.data = sample * 2 - 1
@@ -206,9 +179,7 @@ class DefaultParameterInitializer(ParameterInitializer):
         
         # Loop over each parameter in the model and initialize based on configuration
         with torch.no_grad():
-            all_params = list(model.named_parameters())
-            for i, (name, param) in enumerate(all_params):
-                
+            for name, param in model.named_parameters():
                 param_length = param.numel()
                 
                 # Skip parameters with zero elements
@@ -274,19 +245,10 @@ class SimpleParameterInitializer(ParameterInitializer):
                     
                 # Kernel parameters
                 elif "lengthscale" in name:
-                    # Check if parameter has a constraint and respect it
-                    if hasattr(param, 'constraint') and param.constraint is not None:
-                        # Generate raw values in constraint's domain
-                        raw_values = torch.rand_like(param) * (param.constraint.upper_bound - param.constraint.lower_bound) + param.constraint.lower_bound
-                        # Apply constraint transform
-                        constrained_values = param.constraint.transform(raw_values)
-                        param.data = constrained_values
-                    else:
-                        # No constraint, use standard initialization
-                        torch.nn.init.uniform_(param, -6.0, 3.0)
+                    torch.nn.init.uniform_(param, 0.5, 2.0)
                     
                 elif "outputscale" in name:
-                    torch.nn.init.uniform_(param, 1e-6, 1e1)
+                    torch.nn.init.uniform_(param, 0.1, 2.0)
                     
                 # Likelihood parameters
                 elif "raw_noise" in name or "noise" in name:
@@ -298,6 +260,7 @@ class SimpleParameterInitializer(ParameterInitializer):
                     
                 elif "bias" in name:
                     torch.nn.init.zeros_(param)
+                    
                 # Default
                 else:
                     torch.nn.init.uniform_(param, -1.0, 1.0)
