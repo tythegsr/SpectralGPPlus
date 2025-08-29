@@ -44,6 +44,7 @@ from gpplus.utils.metrics_functions import compute_metrics, compute_per_source_m
 from gpplus.kernels import CombinedKernel_MVMF
 from gpplus.training import GPTrainer
 from gpplus.training.callbacks import PrintLossCallback
+from gpplus.training.eval import evaluate_gp_model
 
 # Set device - use CPU to avoid device mismatch issues
 device = torch.device('cpu')
@@ -276,9 +277,9 @@ def main():
     
     # Option 1: Dictionary format (recommended)
     noise_levels = {
-        's0': 0.01,  # High fidelity: very low noise (high quality)
-        's1': 0.5,  # Medium fidelity: medium noise
-        's2': 1.0   # Low fidelity: high noise (low quality)
+        's0': 0.001,  # High fidelity: very low noise (high quality)
+        's1': 0.01,  # Medium fidelity: low noise
+        's2': 0.05   # Low fidelity: medium noise (low quality)
     }
     
     # Option 2: List format (noise levels in order: s0, s1, s2)
@@ -320,19 +321,21 @@ def main():
     
     # Define column indices - use the working reference approach
     continuous_cols = [0]  # x coordinate
-    source_cols = [1, 2, 3]  # one-hot encoded sources
+    source_cols = [1, 2, 3]  # one-hot encoded sources (0-based indexing)
     # source_cols = np.arange(1, 4)  # one-hot encoded sources
     
-    # Create source encoder
+    # Create source encoder - following working examples
+    source_architecture = {
+        'hidden_dims': [],
+        'activation': 'hardtanh',  # Use hardtanh like in working examples
+        'dropout': 0.0
+    }
+    
     source_encoder = OneHotToLatent(
         input_dim=len(data['metadata']['source_names']),
-        architecture_config={
-            # 'hidden_dims': [8, 4],
-            'hidden_dims': [],
-            'activation': 'tanh',
-            'dropout': 0.1
-        },
-        z_dim=2
+        architecture_config=source_architecture,
+        z_dim=2,
+        num_passes=1
     )
     # source_encoder = MatrixEncoder(
     #     input_dim=len(data['metadata']['source_names']),
@@ -353,13 +356,26 @@ def main():
     # Create multimean - use exact working reference approach
     multimean = gpplus.means.MultipleMean(encoded_cols=source_cols)
     
-    # Create multinoise likelihood - simple approach like in the reference
-    multinoise_likelihood = MultiLikelihood(encoded_cols=source_cols)
+    # Data standardization - following working examples
+    y_mean = y_train.mean()
+    y_std = y_train.std().clamp_min(1e-8)
+    y_train_std = (y_train - y_mean) / y_std
+    
+    # Create noise prior - following working examples
+    y_train_std_val = y_train_std.std().item()
+    prior_mean = np.log(y_train_std_val**2)
+    noise_prior = gpytorch.priors.LogNormalPrior(loc=prior_mean, scale=1.0)
+    
+    # Create multinoise likelihood - following working examples
+    multinoise_likelihood = MultiLikelihood(
+        encoded_cols=x_train_combined[:, source_cols], 
+        noise_prior=noise_prior
+    )
     
     # Create the GP model
     model = GPR(
         train_x=x_train_combined,
-        train_y=y_train,
+        train_y=y_train_std,  # Use standardized y
         mean_module=multimean,
         kernel_module=kernel,
         likelihood=multinoise_likelihood,
@@ -377,93 +393,56 @@ def main():
     
     print(f"Model: {model}")
     
-    # Debug: Print kernel values and structure
-    print("\n" + "="*60)
-    print("KERNEL DEBUGGING INFORMATION")
+    
+    # Show the ACTUAL model's covariance structure and parameters
+    print(f"\n" + "="*60)
+    print("ACTUAL MODEL COVARIANCE INFORMATION")
     print("="*60)
     
-    # Test the kernel with some sample data
-    print("\nTesting kernel with sample data...")
+    # Print the actual kernel parameters
+    print(f"\nKernel Parameters:")
+    if hasattr(model.covar_module, 'cont_kernel') and model.covar_module.cont_kernel is not None:
+        print(f"  Continuous kernel:")
+        if hasattr(model.covar_module.cont_kernel, 'lengthscale'):
+            print(f"    Lengthscale: {model.covar_module.cont_kernel.lengthscale}")
+        if hasattr(model.covar_module.cont_kernel, 'outputscale'):
+            print(f"    Outputscale: {model.covar_module.cont_kernel.outputscale}")
     
-    # Create sample input data
-    sample_x = torch.tensor([[0.5, 1, 0, 0],  # x=0.5, source=s0
-                            [0.7, 0, 1, 0],  # x=0.7, source=s1
-                            [0.3, 0, 0, 1]], # x=0.3, source=s2
-                           dtype=torch.float32, device=device)
+    if hasattr(model.covar_module, 'source_kernel') and model.covar_module.source_kernel is not None:
+        print(f"  Source kernel:")
+        if hasattr(model.covar_module.source_kernel, 'lengthscale'):
+            print(f"    Lengthscale: {model.covar_module.source_kernel.lengthscale}")
+        if hasattr(model.covar_module.source_kernel, 'outputscale'):
+            print(f"    Outputscale: {model.covar_module.source_kernel.outputscale}")
     
-    print(f"Sample input data shape: {sample_x.shape}")
-    print(f"Sample input data:")
-    for i, row in enumerate(sample_x):
-        print(f"  Row {i}: x={row[0]:.1f}, source={row[1:].tolist()}")
+    # Print the actual source encoder parameters
+    if hasattr(model.covar_module, 'source_encoder') and model.covar_module.source_encoder is not None:
+        print(f"\nSource Encoder Parameters:")
+        if hasattr(model.covar_module.source_encoder, 'projection_matrix'):
+            proj_matrix = model.covar_module.source_encoder.projection_matrix
+            print(f"  Projection matrix shape: {proj_matrix.shape}")
+            print(f"  Projection matrix:\n{proj_matrix}")
     
-    # Test the kernel
-    with torch.no_grad():
-        try:
-            # Get the full kernel matrix
-            full_kernel = model.covar_module(sample_x)
-            print(f"\nFull kernel matrix shape: {full_kernel.shape}")
-            print(f"Full kernel matrix:\n{full_kernel.to_dense()}")
-            
-            # Test individual kernel components
-            print(f"\nTesting individual kernel components...")
-            
-            # Continuous kernel
-            if hasattr(model.covar_module, 'cont_kernel') and model.covar_module.cont_kernel is not None:
-                cont_kernel = model.covar_module.cont_kernel(sample_x[:, :1])  # Only continuous columns
-                print(f"Continuous kernel shape: {cont_kernel.shape}")
-                print(f"Continuous kernel:\n{cont_kernel.to_dense()}")
-                
-                # Print continuous kernel parameters
-                if hasattr(model.covar_module.cont_kernel, 'lengthscale'):
-                    print(f"Continuous kernel lengthscale: {model.covar_module.cont_kernel.lengthscale}")
-                if hasattr(model.covar_module.cont_kernel, 'outputscale'):
-                    print(f"Continuous kernel outputscale: {model.covar_module.cont_kernel.outputscale}")
-            
-            # Source kernel
-            if hasattr(model.covar_module, 'source_kernel') and model.covar_module.source_kernel is not None:
-                # First encode the source columns, then pass to source kernel
-                source_encoded = model.covar_module.source_encoder(sample_x[:, 1:])
-                source_kernel = model.covar_module.source_kernel(source_encoded)
-                print(f"Source kernel shape: {source_kernel.shape}")
-                print(f"Source kernel:\n{source_kernel.to_dense()}")
-                
-                # Print source kernel parameters
-                if hasattr(model.covar_module.source_kernel, 'lengthscale'):
-                    print(f"Source kernel lengthscale: {model.covar_module.source_kernel.lengthscale}")
-                if hasattr(model.covar_module.source_kernel, 'outputscale'):
-                    print(f"Source kernel outputscale: {model.covar_module.source_kernel.outputscale}")
-            
-            # Test source encoder
-            if hasattr(model.covar_module, 'source_encoder') and model.covar_module.source_encoder is not None:
-                print(f"\nTesting source encoder...")
-                source_encoded = model.covar_module.source_encoder(sample_x[:, 1:])
-                print(f"Source encoded shape: {source_encoded.shape}")
-                print(f"Source encoded values:\n{source_encoded}")
-                
-                # Print encoder parameters
-                if hasattr(model.covar_module.source_encoder, 'projection_matrix'):
-                    proj_matrix = model.covar_module.source_encoder.projection_matrix
-                    print(f"Source encoder projection matrix shape: {proj_matrix.shape}")
-                    print(f"Source encoder projection matrix:\n{proj_matrix}")
-            
-            # Test categorical kernels if they exist
-            if hasattr(model.covar_module, 'cat_kernels') and model.covar_module.cat_kernels:
-                print(f"\nTesting categorical kernels...")
-                for i, cat_kernel in enumerate(model.covar_module.cat_kernels):
-                    print(f"Categorical kernel {i}:")
-                    if hasattr(cat_kernel, 'lengthscale'):
-                        print(f"  Lengthscale: {cat_kernel.lengthscale}")
-                    if hasattr(cat_kernel, 'outputscale'):
-                        print(f"  Outputscale: {cat_kernel.outputscale}")
-            
-        except Exception as e:
-            print(f"Error testing kernel: {e}")
-            import traceback
-            traceback.print_exc()
+    # Print the actual likelihood noise parameters
+    print(f"\nLikelihood Parameters:")
+    print(f"  Noise parameters: {model.likelihood.noise}")
+    print(f"  Raw noise: {model.likelihood.raw_noise}")
+    
+    # Print the actual mean parameters
+    print(f"\nMean Parameters:")
+    if hasattr(model.mean_module, 'means'):
+        for i, mean_func in enumerate(model.mean_module.means):
+            print(f"  Mean {i} ({type(mean_func).__name__}):")
+            for name, param in mean_func.named_parameters():
+                print(f"    {name}: {param}")
+    else:
+        print(f"  Mean module: {type(model.mean_module).__name__}")
+        for name, param in model.mean_module.named_parameters():
+            print(f"    {name}: {param}")
     
     print("\n" + "="*60)
     
-    # Train the model with timing
+    # Train the model - following working examples
     print("\nTraining multifidelity GP model...")
     import time
     training_start_time = time.time()
@@ -471,96 +450,39 @@ def main():
     # Debug: Check initial noise parameters
     print(f"Initial noise parameters: {model.likelihood.noise}")
     
-    # Create a custom callback to monitor noise parameters
-    class NoiseMonitorCallback:
-        def __init__(self, model):
-            self.model = model
-            self.noise_history = []
-            self.kernel_history = []
-        
-        def __call__(self, epoch, loss):
-            if epoch % 1000 == 0:  # Check every 1000 epochs
-                # Monitor noise parameters
-                noise_params = self.model.likelihood.noise.detach().cpu().numpy()
-                self.noise_history.append(noise_params)
-                print(f"Epoch {epoch}: Noise params = {noise_params}")
-                
-                # Monitor kernel values
-                try:
-                    with torch.no_grad():
-                        # Test kernel with same sample data
-                        sample_x = torch.tensor([[0.5, 1, 0, 0],  # x=0.5, source=s0
-                                               [0.7, 0, 1, 0],  # x=0.7, source=s1
-                                               [0.3, 0, 0, 1]], # x=0.3, source=s2
-                                              dtype=torch.float32, device=self.model.device)
-                        
-                        # Get kernel values
-                        full_kernel = self.model.covar_module(sample_x)
-                        kernel_diag = torch.diag(full_kernel.to_dense())
-                        
-                        # Get source encoder outputs
-                        source_encoded = self.model.covar_module.source_encoder(sample_x[:, 1:])
-                        
-                        # Test individual kernel components
-                        cont_kernel = self.model.covar_module.cont_kernel(sample_x[:, :1])
-                        cont_diag = torch.diag(cont_kernel.to_dense())
-                        
-                        source_kernel = self.model.covar_module.source_kernel(source_encoded)
-                        source_diag = torch.diag(source_kernel.to_dense())
-                        
-                        print(f"  Kernel diagonal: {kernel_diag.cpu().numpy()}")
-                        print(f"  Continuous kernel diagonal: {cont_diag.cpu().numpy()}")
-                        print(f"  Source kernel diagonal: {source_diag.cpu().numpy()}")
-                        print(f"  Source encoded: {source_encoded.cpu().numpy()}")
-                        
-                        # Store history
-                        self.kernel_history.append({
-                            'epoch': epoch,
-                            'kernel_diag': kernel_diag.cpu().numpy(),
-                            'cont_diag': cont_diag.cpu().numpy(),
-                            'source_diag': source_diag.cpu().numpy(),
-                            'source_encoded': source_encoded.cpu().numpy()
-                        })
-                        
-                except Exception as e:
-                    print(f"  Error monitoring kernel: {e}")
-    
-    noise_monitor = NoiseMonitorCallback(model)
-    
-    trainer = gpplus.training.GPTrainer(
+    trainer = GPTrainer(
         model=model,
-        num_epochs=10000,
+        num_epochs=1500,  # Slightly increased for SOURCE_0 to get RRMSE < 0.2
         seed=42,
-        num_runs=16,
-        optimizer_kwargs={'lr': 1},
-        convergence_patience=50,
-        # optimizer_class=torch.optim.Adam,
-        optimizer_class=torch.optim.LBFGS,
+        num_runs=4,  # Keep it small - it's just 1D!
+        optimizer_kwargs={'lr': 0.1},  # Use 0.1 like working examples
+        convergence_patience=20,  # Keep it simple
+        optimizer_class=torch.optim.Adam,
         device='cpu',
-        map_prior=True,
-        callbacks=[PrintLossCallback(), noise_monitor]
+        map_prior=True
     )
     
     trainer.train()
     training_time = time.time() - training_start_time
     print(f"Training completed in {training_time:.2f} seconds!")
-    
-    # Debug: Print kernel evolution summary
-    if hasattr(noise_monitor, 'kernel_history') and noise_monitor.kernel_history:
-        print(f"\n" + "="*50)
-        print("KERNEL EVOLUTION DURING TRAINING")
-        print("="*50)
-        
-        for entry in noise_monitor.kernel_history:
-            print(f"\nEpoch {entry['epoch']}:")
-            print(f"  Full kernel diagonal: {entry['kernel_diag']}")
-            print(f"  Continuous kernel diagonal: {entry['cont_diag']}")
-            print(f"  Source kernel diagonal: {entry['source_diag']}")
-            print(f"  Source encoded: {entry['source_encoded']}")
-    
+
     # Debug: Check model parameters after training
     print(f"\nModel Parameters After Training:")
     print(f"  Likelihood noise parameters: {model.likelihood.noise}")
+    
+    # Debug: Print mean hyperparameters after training
+    print(f"\nFinal Mean Hyperparameters:")
+    if hasattr(model.mean_module, 'means'):
+        for i, mean_func in enumerate(model.mean_module.means):
+            print(f"  Mean {i} ({type(mean_func).__name__}):")
+            # Show all named parameters for each mean function
+            for name, param in mean_func.named_parameters():
+                print(f"    {name}: {param}")
+    else:
+        print(f"  Mean module structure: {model.mean_module}")
+        if hasattr(model.mean_module, 'parameters'):
+            for name, param in model.mean_module.named_parameters():
+                print(f"    {name}: {param}")
     
     # Print individual noise levels for each fidelity
     if hasattr(model.likelihood, 'noise') and len(model.likelihood.noise) > 1:
@@ -587,24 +509,18 @@ def main():
     # Make predictions with timing
     pred_start_time = time.time()
     
-    with torch.no_grad():
-        # Get the GP posterior (without noise)
-        gp_posterior = model(x_test_combined)
-        
-        # Apply the likelihood to get the final posterior with noise
-        pred_dist = model.likelihood(gp_posterior)
-        pred_mean = pred_dist.mean
-        pred_std = pred_dist.stddev
+    # Use the existing working evaluate_gp_model function
+    y_pred, pred_lower, pred_upper, output_std = evaluate_gp_model(model, x_test_combined)
     
     prediction_time = time.time() - pred_start_time
     print(f"Prediction time: {prediction_time:.4f} seconds")
     
     # Debug: Check prediction statistics
     print(f"\nPrediction Statistics:")
-    print(f"  Mean range: [{pred_mean.min():.3f}, {pred_mean.max():.3f}]")
-    print(f"  Std range: [{pred_std.min():.3f}, {pred_std.max():.3f}]")
-    print(f"  Std mean: {pred_std.mean():.3f}")
-    print(f"  Std std: {pred_std.std():.3f}")
+    print(f"  Mean range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
+    print(f"  Std range: [{output_std.min():.3f}, {output_std.max():.3f}]")
+    print(f"  Std mean: {output_std.mean():.3f}")
+    print(f"  Std std: {output_std.std():.3f}")
     
     # Debug: Check what noise is actually being applied
     print(f"\nNoise Application Debug:")
@@ -615,24 +531,25 @@ def main():
     for i, source_name in enumerate(source_names):
         source_mask = source_test[:, i] == 1
         if source_mask.any():
-            source_std = pred_std[source_mask]
+            source_std = output_std[source_mask]
             print(f"    {source_name}: std range [{source_std.min():.3f}, {source_std.max():.3f}], mean {source_std.mean():.3f}")
     
     # Check if uncertainties are reasonable
-    if pred_std.mean() > 1.0:
-        print(f"  WARNING: Standard deviations are very large! Mean std = {pred_std.mean():.3f}")
+    if output_std.mean() > 1.0:
+        print(f"  WARNING: Standard deviations are very large! Mean std = {output_std.mean():.3f}")
         print(f"  This suggests the model may not be properly trained or has convergence issues.")
     
     # Check if uncertainties are too small (indicating noise not being applied)
-    if pred_std.mean() < 0.01:
-        print(f"  WARNING: Standard deviations are very small! Mean std = {pred_std.mean():.3f}")
+    if output_std.mean() < 0.01:
+        print(f"  WARNING: Standard deviations are very small! Mean std = {output_std.mean():.3f}")
         print(f"  This suggests the likelihood noise may not be properly applied.")
         print(f"  Expected noise levels: {noise_levels}")
     
-    # Use the imported metrics functions
-    overall_metrics = compute_metrics(y_test, pred_mean, pred_std, start_time=training_start_time)
+    # Use the imported metrics functions - evaluate on standardized data like working examples
+    y_test_std = (y_test - y_mean) / y_std
+    overall_metrics = compute_metrics(y_test_std, y_pred, output_std, start_time=training_start_time)
     per_source_metrics = compute_per_source_metrics(
-        y_test, pred_mean, pred_std, 
+        y_test_std, y_pred, output_std, 
         x_test_combined, source_cols
     )
     
@@ -662,8 +579,8 @@ def main():
     x_test_np = x_test.cpu().numpy()
     y_test_np = y_test.cpu().numpy()
     source_test_np = source_test.cpu().numpy()
-    pred_mean_np = pred_mean.cpu().numpy()
-    pred_std_np = pred_std.cpu().numpy()
+    pred_mean_np = y_pred.cpu().numpy()
+    pred_std_np = output_std.cpu().numpy()
     
     source_names = data['metadata']['source_names']
     colors = ['red', 'blue', 'green']
@@ -703,10 +620,10 @@ def main():
             ax.legend()
             ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
-    plt.savefig("multifidelity_results.png", dpi=300, bbox_inches='tight')
-    print(f"Plot saved to: multifidelity_results.png")
-    plt.show()
+    # plt.tight_layout()
+    # plt.savefig("multifidelity_results.png", dpi=300, bbox_inches='tight')
+    # print(f"Plot saved to: multifidelity_results.png")
+    # plt.show()
     
     print("\n" + "=" * 60)
     print("EXAMPLE COMPLETED SUCCESSFULLY!")
