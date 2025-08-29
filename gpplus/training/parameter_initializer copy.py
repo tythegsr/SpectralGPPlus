@@ -94,8 +94,8 @@ class DefaultParameterInitializer(ParameterInitializer):
         if "outputscale" in name:
             return {
                 'method': 'uniform',
-                'lower': 0.1,
-                'upper': 2.0,
+                'lower': 1e-6,
+                'upper': 1e0,
                 'description': 'Kernel outputscale'
             }
         
