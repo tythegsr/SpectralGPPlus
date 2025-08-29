@@ -78,8 +78,6 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                 # New multiple group format
                 multiple_groups = True
                 cat_encoders = []
-                cat_kernels = []
-                cat_cols_groups = []
                 
                 # Process each categorical group
                 for i, cat_group in enumerate(cat_cols):
@@ -88,8 +86,6 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                         cat_group = list(cat_group)
                     elif not isinstance(cat_group, (list, tuple)):
                         cat_group = [cat_group]
-                    
-                    cat_cols_groups.append(cat_group)
                     
                     # Determine encoder type for this group
                     if isinstance(cat_encoder, str):
@@ -121,37 +117,22 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                             encoder = OneHotToLatent(len(cat_group))
                     
                     cat_encoders.append(encoder)
-                    
-                    # Create kernel for this group - use same logic for all cat variables
-                    if cat_kernel is None:
-                        if hasattr(encoder, 'projection_matrix'):  # Matrix encoder
-                            # Use HybridKernel for matrix encoders
-                            kernel = HybridKernel(
-                                z_dim=encoder.z_dim,
-                                combination_method=cat_combination_method,
-                                rbf_lengthscale=1.0
-                            )
-                        else:  # Neural network encoder
-                            gauss_k_cat = GaussianKernel(ard_num_dims=encoder.z_dim)
-                            gauss_k_cat.lengthscale.requires_grad_(False)  # Fix lengthscale
-                            gauss_k_cat.lengthscale.data = torch.ones(encoder.z_dim) * 0.0  # Fixed lengthscale
-                            kernel = gauss_k_cat
-                    else:
-                        kernel = cat_kernel
-                    
-                    cat_kernels.append(kernel)
                 
-                # For multiple groups, we don't use final_cat_kernel/final_cat_encoder
-                # They are only used for single group case
-                final_cat_encoder = None
-                final_cat_kernel = None
-                    
+                # Create a single shared kernel for all categorical groups
+                if cat_kernel is None:
+                    # Use the first encoder's z_dim (assuming they're all the same)
+                    shared_gauss_k = GaussianKernel(ard_num_dims=cat_encoders[0].z_dim)
+                    shared_gauss_k.lengthscale.requires_grad_(False)  # Fix lengthscale
+                    shared_gauss_k.lengthscale.data = torch.ones(cat_encoders[0].z_dim) * 0.0  # Fixed lengthscale
+                    final_cat_kernel = shared_gauss_k
+                else:
+                    final_cat_kernel = cat_kernel
+                
+                # For multiple groups, final_cat_encoder is the list of individual encoders
+                final_cat_encoder = cat_encoders
             else:
                 # Original single group format - keep existing behavior
                 multiple_groups = False
-                cat_cols_groups = []
-                cat_encoders = []
-                cat_kernels = []
                 
                 # Initialize encoder
                 if cat_encoder is None:
@@ -168,28 +149,17 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                 
                 # Initialize kernel
                 if cat_kernel is None:
-                    if hasattr(final_cat_encoder, 'projection_matrix'):  # Matrix encoder
-                        # Use HybridKernel for matrix encoders
-                        final_cat_kernel = HybridKernel(
-                            z_dim=final_cat_encoder.z_dim,
-                            combination_method=cat_combination_method,
-                            rbf_lengthscale=1.0
-                        )
-                    else:  # Neural network encoder
-                        gauss_k_cat = GaussianKernel(ard_num_dims=encoder.z_dim)
-                        gauss_k_cat.lengthscale.requires_grad_(False)  # Fix lengthscale
-                        gauss_k_cat.lengthscale.data = torch.ones(encoder.z_dim) * 0.0  # Fixed lengthscale
-                        final_cat_kernel = gauss_k_cat
+                    gauss_k_cat = GaussianKernel(ard_num_dims=final_cat_encoder.z_dim)
+                    gauss_k_cat.lengthscale.requires_grad_(False)  # Fix lengthscale
+                    gauss_k_cat.lengthscale.data = torch.ones(final_cat_encoder.z_dim) * 0.0  # Fixed lengthscale
+                    final_cat_kernel = gauss_k_cat
                 else:
                     final_cat_kernel = cat_kernel
         else:
             has_cat = False
             multiple_groups = False
-            cat_cols_groups = []
-            cat_encoders = []
-            cat_kernels = []
-            final_cat_encoder = None
-            final_cat_kernel = None
+            final_cat_encoder = cat_encoder
+            final_cat_kernel = cat_kernel
         
         # Only initialize source kernel and encoder if there are multiple sources
         has_source = len(source_cols) > 1
@@ -202,16 +172,10 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
             
             # Initialize kernel
             if source_kernel is None:
-                if hasattr(final_source_encoder, 'projection_matrix'):
-                    # Use HybridKernel for matrix encoders
-                    final_source_kernel = HybridKernel(
-                        z_dim=final_source_encoder.z_dim,
-                    )
-                else:  # Neural network encoder
-                    gauss_k_source = GaussianKernel(ard_num_dims=final_source_encoder.z_dim)
-                    gauss_k_source.lengthscale.requires_grad_(False)
-                    gauss_k_source.lengthscale.data = torch.ones(final_source_encoder.z_dim) * 0.0
-                    final_source_kernel = gauss_k_source
+                gauss_k_source = GaussianKernel(ard_num_dims=final_source_encoder.z_dim)
+                gauss_k_source.lengthscale.requires_grad_(False)
+                gauss_k_source.lengthscale.data = torch.ones(final_source_encoder.z_dim) * 0.0
+                final_source_kernel = gauss_k_source
             else:
                 final_source_kernel = source_kernel
         else:
@@ -233,9 +197,8 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
         self.has_cat = has_cat
         self.has_source = has_source
         self.multiple_groups = multiple_groups
-        self.cat_cols_groups = cat_cols_groups
-        self.cat_encoders = cat_encoders
-        self.cat_kernels = cat_kernels
+
+        
         
         # NOW register all modules in consistent order
         self._register_all_modules()
@@ -255,34 +218,30 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
         Register all modules in a consistent order to ensure predictable model structure.
         This method is called at the end of __init__ to guarantee consistent ordering.
         """
-        # Always register in the same order: cont_kernel -> source_kernel -> source_encoder -> categorical components
+        # Always register in the same order: continuous → source → categorical
         
-        # 1. Continuous kernel (if exists)
+        # 1. Continuous components
         if self.has_cont and self.cont_kernel is not None:
             self.register_module("cont_kernel", self.cont_kernel)
         
-        # 2. Source kernel (if exists)
+        # 2. Source components
         if self.has_source and self.source_kernel is not None:
             self.register_module("source_kernel", self.source_kernel)
-        
-        # 3. Source encoder (if exists)
         if self.has_source and self.source_encoder is not None:
             self.register_module("source_encoder", self.source_encoder)
         
-        # 4. Categorical components (if exist)
+        # 3. Categorical components
+        if self.has_cat and self.cat_kernel is not None:
+            self.register_module("cat_kernel", self.cat_kernel)
         if self.has_cat:
             if self.multiple_groups:
-                # Register multiple group encoders and kernels
-                for i, encoder in enumerate(self.cat_encoders):
+                # Register multiple group encoders
+                for i, encoder in enumerate(self.cat_encoder):
                     self.register_module(f"cat_encoder_{i}", encoder)
-                for i, kernel in enumerate(self.cat_kernels):
-                    self.register_module(f"cat_kernel_{i}", kernel)
             else:
-                # Register single group encoder and kernel
+                # Register single group encoder
                 if self.cat_encoder is not None:
                     self.register_module("cat_encoder", self.cat_encoder)
-                if self.cat_kernel is not None:
-                    self.register_module("cat_kernel", self.cat_kernel)
         
     def forward(self, x1, x2=None, diag=False, **kwargs):
         device = x1.device
@@ -322,17 +281,17 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
 
         if self.has_cat:
             if self.multiple_groups:
-                # Multiple groups - compute kernel for each group
-                for i, (encoder, kernel, col_group) in enumerate(zip(self.cat_encoders, self.cat_kernels, self.cat_cols_groups)):
+                # Multiple groups - compute kernel for each group using shared kernel
+                for i, (encoder, col_group) in enumerate(zip(self.cat_encoder, self.cat_cols)):
                     # Extract columns for this group
                     col_tensor = torch.tensor(col_group, dtype=torch.long, device=device)
                     x1_group = x1.index_select(-1, col_tensor)
                     x2_group = x2.index_select(-1, col_tensor)
                     
-                    # Encode and compute kernel for this group
+                    # Encode and compute kernel for this group using shared kernel
                     z1_c = encoder(x1_group)
                     z2_c = encoder(x2_group)
-                    k_cat_group = kernel(z1_c, z2_c, diag=diag, **kwargs)
+                    k_cat_group = self.cat_kernel(z1_c, z2_c, diag=diag, **kwargs)
                     
                     # Combine with existing result
                     if i == 0:
