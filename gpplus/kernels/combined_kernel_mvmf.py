@@ -134,7 +134,7 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                         else:  # Neural network encoder
                             gauss_k_cat = GaussianKernel(ard_num_dims=encoder.z_dim)
                             gauss_k_cat.lengthscale.requires_grad_(False)  # Fix lengthscale
-                            gauss_k_cat.lengthscale.data = torch.ones(encoder.z_dim) * 1.0  # Fixed lengthscale
+                            gauss_k_cat.lengthscale.data = torch.ones(encoder.z_dim) * 0.0  # Fixed lengthscale
                             kernel = gauss_k_cat
                     else:
                         kernel = cat_kernel
@@ -176,14 +176,10 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                             rbf_lengthscale=1.0
                         )
                     else:  # Neural network encoder
-                        rbf = RBFKernel(ard_num_dims=final_cat_encoder.z_dim)
-                        rbf.raw_lengthscale.requires_grad_(False)  # Fix lengthscale
-                        rbf.lengthscale = torch.ones(final_cat_encoder.z_dim) * 1.0  # Fixed lengthscale
-                        rbf_kernel = ScaleKernel(
-                            rbf,
-                            outputscale_constraint=gpytorch.constraints.Interval(1e-6, 1e4)
-                        )
-                        final_cat_kernel = rbf_kernel
+                        gauss_k_cat = GaussianKernel(ard_num_dims=encoder.z_dim)
+                        gauss_k_cat.lengthscale.requires_grad_(False)  # Fix lengthscale
+                        gauss_k_cat.lengthscale.data = torch.ones(encoder.z_dim) * 0.0  # Fixed lengthscale
+                        final_cat_kernel = gauss_k_cat
                 else:
                     final_cat_kernel = cat_kernel
         else:
