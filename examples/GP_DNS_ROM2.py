@@ -1,33 +1,34 @@
+import argparse
 import random
-import matplotlib.pyplot as plt
-import torch
-import numpy as np
 import sys
 
-import argparse
-import pandas as pd
 # from _GITBO import *
 import warnings
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+
 warnings.filterwarnings("ignore")
-
-import gpytorch
-import gpplus
-from gpplus.models import GPR
-from gpplus.TestProblems_Utils import *
-
 
 import time
 from datetime import datetime
-from gpplus.training.eval import evaluate_gp_model
-from gpplus.utils.one_hot_to_latent_nn import OneHotToLatent
-from gpplus.utils.matrix_encoder import MatrixEncoder, SourceMatrixEncoder
 
+import gpytorch
+
+import gpplus
+from gpplus.models import GPR
+from gpplus.TestProblems_Utils import *
+from gpplus.training.eval import evaluate_gp_model
+from gpplus.utils.matrix_encoder import MatrixEncoder, SourceMatrixEncoder
+from gpplus.utils.one_hot_to_latent_nn import OneHotToLatent
 
 if torch.cuda.is_available():
-    device = 'cuda'
+    device = "cuda"
 else:
-    device = 'cpu'
-    
+    device = "cpu"
+
 
 def compute_metrics(y_true, y_hat, output_std=None):
     # Basic metrics
@@ -37,7 +38,7 @@ def compute_metrics(y_true, y_hat, output_std=None):
         y_hat = y_hat.detach().cpu().numpy().reshape(-1)
     if output_std is not None and isinstance(output_std, torch.Tensor):
         output_std = output_std.detach().cpu().numpy().reshape(-1)
-        
+
     metrics = {
         "Time": time.time() - t1,
         "RRMSE": np.sqrt(mean_squared_error(y_true, y_hat)) / y_true.std(),
@@ -59,12 +60,12 @@ def compute_metrics(y_true, y_hat, output_std=None):
         NIS = interval_score.mean() / y_true.std()
         metrics["NIS"] = NIS
         return metrics
-    
+
+
 import numpy as np
 import torch
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error, root_mean_squared_error, r2_score
-
 
 print("DNS Dataset, GP")
 
@@ -103,10 +104,10 @@ data_rest = torch.cat([data_all[:, :-2], data_all[:, -1:]], dim=1)
 # Concatenate one-hot and original data (drop the original column 3 before concatenating)
 print("Source feature OH encoded")
 data_OH = torch.cat([one_hot, data_rest], dim=1)
-X = data_OH[:,:-1]
+X = data_OH[:, :-1]
 X_np = np.array(X)
 
-Y = data_OH[:,-1]
+Y = data_OH[:, -1]
 # print("Without standardizing y-output target")
 
 # Y_mean = Y.mean()
@@ -115,14 +116,14 @@ Y = data_OH[:,-1]
 # Y = (Y - Y_mean) / Y_std
 # print("WITH standardizing y-output target before splitting")
 
-num_epochs=100
+num_epochs = 100
 num_runs = 8
-lr = .1
+lr = 0.1
 
-full_metrics=[]
+full_metrics = []
 i = 0
 t0 = time.time()
-for seed in range(42,44):
+for seed in range(42, 44):
     t1 = time.time()
     i += 1
     np.random.seed(seed)
@@ -136,11 +137,7 @@ for seed in range(42,44):
     #        )
     # print("Using A matrix encoder")
 
-    source_architecture = {
-        'hidden_dims': [],
-        'activation': 'hardtanh',
-        'dropout': 0.0
-    }
+    source_architecture = {"hidden_dims": [], "activation": "hardtanh", "dropout": 0.0}
     # use_probabilistic_embedding = True
     # n_samples = 10 if use_probabilistic_embedding else 1
     # source_encoder = None
@@ -156,9 +153,9 @@ for seed in range(42,44):
         # dtype=torch.float32
     )
     print("Using MLP encoder")
-    
+
     kernel = gpplus.kernels.CombinedKernel_MVMF(
-        cont_cols=np.arange(4,10),
+        cont_cols=np.arange(4, 10),
         # cat_cols=[],
         source_cols=np.arange(0, 4),
         # cat_encoder=cat_encoder,
@@ -167,34 +164,34 @@ for seed in range(42,44):
         source_combination_method="product",
         # cont_kernel=gpplus.kernels.gaussian_kernel.GaussianKernel(ard_num_dims=6),
         source_kernel=gpplus.kernels.gaussian_kernel.GaussianKernel(),
-        )
+    )
     print("source kernel only")
     X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=seed)
     X_train = X_train.to(torch.float32)
-    X_test  = X_test.to(torch.float32)
+    X_test = X_test.to(torch.float32)
     y_train = y_train.to(torch.float32)
-    y_test  = y_test.to(torch.float32)
+    y_test = y_test.to(torch.float32)
     y_train_std = y_train.std().item()
 
     # cont_cols = torch.arange(4,10, device=device)
     # # Example to skip one-hot columns at the end:
     # # cont_cols = torch.arange(X_train.shape[1] - n_onehot, device=device)
-    
+
     # # ---- fit scaler on TRAIN ONLY
     # mu_X   = X_train[:, cont_cols].mean(dim=0)
     # std_X  = X_train[:, cont_cols].std(dim=0).clamp_min(1e-8)
-    
+
     y_mean = y_train.mean()
-    y_std  = y_train.std().clamp_min(1e-8)
-    
+    y_std = y_train.std().clamp_min(1e-8)
+
     # # ---- transform X and y (use TRAIN stats for both train & test)
     # X_train_std = X_train.clone()
     # X_test_std  = X_test.clone()
     # X_train_std[:, cont_cols] = (X_train[:, cont_cols] - mu_X) / std_X
     # X_test_std[:,  cont_cols] = (X_test[:,  cont_cols] - mu_X) / std_X
-    
+
     y_train_std = (y_train - y_mean) / y_std
-    y_test_std  = (y_test  - y_mean) / y_std
+    y_test_std = (y_test - y_mean) / y_std
     y_train_std2 = y_train_std.std().item()
     # xnp2=np.array(X_train_std.cpu())
     # ---- (optional) set a LogNormal prior on noise variance in standardized space
@@ -205,33 +202,37 @@ for seed in range(42,44):
     prior_mean = np.log(y_train_std2**2)
     noise_prior = gpytorch.priors.LogNormalPrior(loc=prior_mean, scale=1.0)
     from gpytorch.constraints import GreaterThan
-    model = GPR(X_train, y_train_std, 
-                # kernel_module=gpplus.kernels.gaussian_kernel.GaussianKernel(lengthscale_constraint=Interval(-6, 4)),
-                # kernel_module = gpplus.kernels.gaussian_kernel.GaussianKernel(ard_num_dims=X_train.shape[1]),
-                # kernel_module = gpytorch.kernels.RBFKernel(),
-                kernel_module = kernel,
-                mean_module = gpplus.means.MultipleMean(encoded_cols=np.arange(0,4)),
-                # mean_module=gpytorch.means.ZeroMean(),
-                likelihood=gpytorch.likelihoods.GaussianLikelihood(noise_constraint = GreaterThan(1e-6), noise_prior=noise_prior), 
-                seed=seed)
 
-    if i == 1:  
+    model = GPR(
+        X_train,
+        y_train_std,
+        # kernel_module=gpplus.kernels.gaussian_kernel.GaussianKernel(lengthscale_constraint=Interval(-6, 4)),
+        # kernel_module = gpplus.kernels.gaussian_kernel.GaussianKernel(ard_num_dims=X_train.shape[1]),
+        # kernel_module = gpytorch.kernels.RBFKernel(),
+        kernel_module=kernel,
+        mean_module=gpplus.means.MultipleMean(encoded_cols=np.arange(0, 4)),
+        # mean_module=gpytorch.means.ZeroMean(),
+        likelihood=gpytorch.likelihoods.GaussianLikelihood(noise_constraint=GreaterThan(1e-6), noise_prior=noise_prior),
+        seed=seed,
+    )
+
+    if i == 1:
         print(model)
     print("Cont kernel lengthscale:", model.covar_module.cont_kernel.lengthscale)
-    print("Cont kernel lengthscale requires_grad:", model.covar_module.cont_kernel.lengthscale.requires_grad)   
+    print("Cont kernel lengthscale requires_grad:", model.covar_module.cont_kernel.lengthscale.requires_grad)
     trainer = gpplus.training.GPTrainer(
         model=model,
         num_epochs=num_epochs,
         seed=seed,
-        num_runs=num_runs, #<-----
+        num_runs=num_runs,  # <-----
         optimizer_kwargs={
-            'lr': lr,
+            "lr": lr,
             # 'weight_decay': 1e-4,
             # 'eps': 1e-8,
         },
         convergence_patience=50,
         optimizer_class=torch.optim.Adam,
-        device='cpu',
+        device="cpu",
         map_prior=True,
         # scheduler = .95
         # optimizer_kwargs = {"lr": 1, "line_search_fn": "strong_wolfe"},
@@ -242,7 +243,7 @@ for seed in range(42,44):
     results = trainer.train()  # Returns a dict of results; you might store if needed.
     # y_pred, pred_lower, pred_upper, output_std = evaluate_gp_model(model, X_test)
     print("Cont kernel lengthscale:", model.covar_module.cont_kernel.lengthscale)
-    print("Cont kernel lengthscale requires_grad:", model.covar_module.cont_kernel.lengthscale.requires_grad) 
+    print("Cont kernel lengthscale requires_grad:", model.covar_module.cont_kernel.lengthscale.requires_grad)
     y_pred_std, pred_lower_std, pred_upper_std, output_std_std = evaluate_gp_model(model, X_test)
     # y_pred     = y_pred_std * y_std + y_mean
     # pred_lower = pred_lower_std * y_std + y_mean
@@ -253,8 +254,8 @@ for seed in range(42,44):
     for k, v in metric.items():
         print(f"{k}: {v:.4f}")
     full_metrics.append(metric)
-        
-print(f"\nTime: {time.time()-t0:.2f} s\n({num_runs} runs. Lr = {lr}. {num_epochs} epochs)")
+
+print(f"\nTime: {time.time() - t0:.2f} s\n({num_runs} runs. Lr = {lr}. {num_epochs} epochs)")
 df_metrics = pd.DataFrame(full_metrics)
 
 # Calculate the mean for each metric across all seeds
@@ -269,7 +270,7 @@ for metric in avg_metrics.keys():
     mean_val = avg_metrics[metric]
     std_val = std_metrics[metric]
     print(f"{metric}: {mean_val:.6f} ± {std_val:.6f}")
-print('\n')
+print("\n")
 
 # full_metrics=[]
 # i = 0
@@ -308,7 +309,7 @@ print('\n')
 #     #     # dtype=torch.float32
 #     # )
 #     # print("Using MLP encoder")
-    
+
 #     kernel = gpplus.kernels.CombinedKernel_MVMF(
 #         cont_cols=np.arange(4,10),
 #         cat_cols=[],
@@ -330,20 +331,20 @@ print('\n')
 #     # cont_cols = torch.arange(4,10, device=device)
 #     # # Example to skip one-hot columns at the end:
 #     # # cont_cols = torch.arange(X_train.shape[1] - n_onehot, device=device)
-    
+
 #     # # ---- fit scaler on TRAIN ONLY
 #     # mu_X   = X_train[:, cont_cols].mean(dim=0)
 #     # std_X  = X_train[:, cont_cols].std(dim=0).clamp_min(1e-8)
-    
+
 #     y_mean = y_train.mean()
 #     y_std  = y_train.std().clamp_min(1e-8)
-    
+
 #     # # ---- transform X and y (use TRAIN stats for both train & test)
 #     # X_train_std = X_train.clone()
 #     # X_test_std  = X_test.clone()
 #     # X_train_std[:, cont_cols] = (X_train[:, cont_cols] - mu_X) / std_X
 #     # X_test_std[:,  cont_cols] = (X_test[:,  cont_cols] - mu_X) / std_X
-    
+
 #     y_train_std = (y_train - y_mean) / y_std
 #     y_test_std  = (y_test  - y_mean) / y_std
 #     y_train_std2 = y_train_std.std().item()
@@ -356,14 +357,14 @@ print('\n')
 #     prior_mean = np.log(y_train_std2**2)
 #     noise_prior = gpytorch.priors.LogNormalPrior(loc=prior_mean, scale=1.0)
 #     from gpytorch.constraints import GreaterThan
-#     model = GPR(X_train, y_train_std, 
+#     model = GPR(X_train, y_train_std,
 #                 # kernel_module=gpplus.kernels.gaussian_kernel.GaussianKernel(lengthscale_constraint=Interval(-6, 4)),
 #                 # kernel_module = gpplus.kernels.gaussian_kernel.GaussianKernel(ard_num_dims=X_train.shape[1]),
 #                 # kernel_module = gpytorch.kernels.RBFKernel(),
 #                 kernel_module = kernel,
 #                 mean_module = gpplus.means.MultipleMean(encoded_cols=np.arange(0,4)),
 #                 # mean_module=gpytorch.means.ZeroMean(),
-#                 likelihood=gpytorch.likelihoods.GaussianLikelihood(noise_constraint = GreaterThan(1e-6), noise_prior=noise_prior), 
+#                 likelihood=gpytorch.likelihoods.GaussianLikelihood(noise_constraint = GreaterThan(1e-6), noise_prior=noise_prior),
 #                 seed=seed)
 
 #     print(model)
@@ -399,7 +400,7 @@ print('\n')
 #     for k, v in metric.items():
 #         print(f"{k}: {v:.4f}")
 #     full_metrics.append(metric)
-        
+
 # print(f"Time: {time.time()-t0:.2f} s ({num_runs} runs. Lr = {lr})")
 # df_metrics = pd.DataFrame(full_metrics)
 

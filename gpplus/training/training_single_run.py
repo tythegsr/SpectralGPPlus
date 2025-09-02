@@ -27,7 +27,7 @@ class GPTrainerSingleProcess:
         map_prior: bool = False,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
-        scheduler = False
+        scheduler=False,
     ):
         self.model = model
         self.optimizer_class = optimizer_class
@@ -53,7 +53,7 @@ class GPTrainerSingleProcess:
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
         if self.scheduler is True:
-            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=.95)
+            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
         elif self.scheduler is not False:
             self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.scheduler)
         # Create mll instance

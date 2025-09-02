@@ -1,19 +1,21 @@
+import math
+
+import gpytorch
 import torch
 import torch.nn as nn
-import gpytorch
-import math
-import torch.nn.functional as F 
-
+import torch.nn.functional as F
 
 
 class OneHotToLatent(gpytorch.Module):
-    def __init__(self, input_dim, architecture_config=None, z_dim=2, num_passes=1, num_passes_pred=None, probabilistic = False):
+    def __init__(
+        self, input_dim, architecture_config=None, z_dim=2, num_passes=1, num_passes_pred=None, probabilistic=False
+    ):
         super().__init__()
         self.input_dim = input_dim
         self.z_dim = z_dim
         self.num_passes = num_passes
         self.is_probabilistic = probabilistic
-        
+
         """
         OneHot: A module for encoding categorical (one-hot) features into a latent space, 
         with support for both deterministic and probabilistic encoders.
@@ -58,103 +60,101 @@ class OneHotToLatent(gpytorch.Module):
                 - If deterministic: Latent embedding of input.
         """
         if self.z_dim != 2:
-            raise NotImplementedError("Current class only supports 2D embeddings. Higher D still needs to be implemented!")
+            raise NotImplementedError(
+                "Current class only supports 2D embeddings. Higher D still needs to be implemented!"
+            )
         # self.is_probabilistic = probabilistic
-        if (num_passes_pred is None) or (num_passes==1):
+        if (num_passes_pred is None) or (num_passes == 1):
             self.num_passes_pred = self.num_passes
         else:
             self.num_passes_pred = self.num_passes
 
         if architecture_config is None:
-            architecture_config = {
-                'hidden_dims': [],
-                'activation': 'relu',
-                'dropout': None
-            }
+            architecture_config = {"hidden_dims": [], "activation": "relu", "dropout": None}
 
         activation_map = {
-            'relu': nn.ReLU(),
-            'tanh': nn.Tanh(),
-            'sigmoid': nn.Sigmoid(),
-            'leaky_relu': nn.LeakyReLU(),
-            'elu': nn.ELU(),
-            'hardtanh': nn.Hardtanh(),
+            "relu": nn.ReLU(),
+            "tanh": nn.Tanh(),
+            "sigmoid": nn.Sigmoid(),
+            "leaky_relu": nn.LeakyReLU(),
+            "elu": nn.ELU(),
+            "hardtanh": nn.Hardtanh(),
         }
-        activation = activation_map.get(architecture_config['activation'].lower(), nn.ReLU())
+        activation = activation_map.get(architecture_config["activation"].lower(), nn.ReLU())
 
         encoder_layers = []
         prev_dim = input_dim
-        for hidden_dim in architecture_config['hidden_dims']:
+        for hidden_dim in architecture_config["hidden_dims"]:
             encoder_layers.append(nn.Linear(prev_dim, hidden_dim))
             encoder_layers.append(activation)
-            if architecture_config.get('dropout'):
-                encoder_layers.append(nn.Dropout(architecture_config['dropout']))
+            if architecture_config.get("dropout"):
+                encoder_layers.append(nn.Dropout(architecture_config["dropout"]))
             prev_dim = hidden_dim
-            
-        if self.is_probabilistic: # Multiple forward passes, Probabilistic version
+
+        if self.is_probabilistic:  # Multiple forward passes, Probabilistic version
             # direct projection: just the Linear
-            self.fci = Linear_VAE(in_features=input_dim, out_features=5, bias=True, name='fci')
-        
+            self.fci = Linear_VAE(in_features=input_dim, out_features=5, bias=True, name="fci")
+
             # Dynamically create h1, h2, ... based on hidden_dims
-            self.hidden_layers = architecture_config['hidden_dims']
-            
+            self.hidden_layers = architecture_config["hidden_dims"]
+
             if len(self.hidden_layers) == 1:
-                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name='fce')
-                
+                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name="fce")
+
             if len(self.hidden_layers) > 1:
                 prev_dim = 5  # fci out_features
 
                 for i, hidden_dim in enumerate(self.hidden_layers):
-                    if i >= 1: 
+                    if i >= 1:
                         name = f"h{i}"
                         layer = Linear_VAE(prev_dim, hidden_dim, name=name)
                         setattr(self, name, layer)
                         # self.hidden_layers.append(name)
                         prev_dim = hidden_dim
-                        
-                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name='fce')
-        
-        else: # Determinisitic version (n_passes = 1)
+
+                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name="fce")
+
+        else:  # Determinisitic version (n_passes = 1)
             inner_layers = []
             prev_dim = input_dim
-        
-            for hidden_dim in architecture_config['hidden_dims']:
+
+            for hidden_dim in architecture_config["hidden_dims"]:
                 inner_layers.append(nn.Linear(prev_dim, hidden_dim))
                 inner_layers.append(activation)
-                if architecture_config.get('dropout'):
-                    inner_layers.append(nn.Dropout(architecture_config['dropout']))
+                if architecture_config.get("dropout"):
+                    inner_layers.append(nn.Dropout(architecture_config["dropout"]))
                 prev_dim = hidden_dim
-        
+
             parameter_head = nn.Linear(prev_dim, self.z_dim)
             self.fci = nn.Sequential(*inner_layers, parameter_head)
-
 
     # def forward(self, x_onehot, num_passes=1, epsilon=None):
     def forward(self, x, epsilon=None, visualize=False):
         if self.is_probabilistic:
             if x.dim() > 1:
-                xtemp,  inverse_indices = torch.unique(x, dim=0, return_inverse=True)  # shape [S, onehot_dim]
-            else: xtemp = x 
+                xtemp, inverse_indices = torch.unique(x, dim=0, return_inverse=True)  # shape [S, onehot_dim]
+            else:
+                xtemp = x
             if len(self.hidden_layers) > 0:
                 xtemp = self.fci(xtemp)
-                for i in range(len(self.hidden_layers)-1):
-                    xtemp = F.relu(getattr(self, f'h{i+1}')(xtemp))
+                for i in range(len(self.hidden_layers) - 1):
+                    xtemp = F.relu(getattr(self, f"h{i + 1}")(xtemp))
                 out = self.fce(xtemp)
             else:
                 out = self.fci(xtemp)
-                
+
             if epsilon is None:
                 epsilon = torch.normal(mean=0, std=1, size=[self.input_dim, 2], device=x.device, dtype=x.dtype)
 
             if x.dim() > 1:
                 Mu_1 = out[:, 0:1]
                 Mu_2 = out[:, 1:2]
-                L21  = out[:, 2:3]
+                L21 = out[:, 2:3]
                 L11 = torch.abs(out[:, 3:4])
                 L22 = torch.abs(out[:, 4:5])
                 epsilon_1 = epsilon[:, 0:1]
                 epsilon_2 = epsilon[:, 1:2]
-                    
+
                 z1 = Mu_1 + L11 * epsilon_1
                 z2 = Mu_2 + L21 * epsilon_1 + L22 * epsilon_2
                 z = torch.cat([z1, z2], dim=1)
@@ -167,13 +167,14 @@ class OneHotToLatent(gpytorch.Module):
         else:
             return self.fci(x)
 
+
 class Linear_VAE(gpytorch.Module):
     def __init__(self, in_features, out_features, bias=True, name=None):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.name = str(name) if name is not None else ""
-        
+
         """
         Linear_VAE: A linear layer with learnable weight and bias parameters 
         that supports prior distributions for Bayesian inference.
@@ -215,23 +216,14 @@ class Linear_VAE(gpytorch.Module):
             >>> print(output.shape)  # torch.Size([10, 5])
         """
 
-
         # Weight
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        self.register_prior(
-            f"{self.name}_prior_weight",
-            gpytorch.priors.NormalPrior(0., 0.2),
-            lambda m: m.weight
-        )
+        self.register_prior(f"{self.name}_prior_weight", gpytorch.priors.NormalPrior(0.0, 0.2), lambda m: m.weight)
 
         # Bias
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
-            self.register_prior(
-                f"{self.name}_prior_bias",
-                gpytorch.priors.NormalPrior(0., 0.05),
-                lambda m: m.bias
-            )
+            self.register_prior(f"{self.name}_prior_bias", gpytorch.priors.NormalPrior(0.0, 0.05), lambda m: m.bias)
         else:
             self.bias = None
 
@@ -248,6 +240,5 @@ class Linear_VAE(gpytorch.Module):
         input = input.to(self.weight.dtype)
         return nn.functional.linear(input, self.weight, self.bias)
 
-
     def extra_repr(self):
-        return f'in_features={self.in_features}, out_features={self.out_features}'
+        return f"in_features={self.in_features}, out_features={self.out_features}"

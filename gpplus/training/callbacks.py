@@ -1,8 +1,9 @@
+import logging
 from abc import ABC
 from typing import Any, TypedDict
-import logging
 
 logger = logging.getLogger("gpplus")  # Use your package-wide logger
+
 
 class CallbackOnEpochStartContext(TypedDict):
     epoch: int

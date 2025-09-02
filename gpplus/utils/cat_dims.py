@@ -1,4 +1,3 @@
-
 def get_categorical_dims(qual_dict, discrete_cols=None, original_columns=None):
     """Returns categorical dimensions in proper order"""
     if discrete_cols is not None and original_columns is not None:

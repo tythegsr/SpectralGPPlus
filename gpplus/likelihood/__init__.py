@@ -1,1 +1,1 @@
-from .multi_noise import MultiNoise, MultiLikelihood
+from .multi_noise import MultiLikelihood, MultiNoise

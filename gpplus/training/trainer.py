@@ -36,7 +36,7 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
-        scheduler = False, # Can be False, True, or a value between 0-1
+        scheduler=False,  # Can be False, True, or a value between 0-1
         num_epochs: int = 50,
         convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
@@ -104,7 +104,7 @@ class GPTrainer:
             logger.warning("No optimizer arguments passed. Defaulting to learning rate of 0.01")
         else:
             self.optimizer_kwargs = optimizer_kwargs
-        
+
         # Handle MLL class
         if mll_class is None:
             # Use the GPytorch MLL (marginal log likelihood) as the loss function
@@ -145,7 +145,7 @@ class GPTrainer:
             callbacks=self.callbacks,
             device=self.device,
             map_prior=self.map_prior,
-            scheduler = self.scheduler
+            scheduler=self.scheduler,
         )
         train_result = run.train()
         return {"run_index": run_index, "initial_state_dict": initial_state_dict, **train_result}
@@ -180,6 +180,7 @@ class GPTrainer:
                     "loss": None,
                     "error": str(e),
                 }
+
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
             max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))

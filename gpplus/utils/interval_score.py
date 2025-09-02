@@ -1,10 +1,8 @@
 import torch
 
+
 def compute_interval_score(
-    y_true: torch.Tensor,
-    lower_bound: torch.Tensor,
-    upper_bound: torch.Tensor,
-    confidence_level: float = 0.95
+    y_true: torch.Tensor, lower_bound: torch.Tensor, upper_bound: torch.Tensor, confidence_level: float = 0.95
 ):
     """
     Compute the interval score:
