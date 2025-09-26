@@ -231,6 +231,8 @@ model = GPR(
 num_epochs = 10000
 num_runs = 4
 lr = 0.1
+
+print(model)
 # from gpplus.training.parameter_initializer_kian import DefaultParameterInitializer
 # Create trainer
 trainer = gpplus.training.GPTrainer(
