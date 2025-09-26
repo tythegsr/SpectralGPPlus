@@ -4,15 +4,14 @@ import gpytorch
 import numpy as np
 import torch
 from scipy.stats.qmc import Sobol
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler
 
 import gpplus
 from data.data_gen import wing_mixed_variables
 from gpplus.models import GPR
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
-
-
-from sklearn.metrics import mean_squared_error
 
 
 def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
@@ -164,15 +163,11 @@ print(f"\nFinal training dataset shape: X={X_train.shape}, y={y_train.shape}")
 print(f"Final test dataset shape: X={X_test.shape}, y={y_test.shape}")
 
 # Print ranges for each of the 10 original features (excluding source one-hot)
-print(f"\nX feature ranges (10 original features):")
+print("\nX feature ranges (10 original features):")
 for i in range(10):
     print(f"  Feature {i}: [{X_train[:, i].min():.4f}, {X_train[:, i].max():.4f}]")
 
 print(f"\ny range: [{y_train.min():.4f}, {y_train.max():.4f}]")
-print()
-
-# Standardize the data
-from sklearn.preprocessing import StandardScaler
 
 # Standardize training and test inputs (continuous features)
 scaler_X = StandardScaler()
@@ -202,7 +197,7 @@ X_test_scaled = torch.cat(
 scaler_y = StandardScaler()
 y_train_scaled = torch.tensor(scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten())
 
-print(f"Standardized data shapes:")
+print("Standardized data shapes:")
 print(f"  X_train: {X_train_scaled.shape}, y_train: {y_train_scaled.shape}")
 print(f"  X_test: {X_test_scaled.shape}, y_test: {y_test.shape}")
 
@@ -229,9 +224,8 @@ model = GPR(
     # kernel_module=kernel,
     mean_module=gpplus.means.MultipleMean(encoded_cols=source_cols),
     # mean_module=gpytorch.means.ConstantMean(),
-    likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train_scaled),
+    # likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train_scaled),
     likelihood=gpytorch.likelihoods.GaussianLikelihood(),
-
 )
 
 num_epochs = 10000
@@ -266,10 +260,8 @@ output_std_orig = output_std_scaled * scaler_y.scale_[0]  # Scale the uncertaint
 
 # Compute metrics on original scale
 
-metric = compute_metrics(
-   y_test_orig, y_pred_orig, output_std_orig, start_time=t1
-)
+metric = compute_metrics(y_test_orig, y_pred_orig, output_std_orig, start_time=t1)
 
-print(f"Metrics:")
+print("Metrics:")
 for k, v in metric.items():
     print(f"  {k}: {v:.4f}")
