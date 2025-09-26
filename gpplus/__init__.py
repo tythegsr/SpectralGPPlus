@@ -1,1 +1,1 @@
-from . import kernels, means, models, training, utils
+from . import kernels, likelihoods, means, models, training, utils

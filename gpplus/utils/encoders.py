@@ -6,7 +6,79 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class OneHotToLatent(gpytorch.Module):
+class MatrixEncoder(nn.Module):
+    """
+    Matrix-based encoder for categorical variables as described in Section 4 of the GP+ paper.
+
+    This encoder uses learnable matrices to map one-hot encoded categorical variables
+    to latent representations, providing a more interpretable and computationally
+    efficient alternative to neural network encoders.
+
+    Args:
+        input_dim: Dimension of input (one-hot vectors)
+        z_dim: Dimension of latent space (default=2)
+        initialization: Initialization method for the matrix ('normal', 'uniform', 'orthogonal')
+        init_std: Standard deviation for normal initialization (default=0.1)
+    """
+
+    def __init__(self, input_dim, z_dim=2, initialization="normal", init_std=0.1, seed=None):
+        super().__init__()
+        self.input_dim = input_dim
+        self.z_dim = z_dim
+
+        if seed is None:
+            seed = torch.randint(0, 2**32 - 1, (1,)).item()
+
+        self.seed = seed
+        # Create learnable projection matrix
+        self.projection_matrix = nn.Parameter(torch.empty(input_dim, z_dim))
+
+        # Store initialization type and parameters in the module for the parameter initializer
+        self._param_init_types = {"projection_matrix": initialization}
+        self._param_init_params = {"projection_matrix": {"init_std": init_std}}
+
+        # Initialize the matrix
+        generator = torch.Generator().manual_seed(self.seed)
+        if initialization == "normal":
+            nn.init.normal_(self.projection_matrix, mean=0.0, std=init_std, generator=generator)
+        elif initialization == "uniform":
+            nn.init.uniform_(self.projection_matrix, -init_std, init_std, generator=generator)
+        elif initialization == "orthogonal":
+            nn.init.orthogonal_(self.projection_matrix, gain=init_std, generator=generator)
+
+        else:
+            raise ValueError(f"Unknown initialization method: {initialization}")
+
+    def forward(self, x_onehot):
+        """
+        Forward pass: project one-hot encoded inputs to latent space.
+
+        Args:
+            x_onehot: One-hot encoded input tensor of shape [batch_size, input_dim]
+
+        Returns:
+            Latent representations of shape [batch_size, z_dim]
+        """
+        # Add dimension checks
+        if x_onehot.shape[-1] != self.input_dim:
+            raise ValueError(f"Expected input dimension {self.input_dim}, got {x_onehot.shape[-1]}")
+
+        # Matrix multiplication: x_onehot @ projection_matrix
+        # This is equivalent to: torch.mm(x_onehot, self.projection_matrix)
+        return torch.matmul(x_onehot, self.projection_matrix)
+
+    def get_projection_matrix(self):
+        """Return the current projection matrix for analysis."""
+        return self.projection_matrix.data.clone()
+
+    def set_projection_matrix(self, matrix):
+        """Set the projection matrix to specific values."""
+        if matrix.shape != (self.input_dim, self.z_dim):
+            raise ValueError(f"Expected matrix shape {(self.input_dim, self.z_dim)}, got {matrix.shape}")
+        self.projection_matrix.data = matrix.clone()
+
+
+class NeuralEncoder(gpytorch.Module):
     def __init__(
         self, input_dim, architecture_config=None, z_dim=2, num_passes=1, num_passes_pred=None, probabilistic=False
     ):
@@ -161,7 +233,7 @@ class OneHotToLatent(gpytorch.Module):
                 if visualize is True:
                     return z
                 else:
-                    z_projected = x[:, :4] @ z  # [400, 4] @ [4, 2] → [400, 2]
+                    z_projected = x[:, :] @ z  # [400, 4] @ [4, 2] → [400, 2]
                     return z_projected
 
         else:
