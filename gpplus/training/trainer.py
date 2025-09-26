@@ -11,7 +11,6 @@ from .callbacks import Callback
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
 from .training_single_run import GPTrainerSingleProcess
 
-
 class GPTrainer:
     """
     GPTrainer handles the training process of a Gaussian Process model.
