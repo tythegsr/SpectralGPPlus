@@ -104,20 +104,6 @@ class GPR(gpytorch.models.ExactGP):
         self.mean_module = mean_module
         self.covar_module = kernel_module
 
-        # Set covariance module
-        # if hasattr(self.covar_module, "source_encoder") and self.covar_module.source_encoder is not None:
-        #     fidel_indices=[]
-        #     for i in range(len(train_x)):
-        #         if train_x[i][0]==1:
-        #             fidel_indices.append(0)
-        #         if train_x[i][1]==1:
-        #             fidel_indices.append(1)
-        #         if train_x[i][2]==1:
-        #             fidel_indices.append(2)
-        #         if train_x[i][3]==1:
-        #             fidel_indices.append(3)
-        #     self.fidel_indices=torch.tensor(fidel_indices).unsqueeze(1)
-
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling if probabilistic.
 
