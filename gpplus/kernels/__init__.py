@@ -17,7 +17,3 @@ from .power_exponential_kernel import (
     PowerExponentialKernel,
     PowerExponentialKernelFixed,
 )
-from .combined_kernel_mvmf import CombinedKernel_MVMF
-from .latent_kernel import LatentKernel
-from .hybrid_kernel import HybridKernel
-from ..utils.one_hot_to_latent_nn import OneHotToLatent

@@ -24,10 +24,8 @@ class GPTrainerSingleProcess:
         num_epochs,
         convergence_patience,
         cholesky_jitter: float,
-        map_prior: bool = False,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
-        scheduler=False,
     ):
         self.model = model
         self.optimizer_class = optimizer_class
@@ -43,8 +41,6 @@ class GPTrainerSingleProcess:
         # If you have multiple train_inputs, adapt accordingly.
         self.train_x = self.model.train_inputs[0].to(self.device)
         self.train_y = self.model.train_targets.to(self.device)
-        self.map_prior = map_prior
-        self.scheduler = scheduler
 
     def train(self):
         """
@@ -52,10 +48,6 @@ class GPTrainerSingleProcess:
         """
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
-        if self.scheduler is True:
-            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
-        elif self.scheduler is not False:
-            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.scheduler)
         # Create mll instance
         mll = self.mll_class(self.model.likelihood, self.model)
 
@@ -97,7 +89,7 @@ class GPTrainerSingleProcess:
                     "device": self.device,
                 }
                 for cb in self.callbacks:
-                    cb.on_epoch_start(self, ctx)
+                    cb.on_epoch_start(ctx)
 
                 # Train for a single epoch
                 loss = train_epoch(optimizer, mll)
@@ -140,7 +132,7 @@ class GPTrainerSingleProcess:
             "device": self.device,
         }
         for cb in self.callbacks:
-            cb.on_train_end(self, self.model, best_loss, best_state_dict)
+            cb.on_train_end(ctx)
 
         return {"loss": best_loss, "state_dict": best_state_dict}
 
@@ -159,13 +151,8 @@ class GPTrainerSingleProcess:
         optimizer.zero_grad()
         output = self.model(self.train_x)
         loss = -mll(output, self.train_y)
-        if self.map_prior:
-            for _, module, prior, closure, _ in self.model.named_priors():
-                loss -= prior.log_prob(closure(module)).sum()
         loss.backward()
         optimizer.step()
-        if self.scheduler is not False:
-            self.scheduler.step()
         return loss.item()
 
     def _train_lbfgs_epoch(self, optimizer, mll):
@@ -184,8 +171,6 @@ class GPTrainerSingleProcess:
         closure = self._lbfgs_closure(self.model, optimizer, mll)
         # Perform the optimizer step using the closure
         loss = optimizer.step(closure)
-        if self.scheduler is not False:
-            self.scheduler.step()
         return loss.item()
 
     def _lbfgs_closure(self, model, optimizer, mll):
@@ -206,9 +191,6 @@ class GPTrainerSingleProcess:
             optimizer.zero_grad()
             output = model(self.train_x)
             loss = -mll(output, self.train_y)
-            if self.map_prior:
-                for _, module, prior, closure, _ in model.named_priors():
-                    loss -= prior.log_prob(closure(module)).sum()
             loss.backward()
             return loss
 

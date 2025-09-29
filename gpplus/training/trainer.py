@@ -36,7 +36,6 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
-        scheduler=False,  # Can be False, True, or a value between 0-1
         num_epochs: int = 50,
         convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
@@ -46,7 +45,6 @@ class GPTrainer:
         callbacks: Optional[List[Callback]] = None,
         initializer_class: ParameterInitializer = None,
         device: str = "cpu",
-        map_prior: bool = False,
     ):
         # -------------------------------------------------------
         # Set up the device (CPU or CUDA)
@@ -71,8 +69,6 @@ class GPTrainer:
         self.seed = seed
         self.callbacks = callbacks or []
         self.cholesky_jitter = cholesky_jitter
-        self.map_prior = map_prior
-        self.scheduler = scheduler
 
         """
         # Initialize model parameters if requested
@@ -127,8 +123,6 @@ class GPTrainer:
 
         # Initialize parameters for the model copy on CPU using the initializer
         self.initializer.initialize(base_model, run_index)
-        # Snapshot initialized state dict before training
-        initial_state_dict = copy.deepcopy(base_model.state_dict())
 
         # Move model_copy to device
         base_model = base_model.to(self.device)
@@ -144,11 +138,8 @@ class GPTrainer:
             cholesky_jitter=self.cholesky_jitter,
             callbacks=self.callbacks,
             device=self.device,
-            map_prior=self.map_prior,
-            scheduler=self.scheduler,
         )
-        train_result = run.train()
-        return {"run_index": run_index, "initial_state_dict": initial_state_dict, **train_result}
+        return {"run_index": run_index, **run.train()}
 
     def train_multiple_process_parallel(self):
         """
@@ -192,13 +183,11 @@ class GPTrainer:
             )
 
         elif str(self.device).startswith("cuda"):
-            torch.cuda.empty_cache()
             num_gpus = torch.cuda.device_count()
             # Allow as many parallel jobs as there are GPUs.
-            max_jobs = min(self.num_runs, 1)
+            max_jobs = min(self.num_runs, num_gpus)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
-
-            results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(
+            results = Parallel(n_jobs=max_jobs)(
                 # For each run, choose a GPU device based on the run index.
                 delayed(safe_single_process)(run_index, device_override=torch.device(f"cuda:{run_index % num_gpus}"))
                 for run_index in range(self.num_runs)
@@ -238,11 +227,5 @@ class GPTrainer:
             )
         else:
             logger.warning("No valid best run found. Model was not updated.")
-
-        # Attach best initial state dict to results for external consumers
-        for r in results:
-            if r.get("run_index") == (best_run.get("run_index") if best_run else None):
-                r["best_initial_state_dict"] = best_run.get("initial_state_dict") if best_run else None
-                break
 
         return results
