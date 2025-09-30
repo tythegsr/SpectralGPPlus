@@ -1,13 +1,8 @@
 import gpytorch
 import torch
-from gpytorch.kernels import AdditiveKernel, LinearKernel, ProductKernel, RBFKernel, ScaleKernel
-from torch.nn.modules import Module
 
-from ..utils.matrix_encoder import MatrixEncoder
-from ..utils.one_hot_to_latent_nn import OneHotToLatent
+from ..utils.encoders import MatrixEncoder, NeuralEncoder
 from .gaussian_kernel import GaussianKernel
-from .hybrid_kernel import HybridKernel
-from .latent_kernel import LatentKernel
 
 
 class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
@@ -40,10 +35,10 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
             cont_kernel: Kernel for continuous features (default: scaled RBF)
             cat_kernel: Kernel for categorical features (default: RBF for NN, Linear for Matrix)
             source_kernel: Kernel for source features (default: RBF for NN, Linear for Matrix)
-            cat_encoder: Encoder function for categorical features (default: OneHotToLatent)
+            cat_encoder: Encoder function for categorical features (default: NeuralEncoder)
                 Can be an encoder object, "matrix", "nn", or a list of encoders [enc1, enc2, enc3]
                 that will be matched with categorical groups
-            source_encoder: Encoder function for source features (default: OneHotToLatent)
+            source_encoder: Encoder function for source features (default: NeuralEncoder)
             cat_combination_method: Combination method for hybrid kernels (default: "additive")
             source_combination_method: Combination method for hybrid kernels (default: "additive")
         """
@@ -111,18 +106,20 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                         if encoder_type == "matrix":
                             encoder = MatrixEncoder(len(cat_group), z_dim=2)
                         else:  # nn
-                            encoder = OneHotToLatent(len(cat_group))
+                            encoder = NeuralEncoder(len(cat_group))
                     elif isinstance(cat_encoder, list) and len(cat_encoder) == len(cat_cols):
                         # Use the corresponding encoder from the list
                         encoder = cat_encoder[i]
                         # Validate that the encoder has the right input size
                         if hasattr(encoder, "input_size") and encoder.input_size != len(cat_group):
                             raise ValueError(
-                                f"Encoder {i} has input_size {encoder.input_size} but group {i} has {len(cat_group)} columns"
+                                f"Encoder {i} has input_size {encoder.input_size} but \
+                                group {i} has {len(cat_group)} columns"
                             )
                         elif hasattr(encoder, "num_classes") and encoder.num_classes != len(cat_group):
                             raise ValueError(
-                                f"Encoder {i} has num_classes {encoder.num_classes} but group {i} has {len(cat_group)} columns"
+                                f"Encoder {i} has num_classes {encoder.num_classes} but \
+                                group {i} has {len(cat_group)} columns"
                             )
                     else:
                         # Use matrix encoder for small groups (≤10), NN for larger ones
@@ -135,7 +132,7 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                         if encoder_type == "matrix":
                             encoder = MatrixEncoder(len(cat_group), z_dim=2)
                         else:  # nn
-                            encoder = OneHotToLatent(len(cat_group))
+                            encoder = NeuralEncoder(len(cat_group))
 
                     cat_encoders.append(encoder)
 
@@ -157,12 +154,12 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
 
                 # Initialize encoder
                 if cat_encoder is None:
-                    final_cat_encoder = OneHotToLatent(len(cat_cols))
+                    final_cat_encoder = NeuralEncoder(len(cat_cols))
                 elif isinstance(cat_encoder, str):
                     if cat_encoder == "matrix":
                         final_cat_encoder = MatrixEncoder(len(cat_cols), z_dim=2)
                     elif cat_encoder == "nn":
-                        final_cat_encoder = OneHotToLatent(len(cat_cols))
+                        final_cat_encoder = NeuralEncoder(len(cat_cols))
                     else:
                         raise ValueError(f"cat_encoder must be 'matrix', 'nn', or an encoder object, got {cat_encoder}")
                 else:
@@ -187,7 +184,7 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
         if has_source:
             # Initialize encoder
             if source_encoder is None:
-                final_source_encoder = OneHotToLatent(len(source_cols))
+                final_source_encoder = NeuralEncoder(len(source_cols))
             else:
                 final_source_encoder = source_encoder
 
@@ -255,12 +252,6 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
             else torch.tensor([], dtype=torch.long, device=device)
         )
         n_sources = len(self.source_cols) if (self.source_cols is not None and len(self.source_cols) > 0) else 0
-
-        # Check if source_encoder exists before accessing z_dim
-        if hasattr(self, "source_encoder") and self.source_encoder is not None:
-            z_dim = self.source_encoder.z_dim  # Currently only supports z_dim = 2
-        else:
-            z_dim = 2  # Default fallback
 
         # Calculate expected dimensions properly
         total_cont = len(self.cont_cols) if (self.cont_cols is not None and len(self.cont_cols) > 0) else 0
@@ -330,7 +321,7 @@ class CombinedKernel_MVMF(gpytorch.kernels.Kernel):
                     result = k_cat
 
         if self.has_source:
-            use_eps = isinstance(self.source_encoder, OneHotToLatent) and getattr(
+            use_eps = isinstance(self.source_encoder, NeuralEncoder) and getattr(
                 self.source_encoder, "is_probabilistic", True
             )
             if use_eps:

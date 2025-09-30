@@ -2,6 +2,7 @@ import time
 
 import numpy as np
 import torch
+from sklearn.metrics import mean_squared_error
 
 import gpplus
 from data.data_gen import load_data_buckling_MF
@@ -9,9 +10,6 @@ from gpplus.models import GPR
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 from gpplus.utils.latent_reps import get_latent_representations, plot_encoders
-
-
-from sklearn.metrics import mean_squared_error
 
 
 def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
@@ -77,7 +75,6 @@ for seed in seeds:
     seed = int(seed)
     set_seed(seed)
 
-
     # Generate training and test data for all fidelity levels s0-s3
     sources = ["s0", "s1"]
     num_train_per_source = {"s0": 250, "s1": 250}
@@ -88,13 +85,14 @@ for seed in seeds:
     X_test_data = []
     y_test_data = []
 
-    data = load_data_buckling_MF(n_train=num_train_per_source, 
-        n_test=num_test_per_source, 
-        noise_levels=[0.0, 0.0], 
-        return_one_hot=True, 
+    data = load_data_buckling_MF(
+        n_train=num_train_per_source,
+        n_test=num_test_per_source,
+        noise_levels=[0.0, 0.0],
+        return_one_hot=True,
         shuffle=True,
-        seed=seed
-        )
+        seed=seed,
+    )
 
     # Concatenate all test data (10,000x14)
     X_test = data["x_test_full"]
@@ -110,12 +108,11 @@ for seed in seeds:
     print(f"\nFinal training dataset shape: X={X_train.shape}, y={y_train.shape}")
     print(f"Final test dataset shape: X={X_test.shape}, y={y_test.shape}")
 
-
     # Standardize the data
     scalerX = gpplus.utils.StandardScaler()
-    scalerX.fit(X_train[:,cont_cols])
-    X_train[:,cont_cols] = scalerX.transform(X_train[:,cont_cols])
-    X_test[:,cont_cols] = scalerX.transform(X_test[:,cont_cols])
+    scalerX.fit(X_train[:, cont_cols])
+    X_train[:, cont_cols] = scalerX.transform(X_train[:, cont_cols])
+    X_test[:, cont_cols] = scalerX.transform(X_test[:, cont_cols])
     # scaler.transform(X_test[:,cont_cols])
 
     scalerY = gpplus.utils.StandardScaler()
@@ -124,23 +121,18 @@ for seed in seeds:
 
     t1 = time.time()
 
-    source_encoder = gpplus.utils.MatrixEncoder(input_dim=2, 
-                    initialization="normal", 
-                    init_std=0.1,
-                    z_dim=2)
+    source_encoder = gpplus.utils.MatrixEncoder(input_dim=2, initialization="normal", init_std=0.1, z_dim=2)
 
-    source_encoder2 = gpplus.utils.NeuralEncoder(input_dim=2,
-                    architecture_config={"hidden_dims": [], 
-                            "activation": "relu", 
-                            "dropout": 0.0}, 
-                    z_dim=2)
+    source_encoder2 = gpplus.utils.NeuralEncoder(
+        input_dim=2, architecture_config={"hidden_dims": [], "activation": "relu", "dropout": 0.0}, z_dim=2
+    )
 
     # Create model
     kernel = gpplus.kernels.CombinedKernel_MVMF(
         cont_cols=cont_cols,
         cat_cols=cat_cols,
         source_cols=source_cols,
-        cat_encoder='matrix'
+        cat_encoder="matrix",
         # source_encoder=source_encoder,
         # source_encoder=source_encoder2,
     )
@@ -152,7 +144,6 @@ for seed in seeds:
         mean_module=gpplus.means.MultipleMean(encoded_cols=source_cols),
         likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train),
         # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
-
     )
 
     num_epochs = 10000
@@ -182,18 +173,13 @@ for seed in seeds:
     y_pred_orig = scalerY.inverse_transform(y_pred_scaled)
     output_std_orig = output_std_scaled * scalerY.std  # Scale the uncertainty
 
-
     # Compute metrics on original scale
 
-    metric = compute_metrics(
-    y_test, y_pred_orig, output_std_orig, start_time=t1
-    )
+    metric = compute_metrics(y_test, y_pred_orig, output_std_orig, start_time=t1)
 
-    print(f"Metrics:")
+    print("Metrics:")
     for k, v in metric.items():
         print(f"  {k}: {v:.4f}")
-
-
 
     full_metrics.append(metric)
 
@@ -207,16 +193,16 @@ median_metrics = {}
 for key in full_metrics[0].keys():  # Get keys from first metric dict
     values = [metric[key] for metric in full_metrics]
     avg_metrics[key] = sum(values) / len(values)
-    std_metrics[key] = (sum((x - avg_metrics[key])**2 for x in values) / len(values))**0.5
+    std_metrics[key] = (sum((x - avg_metrics[key]) ** 2 for x in values) / len(values)) ** 0.5
     min_metrics[key] = min(values)
     max_metrics[key] = max(values)
     # Calculate median
     sorted_values = sorted(values)
     n = len(sorted_values)
     if n % 2 == 0:
-        median_metrics[key] = (sorted_values[n//2 - 1] + sorted_values[n//2]) / 2
+        median_metrics[key] = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
     else:
-        median_metrics[key] = sorted_values[n//2]
+        median_metrics[key] = sorted_values[n // 2]
 print("Buckling, Matrix, separate OH")
 print("\n=== FINAL RESULTS ===")
 print(f"Total time: {time.time() - t0:.2f} s\n({num_runs} restarts. Lr = {lr}. {num_epochs} epochs)")
@@ -236,7 +222,3 @@ for metric in avg_metrics.keys():
 encoder_data_dict = get_latent_representations(model)
 print(encoder_data_dict)
 plot_encoders(model)
-
-
-
-

@@ -1,6 +1,5 @@
 import time
 
-import gpytorch
 import numpy as np
 import torch
 from scipy.stats.qmc import Sobol
