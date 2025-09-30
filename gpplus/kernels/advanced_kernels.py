@@ -1,7 +1,6 @@
 import torch
 from gpytorch.kernels import Kernel
 
-# from linear_operator.operators import DenseLinearOperator  # Convert tensors back to LazyTensor
 from ..utils import InputTransformNet
 
 ################################
