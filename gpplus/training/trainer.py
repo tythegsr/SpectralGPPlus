@@ -3,11 +3,12 @@ import os
 from typing import List, Optional
 
 import gpytorch
-import torch
 import scipy
+import torch
 from joblib import Parallel, delayed
 
 from ..config import logger
+from ..utils.constraint_enforcement import enforce_parameter_constraints
 from .callbacks import Callback
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
 from .training_single_run import GPTrainerSingleProcess
@@ -177,8 +178,6 @@ class GPTrainer:
                     param.data.copy_(trained_param.data.to(dtype=param.dtype))
 
         # Enforce constraints on the original model as well
-        from ..utils.constraint_enforcement import enforce_parameter_constraints
-
         enforce_parameter_constraints(self.model)
 
         return {"run_index": run_index, "initial_state_dict": initial_state_dict, **train_result}
@@ -216,7 +215,7 @@ class GPTrainer:
 
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
-            max_jobs = min(self.num_runs, 6)
+            max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
             logger.info(
                 f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
             )
@@ -228,7 +227,7 @@ class GPTrainer:
             torch.cuda.empty_cache()
             num_gpus = torch.cuda.device_count()
             # Allow as many parallel jobs as there are GPUs.
-            max_jobs = min(self.num_runs, 6)
+            max_jobs = min(self.num_runs, num_gpus)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
 
             results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(

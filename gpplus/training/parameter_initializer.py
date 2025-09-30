@@ -4,6 +4,9 @@ from typing import Any, Dict, Optional
 import torch
 from torch.quasirandom import SobolEngine
 
+# Import the custom constraints
+from gpplus.utils.custom_constraints import Log10Interval, Log10RBFInterval
+
 from ..config import logger
 
 
@@ -69,37 +72,21 @@ class DefaultParameterInitializer(ParameterInitializer):
     def _setup_gpytorch_parameter_constraints(self, model: torch.nn.Module):
         """Set constraints on GPyTorch parameters to use appropriate scales."""
         try:
-            # Import the custom constraints
-            from gpplus.utils.custom_constraints import CustomLog10Interval, CustomLog10RBFInterval
-            from gpplus.utils.transforms import (
-                log10_inv_transform,
-                log10_rbf_inv_transform,
-                log10_rbf_transform,
-                log10_transform,
-            )
-
             # Set up the log10-scale constraint for lengthscales (RBF-specific)
-            lengthscale_constraint = CustomLog10RBFInterval(
-                lower_bound=-7.0,  # More conservative bounds
+            lengthscale_constraint = Log10RBFInterval(
+                lower_bound=-7.0,
                 upper_bound=5.0,
-                transform=log10_rbf_transform,
-                inv_transform=log10_rbf_inv_transform,
             )
 
             # Set up the log10-scale constraint for noise and outputscale
-            # Use more conservative bounds to avoid numerical instability
-            log10_scale_constraint_outputscale = CustomLog10Interval(
-                lower_bound=-7.0,  # 10^(-2) = 0.01
-                upper_bound=5.0,  # 10^1 = 10
-                transform=log10_transform,
-                inv_transform=log10_inv_transform,
+            log10_scale_constraint_outputscale = Log10Interval(
+                lower_bound=-7.0,
+                upper_bound=5.0,
             )
 
-            log10_scale_constraint_noise = CustomLog10Interval(
-                lower_bound=-7.0,  # 10^(-2) = 0.01
-                upper_bound=5.0,  # 10^1 = 10
-                transform=log10_transform,
-                inv_transform=log10_inv_transform,
+            log10_scale_constraint_noise = Log10Interval(
+                lower_bound=-7.0,
+                upper_bound=5.0,
             )
 
             # Find all GPyTorch modules and set appropriate constraints
@@ -113,11 +100,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                         # Use RBF-specific constraint for RBF kernels, simple log10 for Matern kernels
                         if "MaternKernel" in module.__class__.__name__:
                             # Create a simple log10 constraint for Matern kernels
-                            matern_lengthscale_constraint = CustomLog10Interval(
+                            matern_lengthscale_constraint = Log10Interval(
                                 lower_bound=-7.0,
                                 upper_bound=5.0,
-                                transform=log10_transform,
-                                inv_transform=log10_inv_transform,
                             )
                             module.raw_lengthscale_constraint = matern_lengthscale_constraint
                             logger.debug(
@@ -136,11 +121,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                     if hasattr(module, "raw_lengthscale"):
                         if "MaternKernel" in module.__class__.__name__:
                             # Use the Matern-specific constraint that was created above
-                            matern_lengthscale_constraint = CustomLog10Interval(
+                            matern_lengthscale_constraint = Log10Interval(
                                 lower_bound=-7.0,
                                 upper_bound=5.0,
-                                transform=log10_transform,
-                                inv_transform=log10_inv_transform,
                             )
                             module.raw_lengthscale.constraint = matern_lengthscale_constraint
                         else:
