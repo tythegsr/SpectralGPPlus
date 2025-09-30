@@ -2,9 +2,6 @@ import os
 
 import gpytorch
 import torch
-from linear_operator.operators import DenseLinearOperator
-
-from gpplus.utils.set_seed import set_seed
 
 from ..config import logger
 
@@ -26,13 +23,9 @@ class GPR(gpytorch.models.ExactGP):
         self,
         train_x: torch.Tensor,
         train_y: torch.Tensor,
-        dtype: torch.float32 = None,
-        device=None,
         likelihood: gpytorch.likelihoods.Likelihood = None,
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
-        seed=None,
-        learnable_priors=False,
     ):
         """Initializes GPR.
 
@@ -44,14 +37,10 @@ class GPR(gpytorch.models.ExactGP):
             mean_module (gpytorch.means.Mean, optional): Mean function. Defaults to ConstantMean if None.
             kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
                 Defaults to a ScaleKernel * Gaussian combo if None.
-            seed (int, optional): Random seed for reproducibility. Defaults to None.
-            learnable_priors (bool, optional): If True, registers learnable Normal priors to the likelihood. 
-                Defaults to False.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
-
         if likelihood is None:
             likelihood = gpytorch.likelihoods.GaussianLikelihood()
             logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
@@ -67,46 +56,27 @@ class GPR(gpytorch.models.ExactGP):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             logger.error("train_x and train_y must be torch.Tensor instances.")
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
+        # if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
+        #     logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
+        #     raise TypeError("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
 
         logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
 
-        if seed is None:
-            self.seed = torch.randint(0, 2**32 - 1, (1,)).item()
-        else:
-            self.seed = seed
+        # You can choose whether to keep these dimension checks, but if you do:
+        # if train_x.ndim != 2:
+        #     logger.error(f"Expected train_x to be 2D, got {train_x.ndimension()}D.")
+        #     raise ValueError(f"train_x must be 2D, got {train_x.ndimension()}D.")
+        # if train_y.ndim != 1:
+        #     logger.error(f"Expected train_y to be 1D, got {train_y.ndimension()}D.")
+        #     raise ValueError(f"train_y must be 1D, got {train_y.ndimension()}D.")
 
         super().__init__(train_x, train_y, likelihood)
-
-        if dtype is None:
-            self.dtype = train_x.dtype
-        else:
-            self.dtype = dtype
-
-        if learnable_priors:
-            self.register_parameter(
-                name="mean_noise", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-            )
-            self.register_parameter(
-                name="deviation_noise", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-            )
-
-            # Register priors on these hyperparameters (hyperpriors)
-            self.register_prior("prior_noise_mean", gpytorch.priors.NormalPrior(2.0, 30.0), "mean_noise")
-            self.register_prior("prior_noise_deviation", gpytorch.priors.NormalPrior(2.0, 10.0), "deviation_noise")
-
-            # Define noise prior based on learnable parameters
-            noise_prior = gpytorch.priors.NormalPrior(
-                self.mean_noise.detach().exp().clone(), self.deviation_noise.detach().exp().clone()
-            )
-
-            # Attach this prior to the raw_noise parameter of the likelihood
-            self.likelihood.register_prior("noise_prior", noise_prior, "raw_noise")
 
         self.mean_module = mean_module
         self.covar_module = kernel_module
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-        """Runs the forward pass of the Gaussian Process model with ensembling if probabilistic.
+        """Runs the forward pass of the Gaussian Process model.
 
         Args:
             x (torch.Tensor): Test data features for prediction.
@@ -122,62 +92,10 @@ class GPR(gpytorch.models.ExactGP):
         if not isinstance(x, torch.Tensor):
             logger.error("Input x must be a torch.Tensor instance.")
             raise TypeError("Input x must be a torch.Tensor.")
-        encoder = getattr(self.covar_module, "source_encoder", None)
-        embedding_is_prob = getattr(encoder, "is_probabilistic", False)
-        calibration_is_prob = (
-            hasattr(self, "calibration_type") and getattr(self, "calibration_type", None) == "probabilistic"
-        )
-        if self.training:
-            k = max(
-                getattr(encoder, "num_passes", 1) if embedding_is_prob else 1,
-                getattr(self, "num_calibration_passes", 1) if calibration_is_prob else 1,
-            )
-        else:
-            k = max(
-                getattr(encoder, "num_passes_pred", 1) if embedding_is_prob else 1,
-                getattr(self, "num_calibration_passes", 1) if calibration_is_prob else 1,
-            )
-        if k > 1:
-            set_seed(self.seed)
-        mean_sum = torch.zeros(x.size(0), dtype=x.dtype, device=x.device)
-        covar_sum = torch.zeros(x.size(0), x.size(0), dtype=x.dtype, device=x.device)
-        # covar_sum = torch.zeros(x.size(0), x.size(0), device=x.device)
-        # print(f"x input dtype = {x.dtype}")
-        # print(f"covar_sum dtype = {covar_sum.dtype}")
 
-        for _ in range(k):
-            x_pass = x.clone()
-            # print(f"x_pass input dtype = {x_pass.dtype}")
-
-            # Always apply embedding (probabilistic or deterministic)
-            if encoder is not None and hasattr(self.covar_module.source_encoder, "apply_embedding"):
-                x_pass = self.covar_module.source_encoder.apply_embedding(x_pass).to(
-                    self.dtype
-                )  # IF THIS FAILS, COMMENT THIS OUT AND UNCOMMENT LINE BELOW
-                # x_pass = self.covar_module.source_encoder.apply_embedding(x_pass)
-            # Always apply calibration (probabilistic or deterministic)
-            if hasattr(self, "apply_calibration"):
-                x_pass = self.apply_calibration(x_pass).to(
-                    self.dtype
-                )  # IF THIS FAILS, COMMENT THIS OUT AND UNCOMMENT LINE BELOW
-                # x_pass = self.apply_calibration(x_pass)
-            # Compute mean and covariance as usual
-            mean = self.mean_module(x_pass).to(self.dtype)
-            covar = self.covar_module(x_pass).to(self.dtype)
-            mean_sum += mean
-            covar_sum += covar.to_dense() + torch.outer(mean, mean)
-            # print(f"mean dtype = {mean.dtype}")
-            # print(f"mean_sum dtype = {mean_sum.dtype}")
-            # print(f"covar dtype = {covar.dtype}")
-        ensemble_mean = mean_sum / k
-        ensemble_covar = covar_sum / k
-        ensemble_covar -= torch.outer(ensemble_mean, ensemble_mean)
-        ensemble_covar = DenseLinearOperator(ensemble_covar)
-        # print(f"mean_sum dtype = {mean_sum.dtype}")
-        # print(f"covar_sum dtype = {covar_sum.dtype}")
-        # print(f"ensemble_mean_sum dtype = {ensemble_mean.dtype}")
-        # print(f"ensemble_covar_sum dtype = {ensemble_covar.dtype}")
-        return gpytorch.distributions.MultivariateNormal(ensemble_mean, ensemble_covar)
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
 
     def save(self, filepath: str = "model_weights.pth") -> None:
         """Saves this model's state dictionary to the specified file.
@@ -205,12 +123,3 @@ class GPR(gpytorch.models.ExactGP):
         logger.info(f"Loading model state dict from {filepath}")
         state_dict = torch.load(filepath)
         self.load_state_dict(state_dict)
-
-    def initialize(self):
-        """Randomly reinitialize all parameters in the model."""
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                if "weight" in name:
-                    torch.nn.init.xavier_uniform_(param)
-                elif "bias" in name or "constant" in name or "raw_" in name:
-                    torch.nn.init.normal_(param, mean=0.0, std=0.1)

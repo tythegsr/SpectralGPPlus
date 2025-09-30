@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 
 import gpplus
 from data.data_gen import wing_mixed_variables
-from gpplus.models import GPR
+from gpplus.models.gpr_ensemble import GPR
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 
@@ -41,16 +41,12 @@ def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
             "RRMSE": np.sqrt(mean_squared_error(y_true, y_hat)) / y_true.std(),
             "RMSE": np.sqrt(mean_squared_error(y_true, y_hat)),
             "MSE": mean_squared_error(y_true, y_hat),
-            # "MAE": mean_absolute_error(y_true, y_hat),
-            # "R2": r2_score(y_true, y_hat)
         }
     else:
         metrics = {
             "RRMSE": np.sqrt(mean_squared_error(y_true, y_hat)) / y_true.std(),
             "RMSE": np.sqrt(mean_squared_error(y_true, y_hat)),
             "MSE": mean_squared_error(y_true, y_hat),
-            # "MAE": mean_absolute_error(y_true, y_hat),
-            # "R2": r2_score(y_true, y_hat)
         }
 
     # Add NIS if output_std is provided
