@@ -176,9 +176,6 @@ class GPTrainer:
                 if param.requires_grad:
                     param.data.copy_(trained_param.data.to(dtype=param.dtype))
 
-        # Enforce constraints on the original model as well
-        enforce_parameter_constraints(self.model)
-
         return {"run_index": run_index, "initial_state_dict": initial_state_dict, **train_result}
 
     def train_multiple_process_parallel(self):
