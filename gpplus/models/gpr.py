@@ -51,10 +51,6 @@ class GPR(gpytorch.models.ExactGP):
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
-        if dtype is None:
-            self.dtype = train_x.dtype
-        else:
-            self.dtype = dtype
 
         if likelihood is None:
             likelihood = gpytorch.likelihoods.GaussianLikelihood()
@@ -80,6 +76,11 @@ class GPR(gpytorch.models.ExactGP):
             self.seed = seed
 
         super().__init__(train_x, train_y, likelihood)
+
+        if dtype is None:
+            self.dtype = train_x.dtype
+        else:
+            self.dtype = dtype
 
         if learnable_priors:
             self.register_parameter(
