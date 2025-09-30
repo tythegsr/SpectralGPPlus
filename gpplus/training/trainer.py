@@ -8,7 +8,6 @@ import torch
 from joblib import Parallel, delayed
 
 from ..config import logger
-from ..utils.constraint_enforcement import enforce_parameter_constraints
 from .callbacks import Callback
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
 from .training_single_run import GPTrainerSingleProcess
