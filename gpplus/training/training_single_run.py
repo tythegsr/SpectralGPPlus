@@ -378,7 +378,7 @@ class GPTrainerSingleProcess:
             "device": self.device,
         }
         for cb in self.callbacks:
-            cb.on_train_end(self, self.model, best_loss, best_state_dict)
+            cb.on_train_end(ctx)
 
         # Final training LOOCV loss (last computed)
         last_loocv = None
