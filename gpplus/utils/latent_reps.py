@@ -79,10 +79,10 @@ def get_latent_representations(model, qual_dict=None):
 
         # Store in dictionary with encoder name
         encoder_data_dict[encoder_name] = {
-            'combinations': encoder_combinations,
-            'indices': indices,
-            'latent_reps': latent_reps,
-            'input_dim': getattr(latent_net, 'input_dim', encoder_combinations.shape[1])
+            "combinations": encoder_combinations,
+            "indices": indices,
+            "latent_reps": latent_reps,
+            "input_dim": getattr(latent_net, "input_dim", encoder_combinations.shape[1]),
         }
 
     # Optionally include source encoder, if present and there are multiple sources
@@ -98,16 +98,17 @@ def get_latent_representations(model, qual_dict=None):
             with torch.no_grad():
                 source_latent = source_net(source_combinations.to(dtype=model.train_inputs[0].dtype))
             encoder_data_dict["source_encoder"] = {
-                'combinations': source_combinations,
-                'indices': source_indices,
-                'latent_reps': source_latent,
-                'input_dim': getattr(source_net, 'input_dim', n_sources)
+                "combinations": source_combinations,
+                "indices": source_indices,
+                "latent_reps": source_latent,
+                "input_dim": getattr(source_net, "input_dim", n_sources),
             }
 
     if len(encoder_data_dict) == 0:
         return None
 
     return encoder_data_dict
+
 
 def plot_encoders(model, qual_dict=None, save_path=None):
     """
@@ -134,8 +135,8 @@ def plot_encoders(model, qual_dict=None, save_path=None):
 
     for i, encoder_name in enumerate(encoder_names):
         encoder_data = encoder_data_dict[encoder_name]
-        indices = encoder_data['indices']
-        latent_reps = encoder_data['latent_reps']
+        indices = encoder_data["indices"]
+        latent_reps = encoder_data["latent_reps"]
 
         # Plot this encoder
         ax = axes[i]
@@ -172,7 +173,3 @@ def plot_encoders(model, qual_dict=None, save_path=None):
         plt.close(fig)
     else:
         plt.show()
-
-
-import torch
-import torch.nn.functional as F
