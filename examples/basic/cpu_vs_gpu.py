@@ -1,6 +1,5 @@
 import time
 
-import gpytorch
 import torch
 from gpytorch.likelihoods import GaussianLikelihood
 

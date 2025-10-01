@@ -7,10 +7,11 @@ from sklearn.metrics import mean_squared_error
 import gpplus
 from data.data_gen import load_data_buckling_MF
 from gpplus.models.gpr_ensemble import GPR
+from gpplus.training.callbacks import PrintInitialParametersCallback, PrintLossCallback
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 from gpplus.utils.latent_reps import get_latent_representations, plot_encoders
-from gpplus.training.callbacks import PrintLossCallback, PrintInitialParametersCallback
+
 
 def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
     """
