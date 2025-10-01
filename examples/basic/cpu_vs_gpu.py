@@ -1,10 +1,11 @@
 import time
-import torch
-import gpytorch
-from gpytorch.likelihoods import GaussianLikelihood
-from gpplus.training import GPTrainer
-from gpplus.models import GPR
 
+import gpytorch
+import torch
+from gpytorch.likelihoods import GaussianLikelihood
+
+from gpplus.models import GPR
+from gpplus.training import GPTrainer
 
 # -------------------------------
 # Create toy training data
