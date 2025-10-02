@@ -205,7 +205,7 @@ def analyze_buckling_categorical_ordering():
 
     for i, E in enumerate(E_values):
         for j, K in enumerate(K_values):
-            for k, I in enumerate(I_values): # noqa: E741
+            for k, I in enumerate(I_values):  # noqa: E741
                 # Calculate buckling load for s0 (simpler formula)
                 P_s0 = np.pi * E * I / (L * K) ** 2
 
@@ -263,7 +263,7 @@ def buckling_mixed_variables(X, source="s0"):
     L = X[..., 0]
     E = X[..., 1]
     K = X[..., 2]
-    I = X[..., 3] # noqa: E741
+    I = X[..., 3]  # noqa: E741
 
     # Wing weight calculation
     if source == "s0":
@@ -461,6 +461,7 @@ def cal_1D_sin_MF(X, source="s0"):
         raise ValueError(f"Unknown source: {source}. Only s0, s1, s2 are supported.")
 
     return result
+
 
 ########################################
 
@@ -1989,6 +1990,7 @@ def load_data_ackley(
         },
     }
 
+
 def analyze_borehole_source_distributions(save_dir=None):
     """
     Analyze the expected output distributions and characteristics for different sources
@@ -2204,14 +2206,15 @@ def analyze_borehole_source_distributions(save_dir=None):
 
     return outputs, correlations
 
+
 def get_data(problem: str, seed: int, save_dir=None, **kwargs):
     """
     Dispatches to the appropriate data-loading function based on `problem`.
     Extra keyword args (`**kwargs`) can be passed on to the loader if needed.
 
     Args:
-        problem (str): Problem name ("wing_MV_MF", "buckling_MF", 
-        "borehole_MV_MF", "1D_inverse_cal_MF", "1D_inverse_MF", 
+        problem (str): Problem name ("wing_MV_MF", "buckling_MF",
+        "borehole_MV_MF", "1D_inverse_cal_MF", "1D_inverse_MF",
         "1D_sin_cal_MF", "ackley", "wing", "wing_simple")
         seed (int): Random seed
         save_dir (str, optional): Directory to save analysis plots

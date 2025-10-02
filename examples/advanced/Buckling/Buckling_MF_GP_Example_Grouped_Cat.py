@@ -6,7 +6,7 @@ from sklearn.metrics import mean_squared_error
 
 import gpplus
 from data.data_gen import load_data_buckling_MF
-from gpplus.models.gpr_ensemble import GPR
+from gpplus.models import GPR
 from gpplus.training.callbacks import PrintInitialParametersCallback, PrintLossCallback
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
@@ -148,7 +148,6 @@ for seed in seeds:
     num_runs = 1
     lr = 0.1
     print(model)
-
 
     # Create trainer
     trainer = gpplus.training.GPTrainer(

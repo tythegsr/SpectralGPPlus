@@ -31,7 +31,7 @@ trainer_cpu = GPTrainer(
     num_epochs=50,
     num_runs=128,
     seed=123,
-    device="cpu"  # Use CPU
+    device="cpu",  # Use CPU
 )
 
 start_time = time.time()
@@ -59,7 +59,7 @@ if torch.cuda.is_available():
     # Move training data to GPU
     train_x_gpu = train_x.to("cuda")
     train_y_gpu = train_y.to("cuda")
-    
+
     # Create likelihood and model on GPU
     likelihood_gpu = GaussianLikelihood().to("cuda")
     model_gpu = GPR(train_x_gpu, train_y_gpu, likelihood_gpu)
@@ -70,7 +70,7 @@ if torch.cuda.is_available():
         num_epochs=50,
         num_runs=4,
         seed=123,
-        device="cuda"  # Use GPU
+        device="cuda",  # Use GPU
     )
 
     start_time = time.time()
@@ -97,4 +97,3 @@ else:
 # - Check that model parameters are on the intended device.
 # - Compare training times and loss values between CPU and GPU.
 # - Ensure that no runtime errors occur during parallel processing.
-

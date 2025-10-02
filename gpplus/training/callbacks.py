@@ -74,8 +74,9 @@ class PrintLossCallback(Callback):
     def on_epoch_end(self, context: dict):
         print(f"Epoch {context['epoch']} - Loss: {context['loss']:.4f}")
 
+
 class PrintInitialParametersCallback(Callback):
     def on_train_start(self, context: dict):
         print("Initial parameters: ")
-        for name, param in context['model'].named_parameters():
+        for name, param in context["model"].named_parameters():
             print(name, param.data)

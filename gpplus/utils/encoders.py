@@ -164,27 +164,30 @@ class NeuralEncoder(gpytorch.Module):
             prev_dim = hidden_dim
 
         if self.is_probabilistic:  # Multiple forward passes, Probabilistic version
-            # direct projection: just the Linear
-            self.fci = Linear_VAE(in_features=input_dim, out_features=5, bias=True, name="fci")
+            # VAE output dimension (5 parameters: mu1, mu2, L21, L11, L22)
+            vae_output_dim = 5
 
-            # Dynamically create h1, h2, ... based on hidden_dims
+            # First layer: input to VAE latent space
+            self.fci = Linear_VAE(in_features=input_dim, out_features=vae_output_dim, bias=True, name="fci")
+
+            # Store hidden layer configuration
             self.hidden_layers = architecture_config["hidden_dims"]
 
-            if len(self.hidden_layers) == 1:
-                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name="fce")
-
-            if len(self.hidden_layers) > 1:
-                prev_dim = 5  # fci out_features
+            # Create hidden layers if any exist
+            if self.hidden_layers:
+                prev_dim = vae_output_dim  # Start from fci output
 
                 for i, hidden_dim in enumerate(self.hidden_layers):
-                    if i >= 1:
-                        name = f"h{i}"
-                        layer = Linear_VAE(prev_dim, hidden_dim, name=name)
-                        setattr(self, name, layer)
-                        # self.hidden_layers.append(name)
-                        prev_dim = hidden_dim
+                    name = f"h{i + 1}"  # h1, h2, h3, etc.
+                    layer = Linear_VAE(prev_dim, hidden_dim, name=name)
+                    setattr(self, name, layer)
+                    prev_dim = hidden_dim
 
-                self.fce = Linear_VAE(in_features=prev_dim, out_features=5, bias=True, name="fce")
+                # Final layer: hidden layers to VAE output
+                self.fce = Linear_VAE(in_features=prev_dim, out_features=vae_output_dim, bias=True, name="fce")
+            else:
+                # No hidden layers: fci directly outputs VAE parameters
+                self.fce = None
 
         else:  # Determinisitic version (n_passes = 1)
             inner_layers = []
@@ -207,12 +210,13 @@ class NeuralEncoder(gpytorch.Module):
                 xtemp, inverse_indices = torch.unique(x, dim=0, return_inverse=True)  # shape [S, onehot_dim]
             else:
                 xtemp = x
-            if len(self.hidden_layers) > 0:
+            if self.hidden_layers:
                 xtemp = self.fci(xtemp)
-                for i in range(len(self.hidden_layers) - 1):
+                for i in range(len(self.hidden_layers)):
                     xtemp = F.relu(getattr(self, f"h{i + 1}")(xtemp))
                 out = self.fce(xtemp)
             else:
+                # No hidden layers: fci directly outputs VAE parameters
                 out = self.fci(xtemp)
 
             if epsilon is None:
