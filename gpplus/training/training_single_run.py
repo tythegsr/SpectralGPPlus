@@ -34,7 +34,8 @@ class GPTrainerSingleProcess:
         use_loocv_objective: bool = False,
         min_loss_change: float = 1e-7,
         dtype: torch.dtype = torch.float32,
-        scheduler=False,
+        scheduler_class: torch.optim.lr_scheduler._LRScheduler = None,
+        scheduler_kwargs: dict = None,
         use_gradual_jitter: bool = True,
         jitter_start: float = 1e-3,
         jitter_end: float = 1e-6,
@@ -66,7 +67,8 @@ class GPTrainerSingleProcess:
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
         self.map_prior = map_prior
-        self.scheduler = scheduler
+        self.scheduler_class = scheduler_class
+        self.scheduler_kwargs = scheduler_kwargs
 
         # Gradual jitter parameters
         self.use_gradual_jitter = use_gradual_jitter
@@ -175,10 +177,11 @@ class GPTrainerSingleProcess:
         """
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
-        if self.scheduler is True:
-            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
-        elif self.scheduler is not False:
-            self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=self.scheduler)
+
+        if self.scheduler_class is not None:
+            self.scheduler = self.scheduler_class(optimizer, **self.scheduler_kwargs)
+        else:
+            self.scheduler = None
 
         # Create mll instance
         mll = self.mll_class(self.model.likelihood, self.model)
@@ -424,7 +427,7 @@ class GPTrainerSingleProcess:
         loss = -mll(output, train_y)
         loss.backward()
         optimizer.step()
-        if self.scheduler is not False:
+        if self.scheduler is not None:
             self.scheduler.step()
 
         return loss.item()
@@ -442,10 +445,10 @@ class GPTrainerSingleProcess:
             float: The loss value after training for one epoch.
         """
         # Get the closure function
-        closure = self._lbfgs_closure(self.model, optimizer, mll)
+        closure = self._lbfgs_closure(optimizer, mll)
         # Perform the optimizer step using the closure
         loss = optimizer.step(closure)
-        if self.scheduler is not False:
+        if self.scheduler is not None:
             self.scheduler.step()
 
         return loss.item()
@@ -463,16 +466,16 @@ class GPTrainerSingleProcess:
             float: The loss value after training for one epoch.
         """
         # Get the closure function for scipy LBFGS
-        closure = self._scipy_lbfgs_closure(optimizer, mll)
+        closure = self._lbfgs_closure(optimizer, mll)
         # Perform the optimizer step using the closure
         optimizer.step(closure)
         # The loss is stored in optimizer._last_loss after step()
         loss = optimizer._last_loss
-        if self.scheduler is not False:
+        if self.scheduler is not None:
             self.scheduler.step()
         return loss.item()
 
-    def _lbfgs_closure(self, model, optimizer, mll):
+    def _lbfgs_closure(self, optimizer, mll):
         """
         Defines the closure for LBFGS optimizer.
         This method is reused across LBFGS training epochs.
@@ -488,40 +491,18 @@ class GPTrainerSingleProcess:
 
         def closure():
             optimizer.zero_grad()
-            # Ensure training data is in correct dtype
-            train_x = self.train_x.to(dtype=self.dtype)
-            train_y = self.train_y.to(dtype=self.dtype)
-            output = model(train_x)
-            loss = -mll(output, train_y)
-            loss.backward()
-
-            return loss
-
-        return closure
-
-    def _scipy_lbfgs_closure(self, optimizer, mll):
-        """
-        Defines the closure for Scipy LBFGS optimizer.
-
-        Parameters:
-            optimizer: The Scipy LBFGS optimizer.
-            mll: Marginal Log Likelihood loss.
-
-        Returns:
-            Callable: The closure function.
-        """
-
-        def closure():
-            optimizer.zero_grad()
 
             # Ensure training data is on the same device as the model
             model_device = next(self.model.parameters()).device
-            train_x = self.train_x.to(model_device)
-            train_y = self.train_y.to(model_device)
+
+            # Ensure training data is in correct dtype
+            train_x = self.train_x.to(dtype=self.dtype, device=model_device)
+            train_y = self.train_y.to(dtype=self.dtype, device=model_device)
 
             output = self.model(train_x)
             loss = -mll(output, train_y)
             loss.backward()
+
             return loss
 
         return closure

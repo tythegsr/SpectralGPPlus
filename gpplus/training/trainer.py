@@ -37,6 +37,8 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
+        scheduler_class: torch.optim.lr_scheduler._LRScheduler = None,
+        scheduler_kwargs: dict = None,
         num_epochs: int = 50,
         convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
@@ -82,6 +84,8 @@ class GPTrainer:
         self.loocv_log_freq = loocv_log_freq
         self.use_loocv_objective = use_loocv_objective
         self.min_loss_change = min_loss_change
+        self.scheduler_class = scheduler_class
+        self.scheduler_kwargs = scheduler_kwargs
         self.dtype = dtype
 
         """
@@ -165,6 +169,8 @@ class GPTrainer:
             loocv_log_freq=self.loocv_log_freq,
             use_loocv_objective=self.use_loocv_objective,
             min_loss_change=self.min_loss_change,
+            scheduler_class=self.scheduler_class,
+            scheduler_kwargs=self.scheduler_kwargs,
             dtype=self.dtype,
         )
         train_result = run.train()
