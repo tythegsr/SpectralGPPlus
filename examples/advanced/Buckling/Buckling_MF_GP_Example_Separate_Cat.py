@@ -7,6 +7,7 @@ from sklearn.metrics import mean_squared_error
 import gpplus
 from data.data_gen import load_data_buckling_MF
 from gpplus.models import GPR
+from gpplus.training.callbacks import PrintInitialParametersCallback, PrintLossCallback
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 from gpplus.utils.latent_reps import get_latent_representations, plot_encoders
@@ -156,7 +157,8 @@ for seed in seeds:
         optimizer_kwargs={"lr": lr},
         convergence_patience=50,
         optimizer_class=torch.optim.Adam,
-        device="cuda",
+        device="cpu",
+        callbacks=[PrintLossCallback(), PrintInitialParametersCallback()],
     )
 
     print("Training model...")
