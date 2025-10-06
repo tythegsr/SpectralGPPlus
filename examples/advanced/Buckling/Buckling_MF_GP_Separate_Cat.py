@@ -148,8 +148,8 @@ for seed in seeds:
         cont_cols=cont_cols,
         cat_cols=cat_cols,
         source_cols=source_cols,
-        # cat_encoder="matrix",
-        cat_encoder=cat_encoders,
+        cat_encoder="matrix",
+        # cat_encoder=cat_encoders,
         # source_encoder=source_encoder,
         # source_encoder=source_encoder2,
     )
