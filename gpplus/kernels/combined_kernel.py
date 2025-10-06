@@ -86,9 +86,9 @@ class CombinedKernel(gpytorch.kernels.Kernel):
             for i, (encoder, col_group) in enumerate(zip(encoders, self.cat_cols)):
                 x1_group = x1.index_select(-1, torch.tensor(col_group))
                 x2_group = x2.index_select(-1, torch.tensor(col_group))
-                
+
                 # Convert to match encoder's dtype
-                if hasattr(encoder, 'projection_matrix'):
+                if hasattr(encoder, "projection_matrix"):
                     x1_group = x1_group.to(dtype=encoder.projection_matrix.dtype)
                     x2_group = x2_group.to(dtype=encoder.projection_matrix.dtype)
 
@@ -113,15 +113,23 @@ class CombinedKernel(gpytorch.kernels.Kernel):
             )
             if use_eps:
                 epsilon = torch.normal(mean=0, std=1, size=[n_sources, 2], device=x1.device, dtype=x1.dtype)
-                x1_source = x1.index_select(-1, torch.tensor(self.source_cols)).to(dtype=self.source_encoder.projection_matrix.dtype)
-                x2_source = x2.index_select(-1, torch.tensor(self.source_cols)).to(dtype=self.source_encoder.projection_matrix.dtype)
+                x1_source = x1.index_select(-1, torch.tensor(self.source_cols)).to(
+                    dtype=self.source_encoder.projection_matrix.dtype
+                )
+                x2_source = x2.index_select(-1, torch.tensor(self.source_cols)).to(
+                    dtype=self.source_encoder.projection_matrix.dtype
+                )
                 z1_s = self.source_encoder(x1_source, epsilon=epsilon)
                 z2_s = self.source_encoder(x2_source, epsilon=epsilon)
                 k_source = self.source_kernel(z1_s, z2_s, diag=diag, **kwargs)
                 result = result.mul(k_source)
             else:
-                x1_source = x1.index_select(-1, torch.tensor(self.source_cols)).to(dtype=self.source_encoder.projection_matrix.dtype)
-                x2_source = x2.index_select(-1, torch.tensor(self.source_cols)).to(dtype=self.source_encoder.projection_matrix.dtype)
+                x1_source = x1.index_select(-1, torch.tensor(self.source_cols)).to(
+                    dtype=self.source_encoder.projection_matrix.dtype
+                )
+                x2_source = x2.index_select(-1, torch.tensor(self.source_cols)).to(
+                    dtype=self.source_encoder.projection_matrix.dtype
+                )
                 z1_s = self.source_encoder(x1_source)
                 z2_s = self.source_encoder(x2_source)
                 k_source = self.source_kernel(z1_s, z2_s, diag=diag, **kwargs)

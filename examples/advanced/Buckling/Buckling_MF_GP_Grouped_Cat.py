@@ -7,7 +7,7 @@ from sklearn.metrics import mean_squared_error
 import gpplus
 from examples.data.data_gen import load_data_buckling_MF
 from gpplus.models import GPR
-from gpplus.training.callbacks import PrintInitialParametersCallback, PrintLossCallback
+from gpplus.training.callbacks import PrintInitialParametersCallback
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 from gpplus.utils.latent_reps import get_latent_representations, plot_encoders
@@ -168,7 +168,7 @@ for seed in seeds:
         convergence_patience=50,
         optimizer_class=torch.optim.Adam,
         device="cpu",
-        callbacks=[PrintLossCallback(), PrintInitialParametersCallback()],
+        callbacks=[PrintInitialParametersCallback()],
     )
 
     print("Training model...")
