@@ -1,58 +1,11 @@
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-# import math
 import os
 
-# import pandas as pd
-# import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-
-# import torch.nn.functional as F
-# Optional imports - only import if available
-# try:
-#     import gpytorch
-#     GPYTORCH_AVAILABLE = True
-# except ImportError:
-#     GPYTORCH_AVAILABLE = False
-#     print("Warning: gpytorch not available. Some functions may not work.")
-# try:
-#     # import gpplus
-#     import gpplus.utils as utils
-#     GPP_AVAILABLE = True
-# except ImportError:
-#     GPP_AVAILABLE = False
-# print("Warning: gpplus not available. Using standalone implementations.")
 from torch.quasirandom import SobolEngine
 
-# Optional imports for advanced features
-# try:
-#     from gpytorch.kernels import ProductKernel, RBFKernel, ScaleKernel
-#     from gpytorch.likelihoods import GaussianLikelihood
-#     from gpytorch.means import ZeroMean
-#     from gpytorch.mlls import ExactMarginalLogLikelihood
-#     from gpytorch.models import ExactGP
-# except ImportError:
-#     pass
 
-# try:
-#     from sklearn.manifold import TSNE
-# except ImportError:
-#     pass
-
-# try:
-#     from gpplus.training import GPTrainer
-#     from gpplus.training.callbacks import PrintLossCallback
-# except ImportError:
-#     pass
-
-# try:
-#     from scipy.interpolate import make_interp_spline
-# except ImportError:
-#     pass
-
-
-# Standalone utility functions to replace gpplus.utils
 def scale(x, l_bound, u_bound):
     """Scale x from [0, 1] to [l_bound, u_bound]"""
     return l_bound + (u_bound - l_bound) * x

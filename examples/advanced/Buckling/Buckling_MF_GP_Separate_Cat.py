@@ -65,7 +65,6 @@ def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
     return metrics
 
 
-# Generate Sobol sequence for X inputs
 seeds = np.arange(42, 52)
 full_metrics = []
 t0 = time.time()
@@ -100,7 +99,7 @@ for seed in seeds:
     y_train = data["y_train_full"]
 
     cont_cols = [11]
-    cat_cols = [2, 3, 4, 5, 6, 7, 8, 9, 10]
+    cat_cols = [[2, 3], [4, 5, 6, 7], [8, 9, 10]]
     source_cols = [0, 1]
 
     print(f"\nFinal training dataset shape: X={X_train.shape}, y={y_train.shape}")
@@ -125,12 +124,32 @@ for seed in seeds:
         input_dim=2, architecture_config={"hidden_dims": [], "activation": "relu", "dropout": 0.0}, z_dim=2
     )
 
+    cat_encoder0 = gpplus.utils.NeuralEncoder(
+        input_dim=len(cat_cols[0]),
+        architecture_config={"hidden_dims": [], "activation": "relu", "dropout": 0.0},
+        z_dim=2,
+    )
+
+    cat_encoder1 = gpplus.utils.NeuralEncoder(
+        input_dim=len(cat_cols[1]),
+        architecture_config={"hidden_dims": [], "activation": "relu", "dropout": 0.0},
+        z_dim=2,
+    )
+
+    cat_encoder2 = gpplus.utils.NeuralEncoder(
+        input_dim=len(cat_cols[2]),
+        architecture_config={"hidden_dims": [], "activation": "relu", "dropout": 0.0},
+        z_dim=2,
+    )
+    cat_encoders = [cat_encoder0, cat_encoder1, cat_encoder2]
+
     # Create model
-    kernel = gpplus.kernels.CombinedKernel_MVMF(
+    kernel = gpplus.kernels.CombinedKernel(
         cont_cols=cont_cols,
         cat_cols=cat_cols,
         source_cols=source_cols,
-        cat_encoder="matrix",
+        # cat_encoder="matrix",
+        cat_encoder=cat_encoders,
         # source_encoder=source_encoder,
         # source_encoder=source_encoder2,
     )
@@ -145,7 +164,7 @@ for seed in seeds:
     )
 
     num_epochs = 10000
-    num_runs = 1
+    num_runs = 4
     lr = 0.1
     print(model)
 
@@ -202,7 +221,7 @@ for key in full_metrics[0].keys():  # Get keys from first metric dict
         median_metrics[key] = (sorted_values[n // 2 - 1] + sorted_values[n // 2]) / 2
     else:
         median_metrics[key] = sorted_values[n // 2]
-print("Buckling, Matrix, grouped OH")
+print("Buckling, Matrix, separate OH")
 print("\n=== FINAL RESULTS ===")
 print(f"Total time: {time.time() - t0:.2f} s\n({num_runs} restarts. Lr = {lr}. {num_epochs} epochs)")
 print(f"Average metrics across {len(seeds)} seeds (± std):")
@@ -218,7 +237,6 @@ for metric in avg_metrics.keys():
     median_val = median_metrics[metric]
     print(f"  {metric}: min={min_val:.6f}, max={max_val:.6f}, median={median_val:.6f}")
 
-
-encoder_data_dict = get_latent_representations(model, qual_dict={0: 2, 1: 4, 2: 3})
+encoder_data_dict = get_latent_representations(model)
 print(encoder_data_dict)
-plot_encoders(model, qual_dict={0: 2, 1: 4, 2: 3})
+plot_encoders(model)

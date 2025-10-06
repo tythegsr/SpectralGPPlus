@@ -185,7 +185,7 @@ t1 = time.time()
 # )
 
 # # Create model
-# kernel = gpplus.kernels.CombinedKernel_MVMF(
+# kernel = gpplus.kernels.CombinedKernel(
 #     cont_cols=cont_cols,
 #     cat_cols=None,
 #     source_cols=source_cols,

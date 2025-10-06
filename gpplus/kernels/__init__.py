@@ -17,4 +17,4 @@ from .power_exponential_kernel import (
     PowerExponentialKernel,
     PowerExponentialKernelFixed,
 )
-from .combined_kernel_mvmf import CombinedKernel_MVMF
+from .combined_kernel import CombinedKernel
