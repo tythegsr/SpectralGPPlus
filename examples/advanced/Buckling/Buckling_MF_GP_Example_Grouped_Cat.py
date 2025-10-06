@@ -5,7 +5,7 @@ import torch
 from sklearn.metrics import mean_squared_error
 
 import gpplus
-from data.data_gen import load_data_buckling_MF
+from examples.data.data_gen import load_data_buckling_MF
 from gpplus.models import GPR
 from gpplus.training.callbacks import PrintInitialParametersCallback, PrintLossCallback
 from gpplus.training.eval import evaluate_gp_model
