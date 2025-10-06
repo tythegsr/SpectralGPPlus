@@ -1,8 +1,10 @@
 import copy
 import os
+import random
 from typing import List, Optional
 
 import gpytorch
+import numpy as np
 import torch
 from joblib import Parallel, delayed
 
@@ -10,6 +12,9 @@ from ..config import logger
 from .callbacks import Callback
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
 from .training_single_run import GPTrainerSingleProcess
+
+# import gpytorch.settings as gpts
+# from linear_operator.settings import cg_tolerance, max_cg_iterations
 
 
 class GPTrainer:
@@ -158,6 +163,7 @@ class GPTrainer:
                 if device_override is not None:
                     # Temporarily override the device for this run.
                     self.device = device_override
+                _worker_init()
                 result = self.train_single_process(run_index)
                 # Restore the original device.
                 self.device = original_device
@@ -171,6 +177,32 @@ class GPTrainer:
                     "loss": None,
                     "error": str(e),
                 }
+
+        def _worker_init(seed=self.seed, cg_tol=5e-3, max_iters=2000):
+            # import os, random, numpy as np, torch
+            # BLAS / OpenMP
+            # os.environ["OPENBLAS_NUM_THREADS"] = "1"    # ???
+            # os.environ["OMP_NUM_THREADS"]      = "1"    # ???
+            # # RNGs
+            # random.seed(seed)
+            # np.random.seed(seed)
+            # torch.manual_seed(seed)
+            # torch.cuda.manual_seed_all(seed)
+            # torch.set_num_threads(1)
+            # torch.set_num_interop_threads(1)
+            # torch.use_deterministic_algorithms(True)
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark     = False
+            # GPyTorch & LO settings
+            # import gpytorch.settings as gpts
+            # gpts.max_cholesky_size._global_value = 10_000
+            from gpytorch.settings import max_cholesky_size
+
+            max_cholesky_size._global_value = 10_000
+            from linear_operator.settings import cg_tolerance, max_cg_iterations
+
+            cg_tolerance._global_value = cg_tol
+            max_cg_iterations._global_value = max_iters
 
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
