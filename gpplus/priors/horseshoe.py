@@ -1,19 +1,3 @@
-# Copyright © 2021 by Northwestern University.
-#
-# LVGP-PyTorch is copyrighted by Northwestern University. It may be freely used
-# for educational and research purposes by  non-profit institutions and US government
-# agencies only. All other organizations may use LVGP-PyTorch for evaluation purposes
-# only, and any further uses will require prior written approval. This software may
-# not be sold or redistributed without prior written approval. Copies of the software
-# may be made by a user provided that copies are not sold or distributed, and provided
-# that copies are used under the same terms and conditions as agreed to in this
-# paragraph.
-#
-# As research software, this code is provided on an "as is'' basis without warranty of
-# any kind, either expressed or implied. The downloading, or executing any part of this
-# software constitutes an implicit agreement to these terms. These terms and conditions
-# are subject to change at any time without prior notice.
-
 from numbers import Number
 
 import torch
@@ -23,30 +7,30 @@ from torch.distributions.utils import broadcast_all
 
 
 class LogHalfHorseshoePrior(Prior):
-    """Prior for the log-noise variance hyperparameter for GPs.
+    """
+    Prior for the log-noise variance hyperparameter for Gaussian Processes (GPs).
 
-    This is parameterized by `scale` and `lb`. `lb` is the lower bound on the noise variance.
-    The `scale` parameter is more important. The default value for `scale` - 0.01 - works well
-    for deterministic and low-noise situations. A larger value may be need in noisy sitations
-    and small training datasets. A larger scale implies more noisy data as the prior.
+    This prior is parameterized by `scale` and `lb`. The `lb` parameter defines the lower bound
+    on the noise variance, while `scale` is the key parameter influencing the prior. The default
+    value of `scale` (0.01) works well in deterministic and low-noise scenarios. In noisier situations
+    or with small training datasets, a larger `scale` value may be required, as it implies a higher
+    level of noise in the data.
 
-    To change the scale for this prior for a model to say 0.1,
+    To update the `scale` parameter of this prior for a model to 0.1, use the following code:
         >>> model.likelihood.register(
-        >>>     'noise_prior',LogHalfHorseshoePrior(0.1,model.likelihood.noise_prior.lb),
+        >>>     'noise_prior', LogHalfHorseshoePrior(0.1, model.likelihood.noise_prior.lb),
         >>>     'raw_noise'
         >>> )
 
-    .. note::
-        The `log_prob` method is only approximate and unnormalized. There is no closed form
-        expression for the underlying horseshoe distribution. The lower and upper bounds on
-        its' density are, however, known. Here, we use the same approximate density value that
-        the spearmint package uses.
+    Note:
+        - The `log_prob` method is approximate and unnormalized. There is no closed-form expression
+        for the underlying horseshoe distribution. However, the lower and upper bounds on its
+        density are known. This implementation uses the same approximate density value as the
+        Spearmint package.
 
-    :param scale: scale parameter of the Horseshoe distribution
-    :type scale: float or torch.Tensor
-
-    :param lb: lower bound on the original scale. Defaults to 1e-6
-    :type lb: float or torch.Tensor, optional
+    Args:
+        scale (float or torch.Tensor): Scale parameter of the horseshoe distribution.
+        lb (float or torch.Tensor, optional): Lower bound on the original scale. Defaults to 1e-6.
     """
 
     arg_constraints = {"scale": constraints.positive, "lb": constraints.positive}
