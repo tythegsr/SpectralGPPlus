@@ -8,7 +8,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 
 import gpplus
-from data.data_gen import wing_mixed_variables
+from examples.data.data_gen import wing_mixed_variables
 from gpplus.models import GPR
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
