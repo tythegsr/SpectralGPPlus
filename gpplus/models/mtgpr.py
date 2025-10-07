@@ -4,6 +4,7 @@ import gpytorch
 import torch
 
 from ..config import logger
+from ..kernels import GaussianKernel
 
 
 class MTGPR(gpytorch.models.ExactGP):
@@ -61,7 +62,7 @@ class MTGPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            base_kernel = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+            base_kernel = gpytorch.kernels.ScaleKernel(GaussianKernel())
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel
             )
