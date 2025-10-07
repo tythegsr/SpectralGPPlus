@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 import gpplus
 from examples.data.data_gen import wing_mixed_variables
 from gpplus.models import GPR
+from gpplus.training.callbacks import PrintInitialParametersCallback
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
 
@@ -83,7 +84,7 @@ print("\nGenerating test data...")
 X_test_data = []
 y_test_data = []
 for i, source in enumerate(sources):
-    sobol = Sobol(d=10)
+    sobol = Sobol(d=10, seed=seed)
     X_sobol_raw = torch.tensor(sobol.random(num_test_per_source[i]))
 
     # Scale Sobol samples to the proper bounds
@@ -115,7 +116,7 @@ print("Generating training data...")
 X_train_data = []
 y_train_data = []
 for i, source in enumerate(sources):
-    sobol = Sobol(d=10)
+    sobol = Sobol(d=10, seed=seed)
     X_sobol_raw = torch.tensor(sobol.random(num_train_per_source[i]))
 
     # Scale Sobol samples to the proper bounds
@@ -223,7 +224,7 @@ model = GPR(
     # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 
-num_epochs = 10000
+num_epochs = 1000
 num_runs = 4
 lr = 0.1
 
@@ -239,7 +240,7 @@ trainer = gpplus.training.GPTrainer(
     convergence_patience=50,
     optimizer_class=torch.optim.Adam,
     device="cuda",
-    # callbacks=[PrintInitializedParametersCallback()] if show_parameters and print_inits else [],
+    callbacks=[PrintInitialParametersCallback()],
     # initializer_class=DefaultParameterInitializer
 )
 

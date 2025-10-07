@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 
-class MultipleMean(nn.Module):
+class MultiMean(nn.Module):
     def __init__(self, means=None, encoded_cols=None):
         """
         A mean function that can specify multiple mean modules for different fidelity sources
