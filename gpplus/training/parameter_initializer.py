@@ -117,8 +117,8 @@ class DefaultParameterInitializer(ParameterInitializer):
         elif param_type == "raw_noise":
             return {
                 "method": "normal",
-                "mean": 1e-3,
-                "std": 1e-5,
+                "mean": -4.0,
+                "std": 0.5,
                 "description": "Noise parameter - log scale",
             }
         elif param_type == "constant":

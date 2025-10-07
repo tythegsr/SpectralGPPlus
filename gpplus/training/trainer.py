@@ -246,7 +246,7 @@ class GPTrainer:
 
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
-            max_jobs = min(self.num_runs, 6)
+            max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
             logger.info(
                 f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
             )
@@ -258,7 +258,7 @@ class GPTrainer:
             torch.cuda.empty_cache()
             num_gpus = torch.cuda.device_count()
             # Allow as many parallel jobs as there are GPUs.
-            max_jobs = min(self.num_runs, 6)
+            max_jobs = min(self.num_runs, num_gpus)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
 
             results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(
