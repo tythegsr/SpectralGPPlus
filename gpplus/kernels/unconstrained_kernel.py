@@ -1,10 +1,13 @@
 import warnings
 from typing import Optional, Tuple
 
+import gpytorch
 import torch
 from gpytorch.kernels import Kernel
 from gpytorch.priors import Prior
 from torch import Tensor
+
+from ..constraints import SoftClamp
 
 
 class UnconstrainedKernel(Kernel):
@@ -16,7 +19,7 @@ class UnconstrainedKernel(Kernel):
         batch_shape: Optional[torch.Size] = None,
         active_dims: Optional[Tuple[int, ...]] = None,
         lengthscale_prior: Optional[Prior] = None,
-        # lengthscale_constraint: Optional[Positive] = None,
+        lengthscale_constraint: Optional[SoftClamp] = None,
         eps: float = 1e-6,
         **kwargs,
     ):
@@ -31,8 +34,9 @@ class UnconstrainedKernel(Kernel):
 
         param_transform = kwargs.get("param_transform")
 
-        # if lengthscale_constraint is None:
-        #     lengthscale_constraint = Positive()
+        if lengthscale_constraint is None:
+            lengthscale_constraint = SoftClamp(lower_bound = -6, upper_bound = 3, margin = 1e-2)
+            # lengthscale_constraint = gpytorch.constraints.Interval(lower_bound=-5, upper_bound=3)
 
         if param_transform is not None:
             # warnings.warn(
@@ -48,18 +52,18 @@ class UnconstrainedKernel(Kernel):
         if self.has_lengthscale:
             lengthscale_num_dims = 1 if ard_num_dims is None else ard_num_dims
             self.register_parameter(
-                name="lengthscale",
+                name="raw_lengthscale",
                 parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1, lengthscale_num_dims)),
             )
             if lengthscale_prior is not None:
                 if not isinstance(lengthscale_prior, Prior):
                     raise TypeError("Expected gpytorch.priors.Prior but got " + type(lengthscale_prior).__name__)
-                # self.register_prior(
-                #     "lengthscale_prior", lengthscale_prior, self._lengthscale_param, self._lengthscale_closure
-                # )
-                self.register_prior("lengthscale_prior", lengthscale_prior, "lengthscale")
+                self.register_prior(
+                    "lengthscale_prior", lengthscale_prior, self._lengthscale_param, self._lengthscale_closure
+                )
+                # self.register_prior("lengthscale_prior", lengthscale_prior, "lengthscale")
 
-            # self.register_constraint("raw_lengthscale", lengthscale_constraint)
+            self.register_constraint("raw_lengthscale", lengthscale_constraint)
 
         self.distance_module = None
         # TODO: Remove this on next official PyTorch release.
