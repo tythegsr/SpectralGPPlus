@@ -1,14 +1,15 @@
-import os
-
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+# Optional imports - only import if available
 from torch.quasirandom import SobolEngine
 
 
+# Standalone utility functions to replace gpplus.utils
 def scale(x, l_bound, u_bound):
     """Scale x from [0, 1] to [l_bound, u_bound]"""
-    return l_bound + (u_bound - l_bound) * x
+    return x * (u_bound.to(x.device) - l_bound.to(x.device)) + l_bound.to(x.device)
 
 
 def get_column_types(qual_dict, num_features=None):
@@ -31,20 +32,20 @@ def get_column_types(qual_dict, num_features=None):
 def one_hot_encoding(x, qual_dict):
     """One-hot encode categorical variables"""
     if not qual_dict:
-        return torch.empty(x.shape[0], 0)
+        return torch.empty((x.shape[0], 0), device=x.device)
 
     encoded = []
     for col_idx, n_levels in qual_dict.items():
-        # Create one-hot encoding for this column
-        col_data = x[:, col_idx]
-        levels = torch.linspace(col_data.min(), col_data.max(), steps=n_levels)
+        # Get the unique values for this column
+        unique_values = torch.unique(x[:, col_idx])
+        # Create a mapping from value to index
+        value_to_idx = {val.item(): idx for idx, val in enumerate(unique_values)}
 
-        # Find closest level for each value
-        level_indices = torch.argmin(torch.abs(col_data.unsqueeze(1) - levels.unsqueeze(0)), dim=1)
+        # Convert values to indices using the mapping
+        indices = torch.tensor([value_to_idx[val.item()] for val in x[:, col_idx]], device=x.device)
 
-        # Create one-hot encoding
-        one_hot = torch.zeros(x.shape[0], n_levels)
-        one_hot.scatter_(1, level_indices.unsqueeze(1), 1)
+        # One-hot encode
+        one_hot = F.one_hot(indices, num_classes=n_levels)
         encoded.append(one_hot)
 
     return torch.cat(encoded, dim=1)
@@ -416,7 +417,228 @@ def cal_1D_sin_MF(X, source="s0"):
     return result
 
 
-########################################
+def analyze_borehole_source_distributions(save_dir=None):
+    """
+    Analyze the expected output distributions and characteristics for different sources
+    in the borehole problem to help understand multi-fidelity behavior.
+
+    This function generates sample data for each source and analyzes:
+    1. Output value ranges and distributions
+    2. Statistical properties (mean, std, min, max)
+    3. Relationships between sources
+    4. Visualizations of the distributions
+
+    Args:
+        save_dir (str, optional): Directory to save the analysis plot. If None, saves in current directory.
+    """
+    import os
+
+    import matplotlib.pyplot as plt
+
+    # Define variable names for better labeling
+    var_names = [
+        "rw (radius of borehole, m)",
+        "r (radius of influence, m)",
+        "Tu (transmissivity of upper aquifer, m²/yr)",
+        "Hu (potentiometric head of upper aquifer, m)",
+        "Tl (transmissivity of lower aquifer, m²/yr)",
+        "Hl (potentiometric head of lower aquifer, m)",
+        "L (length of borehole, m)",
+        "Kw (hydraulic conductivity of borehole, m/yr)",
+    ]
+
+    # Define bounds for borehole problem (8 variables)
+    l_bound = torch.tensor([0.05, 100.0, 63070.0, 990.0, 63.1, 700.0, 1120.0, 9855.0])
+    u_bound = torch.tensor([0.15, 50000.0, 115600.0, 1110.0, 116.0, 820.0, 1680.0, 12045.0])
+
+    # Generate sample data for analysis
+    n_samples = 10000
+    torch.manual_seed(42)  # Fixed seed for reproducible analysis
+
+    # Generate random samples using Sobol sequence for better coverage
+    sobol_engine = SobolEngine(dimension=8, scramble=True, seed=42)
+    x_raw = scale(sobol_engine.draw(n_samples).float(), l_bound, u_bound)
+
+    # Calculate outputs for each source
+    sources = ["s0", "s1", "s2", "s3", "s4"]
+    outputs = {}
+
+    print("Borehole Problem Source Analysis:")
+    print("=" * 60)
+
+    for source in sources:
+        y = borehole_mixed_variables(x_raw, source)
+        outputs[source] = y
+
+        # Calculate statistics
+        y_np = y.cpu().numpy()
+        print(f"\n{source.upper()} Statistics:")
+        print(f"  Mean: {y_np.mean():.2f}")
+        print(f"  Std:  {y_np.std():.2f}")
+        print(f"  Min:  {y_np.min():.2f}")
+        print(f"  Max:  {y_np.max():.2f}")
+        print(f"  Range: {y_np.max() - y_np.min():.2f}")
+
+    # Create comprehensive visualization
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig.suptitle("Borehole Problem: Multi-Fidelity Source Analysis", fontsize=16, fontweight="bold")
+
+    # 1. Output distributions (histograms)
+    ax1 = axes[0, 0]
+    for i, source in enumerate(sources):
+        y_np = outputs[source].cpu().numpy()
+        ax1.hist(y_np, bins=50, alpha=0.6, label=source, density=True)
+    ax1.set_xlabel("Water Flow Rate (m³/yr)")
+    ax1.set_ylabel("Density")
+    ax1.set_title("Output Distributions by Source")
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Box plot comparison
+    ax2 = axes[0, 1]
+    y_data = [outputs[source].cpu().numpy() for source in sources]
+    bp = ax2.boxplot(y_data, labels=sources, patch_artist=True)
+    colors = ["lightblue", "lightgreen", "lightcoral", "lightyellow", "lightpink"]
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+    ax2.set_ylabel("Water Flow Rate (m³/yr)")
+    ax2.set_title("Output Distributions (Box Plot)")
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Source comparison scatter (s0 vs others)
+    ax3 = axes[0, 2]
+    y_s0 = outputs["s0"].cpu().numpy()
+    for source in sources[1:]:
+        y_other = outputs[source].cpu().numpy()
+        ax3.scatter(y_s0, y_other, alpha=0.3, label=f"{source} vs s0", s=10)
+    ax3.plot([y_s0.min(), y_s0.max()], [y_s0.min(), y_s0.max()], "k--", alpha=0.5, label="y=x")
+    ax3.set_xlabel("s0 Output")
+    ax3.set_ylabel("Other Source Output")
+    ax3.set_title("Source Comparison (vs s0)")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # 4. Statistical summary table
+    ax4 = axes[1, 0]
+    ax4.axis("tight")
+    ax4.axis("off")
+
+    # Create summary table
+    summary_data = []
+    for source in sources:
+        y_np = outputs[source].cpu().numpy()
+        summary_data.append(
+            [
+                source,
+                f"{y_np.mean():.1f}",
+                f"{y_np.std():.1f}",
+                f"{y_np.min():.1f}",
+                f"{y_np.max():.1f}",
+                f"{y_np.max() - y_np.min():.1f}",
+            ]
+        )
+
+    table = ax4.table(
+        cellText=summary_data,
+        colLabels=["Source", "Mean", "Std", "Min", "Max", "Range"],
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.5)
+    ax4.set_title("Statistical Summary", fontweight="bold")
+
+    # 5. Variable importance analysis (correlation with output)
+    ax5 = axes[1, 1]
+    correlations = {}
+    for source in sources:
+        y_np = outputs[source].cpu().numpy()
+        x_np = x_raw.cpu().numpy()
+        corrs = [np.corrcoef(x_np[:, i], y_np)[0, 1] for i in range(8)]
+        correlations[source] = corrs
+
+    # Plot correlations
+    x_pos = np.arange(8)
+    width = 0.15
+    for i, source in enumerate(sources):
+        ax5.bar(x_pos + i * width, correlations[source], width, label=source, alpha=0.7)
+
+    ax5.set_xlabel("Variable Index")
+    ax5.set_ylabel("Correlation with Output")
+    ax5.set_title("Variable-Output Correlations by Source")
+    ax5.set_xticks(x_pos + width * 2)
+    ax5.set_xticklabels([f"Var {i + 1}" for i in range(8)])
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+
+    # 6. Fidelity progression analysis
+    ax6 = axes[1, 2]
+    # Calculate how outputs change across fidelity levels
+    y_s0 = outputs["s0"].cpu().numpy()
+    fidelity_changes = {}
+    for source in sources[1:]:
+        y_other = outputs[source].cpu().numpy()
+        fidelity_changes[source] = (y_other - y_s0) / y_s0 * 100  # Percentage change
+
+    # Plot fidelity changes
+    for source in sources[1:]:
+        ax6.hist(fidelity_changes[source], bins=50, alpha=0.6, label=f"{source} vs s0", density=True)
+
+    ax6.set_xlabel("Percentage Change from s0 (%)")
+    ax6.set_ylabel("Density")
+    ax6.set_title("Fidelity Level Changes")
+    ax6.legend()
+    ax6.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Save the analysis
+    if save_dir is not None:
+        # Ensure the directory exists
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, "borehole_source_analysis.png")
+    else:
+        save_path = "borehole_source_analysis.png"
+
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"\nAnalysis saved to: {save_path}")
+
+    # Additional insights
+    print("\nKey Insights:")
+    print("-" * 40)
+
+    # Find the source with highest/lowest outputs
+    means = {source: outputs[source].mean().item() for source in sources}
+    max_source = max(means, key=means.get)
+    min_source = min(means, key=means.get)
+
+    print(f"• Highest average output: {max_source} ({means[max_source]:.1f})")
+    print(f"• Lowest average output: {min_source} ({means[min_source]:.1f})")
+
+    # Calculate fidelity differences
+    y_s0 = outputs["s0"].cpu().numpy()
+    for source in sources[1:]:
+        y_other = outputs[source].cpu().numpy()
+        mean_diff = ((y_other.mean() - y_s0.mean()) / y_s0.mean()) * 100
+        print(f"• {source} vs s0: {mean_diff:+.1f}% mean difference")
+
+    # Variable importance
+    print("\nVariable Importance (correlation with s0 output):")
+    y_s0 = outputs["s0"].cpu().numpy()
+    x_np = x_raw.cpu().numpy()
+    for i in range(8):
+        corr = np.corrcoef(x_np[:, i], y_s0)[0, 1]
+        print(f"  {var_names[i]}: {corr:.3f}")
+
+    plt.show()
+
+    return outputs, correlations
+
+
+#################################################################
+# 2. Data Loading
+#################################################################
 
 
 def load_data_wing_MV_MF(
@@ -470,7 +692,6 @@ def load_data_wing_MV_MF(
     source_dim = len(fidelity_levels)
 
     # Get column types
-
     continuous_cols, discrete_cols = get_column_types(qual_dict)
     num_continuous = len(continuous_cols)
 
@@ -487,7 +708,6 @@ def load_data_wing_MV_MF(
 
         for source, n in n_samples.items():
             # Generate raw features (n x 10)
-
             x_raw = scale(sobol_engine.draw(n).float(), l_bound, u_bound)
 
             # Handle qualitative variables
@@ -499,7 +719,6 @@ def load_data_wing_MV_MF(
             # Process features
             if return_one_hot:
                 # One-hot encoded categoricals (n x num_categorical)
-
                 x_categorical = one_hot_encoding(x_raw, qual_dict)
                 # print('shape x_cat: ', x_categorical.shape)
                 # Continuous features (n x 8)
@@ -694,7 +913,6 @@ def load_data_buckling_MF(
     source_dim = len(fidelity_levels)
 
     # Get column types from qual_dict
-
     continuous_cols, discrete_cols = get_column_types(qual_dict, num_features=4)
     num_continuous = len(continuous_cols)
 
@@ -1820,7 +2038,6 @@ def load_data_ackley(
     source_dim = len(fidelity_levels)
 
     # Get column types (no categorical variables for this problem)
-
     continuous_cols, discrete_cols = get_column_types(qual_dict, num_features=dim)
     num_continuous = len(continuous_cols)
 
@@ -1837,7 +2054,6 @@ def load_data_ackley(
 
         for source, n in n_samples.items():
             # Generate raw features (n x dim)
-
             x_raw = scale(sobol_engine.draw(n).float(), l_bound, u_bound)
 
             # Process features (no categorical variables for this problem)
@@ -1944,231 +2160,15 @@ def load_data_ackley(
     }
 
 
-def analyze_borehole_source_distributions(save_dir=None):
-    """
-    Analyze the expected output distributions and characteristics for different sources
-    in the borehole problem to help understand multi-fidelity behavior.
-
-    This function generates sample data for each source and analyzes:
-    1. Output value ranges and distributions
-    2. Statistical properties (mean, std, min, max)
-    3. Relationships between sources
-    4. Visualizations of the distributions
-
-    Args:
-        save_dir (str, optional): Directory to save the analysis plot. If None, saves in current directory.
-    """
-
-    # Define variable names for better labeling
-    var_names = [
-        "rw (radius of borehole, m)",
-        "r (radius of influence, m)",
-        "Tu (transmissivity of upper aquifer, m²/yr)",
-        "Hu (potentiometric head of upper aquifer, m)",
-        "Tl (transmissivity of lower aquifer, m²/yr)",
-        "Hl (potentiometric head of lower aquifer, m)",
-        "L (length of borehole, m)",
-        "Kw (hydraulic conductivity of borehole, m/yr)",
-    ]
-
-    # Define bounds for borehole problem (8 variables)
-    l_bound = torch.tensor([0.05, 100.0, 63070.0, 990.0, 63.1, 700.0, 1120.0, 9855.0])
-    u_bound = torch.tensor([0.15, 50000.0, 115600.0, 1110.0, 116.0, 820.0, 1680.0, 12045.0])
-
-    # Generate sample data for analysis
-    n_samples = 10000
-    torch.manual_seed(42)  # Fixed seed for reproducible analysis
-
-    # Generate random samples using Sobol sequence for better coverage
-    sobol_engine = SobolEngine(dimension=8, scramble=True, seed=42)
-    x_raw = scale(sobol_engine.draw(n_samples).float(), l_bound, u_bound)
-
-    # Calculate outputs for each source
-    sources = ["s0", "s1", "s2", "s3", "s4"]
-    outputs = {}
-
-    print("Borehole Problem Source Analysis:")
-    print("=" * 60)
-
-    for source in sources:
-        y = borehole_mixed_variables(x_raw, source)
-        outputs[source] = y
-
-        # Calculate statistics
-        y_np = y.cpu().numpy()
-        print(f"\n{source.upper()} Statistics:")
-        print(f"  Mean: {y_np.mean():.2f}")
-        print(f"  Std:  {y_np.std():.2f}")
-        print(f"  Min:  {y_np.min():.2f}")
-        print(f"  Max:  {y_np.max():.2f}")
-        print(f"  Range: {y_np.max() - y_np.min():.2f}")
-
-    # Create comprehensive visualization
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    fig.suptitle("Borehole Problem: Multi-Fidelity Source Analysis", fontsize=16, fontweight="bold")
-
-    # 1. Output distributions (histograms)
-    ax1 = axes[0, 0]
-    for i, source in enumerate(sources):
-        y_np = outputs[source].cpu().numpy()
-        ax1.hist(y_np, bins=50, alpha=0.6, label=source, density=True)
-    ax1.set_xlabel("Water Flow Rate (m³/yr)")
-    ax1.set_ylabel("Density")
-    ax1.set_title("Output Distributions by Source")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # 2. Box plot comparison
-    ax2 = axes[0, 1]
-    y_data = [outputs[source].cpu().numpy() for source in sources]
-    bp = ax2.boxplot(y_data, labels=sources, patch_artist=True)
-    colors = ["lightblue", "lightgreen", "lightcoral", "lightyellow", "lightpink"]
-    for patch, color in zip(bp["boxes"], colors):
-        patch.set_facecolor(color)
-    ax2.set_ylabel("Water Flow Rate (m³/yr)")
-    ax2.set_title("Output Distributions (Box Plot)")
-    ax2.grid(True, alpha=0.3)
-
-    # 3. Source comparison scatter (s0 vs others)
-    ax3 = axes[0, 2]
-    y_s0 = outputs["s0"].cpu().numpy()
-    for source in sources[1:]:
-        y_other = outputs[source].cpu().numpy()
-        ax3.scatter(y_s0, y_other, alpha=0.3, label=f"{source} vs s0", s=10)
-    ax3.plot([y_s0.min(), y_s0.max()], [y_s0.min(), y_s0.max()], "k--", alpha=0.5, label="y=x")
-    ax3.set_xlabel("s0 Output")
-    ax3.set_ylabel("Other Source Output")
-    ax3.set_title("Source Comparison (vs s0)")
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-
-    # 4. Statistical summary table
-    ax4 = axes[1, 0]
-    ax4.axis("tight")
-    ax4.axis("off")
-
-    # Create summary table
-    summary_data = []
-    for source in sources:
-        y_np = outputs[source].cpu().numpy()
-        summary_data.append(
-            [
-                source,
-                f"{y_np.mean():.1f}",
-                f"{y_np.std():.1f}",
-                f"{y_np.min():.1f}",
-                f"{y_np.max():.1f}",
-                f"{y_np.max() - y_np.min():.1f}",
-            ]
-        )
-
-    table = ax4.table(
-        cellText=summary_data,
-        colLabels=["Source", "Mean", "Std", "Min", "Max", "Range"],
-        cellLoc="center",
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1.2, 1.5)
-    ax4.set_title("Statistical Summary", fontweight="bold")
-
-    # 5. Variable importance analysis (correlation with output)
-    ax5 = axes[1, 1]
-    correlations = {}
-    for source in sources:
-        y_np = outputs[source].cpu().numpy()
-        x_np = x_raw.cpu().numpy()
-        corrs = [np.corrcoef(x_np[:, i], y_np)[0, 1] for i in range(8)]
-        correlations[source] = corrs
-
-    # Plot correlations
-    x_pos = np.arange(8)
-    width = 0.15
-    for i, source in enumerate(sources):
-        ax5.bar(x_pos + i * width, correlations[source], width, label=source, alpha=0.7)
-
-    ax5.set_xlabel("Variable Index")
-    ax5.set_ylabel("Correlation with Output")
-    ax5.set_title("Variable-Output Correlations by Source")
-    ax5.set_xticks(x_pos + width * 2)
-    ax5.set_xticklabels([f"Var {i + 1}" for i in range(8)])
-    ax5.legend()
-    ax5.grid(True, alpha=0.3)
-
-    # 6. Fidelity progression analysis
-    ax6 = axes[1, 2]
-    # Calculate how outputs change across fidelity levels
-    y_s0 = outputs["s0"].cpu().numpy()
-    fidelity_changes = {}
-    for source in sources[1:]:
-        y_other = outputs[source].cpu().numpy()
-        fidelity_changes[source] = (y_other - y_s0) / y_s0 * 100  # Percentage change
-
-    # Plot fidelity changes
-    for source in sources[1:]:
-        ax6.hist(fidelity_changes[source], bins=50, alpha=0.6, label=f"{source} vs s0", density=True)
-
-    ax6.set_xlabel("Percentage Change from s0 (%)")
-    ax6.set_ylabel("Density")
-    ax6.set_title("Fidelity Level Changes")
-    ax6.legend()
-    ax6.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    # Save the analysis
-    if save_dir is not None:
-        # Ensure the directory exists
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, "borehole_source_analysis.png")
-    else:
-        save_path = "borehole_source_analysis.png"
-
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    print(f"\nAnalysis saved to: {save_path}")
-
-    # Additional insights
-    print("\nKey Insights:")
-    print("-" * 40)
-
-    # Find the source with highest/lowest outputs
-    means = {source: outputs[source].mean().item() for source in sources}
-    max_source = max(means, key=means.get)
-    min_source = min(means, key=means.get)
-
-    print(f"• Highest average output: {max_source} ({means[max_source]:.1f})")
-    print(f"• Lowest average output: {min_source} ({means[min_source]:.1f})")
-
-    # Calculate fidelity differences
-    y_s0 = outputs["s0"].cpu().numpy()
-    for source in sources[1:]:
-        y_other = outputs[source].cpu().numpy()
-        mean_diff = ((y_other.mean() - y_s0.mean()) / y_s0.mean()) * 100
-        print(f"• {source} vs s0: {mean_diff:+.1f}% mean difference")
-
-    # Variable importance
-    print("\nVariable Importance (correlation with s0 output):")
-    y_s0 = outputs["s0"].cpu().numpy()
-    x_np = x_raw.cpu().numpy()
-    for i in range(8):
-        corr = np.corrcoef(x_np[:, i], y_s0)[0, 1]
-        print(f"  {var_names[i]}: {corr:.3f}")
-
-    plt.show()
-
-    return outputs, correlations
-
-
 def get_data(problem: str, seed: int, save_dir=None, **kwargs):
     """
     Dispatches to the appropriate data-loading function based on `problem`.
     Extra keyword args (`**kwargs`) can be passed on to the loader if needed.
 
     Args:
-        problem (str): Problem name ("wing_MV_MF", "buckling_MF",
-        "borehole_MV_MF", "1D_inverse_cal_MF", "1D_inverse_MF",
-        "1D_sin_cal_MF", "ackley", "wing", "wing_simple")
+        problem (str): Problem name ("wing_MV_MF", "buckling_MF", "borehole_MV_MF", \
+            "1D_inverse_cal_MF", "1D_inverse_MF", "1D_sin_cal_MF", "ackley", \
+                "wing", "wing_simple")
         seed (int): Random seed
         save_dir (str, optional): Directory to save analysis plots
         **kwargs: Additional arguments passed to the data loader
