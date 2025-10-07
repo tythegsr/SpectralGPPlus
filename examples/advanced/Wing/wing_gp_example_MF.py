@@ -2,12 +2,11 @@ import time
 
 import numpy as np
 import torch
-from scipy.stats.qmc import Sobol
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 
 import gpplus
-from examples.data.data_gen import wing_mixed_variables
+from examples.data.data_gen import load_data_wing_MV_MF
 from gpplus.models import GPR
 from gpplus.training.callbacks import PrintInitialParametersCallback
 from gpplus.training.eval import evaluate_gp_model
@@ -66,97 +65,40 @@ def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
     return metrics
 
 
-# Generate Sobol sequence for X inputs
+# Generate data using load_data_wing_MV_MF
 seed = 42
 set_seed(seed)
 
-# Generate training and test data for all fidelity levels s0-s3
-sources = ["s0", "s1", "s2", "s3"]
-num_train_per_source = [100, 100, 100, 100]
-num_test_per_source = [2500, 2500, 2500, 2500]  # 10k total / 4 sources = 2.5k per source
+# Define training and test samples per source
+n_train = {"s0": 100, "s1": 100, "s2": 100, "s3": 100}
+n_test = {"s0": 2500, "s1": 2500, "s2": 2500, "s3": 2500}
 
-l_bound = torch.tensor([150.0, 220.0, 6.0, -10.0, 16.0, 0.5, 0.08, 2.5, 1700.0, 0.025])
-u_bound = torch.tensor([200.0, 300.0, 10.0, 10.0, 45.0, 1.0, 0.18, 6.0, 2500.0, 0.08])
+print("\nGenerating data using load_data_wing_MV_MF...")
+data = load_data_wing_MV_MF(
+    seed=seed,
+    n_train=n_train,
+    n_test=n_test,
+    noise_levels=[0.0, 0.0, 0.0, 0.0],
+    shuffle=True,
+    qual_dict={},  # No categorical variables for wing problem
+    return_one_hot=False,  # if true, only one-hot encodings are returned
+)
 
+# Extract data
+X_train = data["x_train_full"]
+y_train = data["y_train_full"]
+X_test = data["x_test_full"]
+y_test = data["y_test_full"]
 
-# Generate test data
-print("\nGenerating test data...")
-X_test_data = []
-y_test_data = []
-for i, source in enumerate(sources):
-    sobol = Sobol(d=10, seed=seed)
-    X_sobol_raw = torch.tensor(sobol.random(num_test_per_source[i]))
+# Get column information from metadata
+cont_cols = np.arange(4, 14)
+source_cols = np.arange(0, 4)
 
-    # Scale Sobol samples to the proper bounds
-    X_sobol = X_sobol_raw * (u_bound - l_bound) + l_bound
-
-    print(f"Test source: {source}")
-    result = wing_mixed_variables(
-        X=X_sobol,
-        source=source,
-    )
-
-    # Create one-hot encoding for source
-    source_one_hot = torch.zeros(num_test_per_source[i], 4)
-    source_one_hot[:, i] = 1
-
-    # Concatenate original features with source one-hot encoding
-    X_with_source = torch.cat([X_sobol, source_one_hot], dim=1)
-
-    X_test_data.append(X_with_source)
-    y_test_data.append(result)
-    print(f"  Test samples: {X_with_source.shape[0]}, Result range: [{result.min():.4f}, {result.max():.4f}]")
-
-# Concatenate all test data (10,000x14)
-X_test = torch.cat(X_test_data, dim=0)
-y_test = torch.cat(y_test_data, dim=0)
-
-# Generate training data
-print("Generating training data...")
-X_train_data = []
-y_train_data = []
-for i, source in enumerate(sources):
-    sobol = Sobol(d=10, seed=seed)
-    X_sobol_raw = torch.tensor(sobol.random(num_train_per_source[i]))
-
-    # Scale Sobol samples to the proper bounds
-    X_sobol = X_sobol_raw * (u_bound - l_bound) + l_bound
-
-    print(f"Training source: {source}")
-    result = wing_mixed_variables(
-        X=X_sobol,
-        source=source,
-    )
-
-    # Create one-hot encoding for source (s0=[1,0,0,0], s1=[0,1,0,0], etc.)
-    source_one_hot = torch.zeros(num_train_per_source[i], 4)
-    source_one_hot[:, i] = 1
-
-    # Concatenate original features with source one-hot encoding
-    X_with_source = torch.cat([X_sobol, source_one_hot], dim=1)
-
-    X_train_data.append(X_with_source)
-    y_train_data.append(result)
-    print(f"  Training samples: {X_with_source.shape[0]}, Result range: [{result.min():.4f}, {result.max():.4f}]")
-# Concatenate all training data (400x14)
-X_train = torch.cat(X_train_data, dim=0)
-y_train = torch.cat(y_train_data, dim=0)
-
-cont_cols = np.arange(0, 10)
-source_cols = np.arange(10, 14)
-
-# Shuffle both training and test datasets
-print("Shuffling datasets...")
-train_indices = torch.randperm(X_train.shape[0])
-test_indices = torch.randperm(X_test.shape[0])
-
-X_train = X_train[train_indices]
-y_train = y_train[train_indices]
-X_test = X_test[test_indices]
-y_test = y_test[test_indices]
-
+print(f"Xtrainshape: {X_train.shape}")
+print(f"Xtestshape: {X_test.shape}")
 print(f"\nFinal training dataset shape: X={X_train.shape}, y={y_train.shape}")
 print(f"Final test dataset shape: X={X_test.shape}, y={y_test.shape}")
+
 
 # Print ranges for each of the 10 original features (excluding source one-hot)
 print("\nX feature ranges (10 original features):")
@@ -167,14 +109,14 @@ print(f"\ny range: [{y_train.min():.4f}, {y_train.max():.4f}]")
 
 # Standardize training and test inputs (continuous features)
 scaler_X = StandardScaler()
-X_train_scaled = scaler_X.fit_transform(X_train[:, :10])
-X_test_scaled = scaler_X.transform(X_test[:, :10])
+X_train_scaled = scaler_X.fit_transform(X_train[:, cont_cols])
+X_test_scaled = scaler_X.transform(X_test[:, cont_cols])
 
 # Combine scaled continuous features with source one-hot for training
 X_train_scaled = torch.cat(
     [
         torch.tensor(X_train_scaled, dtype=torch.float64),
-        X_train[:, 10:],  # Source one-hot columns
+        X_train[:, source_cols],  # Source one-hot columns
     ],
     dim=1,
 )
@@ -183,7 +125,7 @@ X_train_scaled = torch.cat(
 X_test_scaled = torch.cat(
     [
         torch.tensor(X_test_scaled, dtype=torch.float64),
-        X_test[:, 10:],  # Source one-hot columns
+        X_test[:, source_cols],  # Source one-hot columns
     ],
     dim=1,
 )
@@ -224,7 +166,7 @@ model = GPR(
     # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 
-num_epochs = 1000
+num_epochs = 10000
 num_runs = 4
 lr = 0.1
 

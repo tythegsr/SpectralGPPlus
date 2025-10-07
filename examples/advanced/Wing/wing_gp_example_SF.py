@@ -8,7 +8,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 
 import gpplus
-from examples.data.data_gen import wing_mixed_variables
+from examples.data.data_gen import scale, wing_mixed_variables
 from gpplus.models import GPR
 from gpplus.training.eval import evaluate_gp_model
 from gpplus.utils import set_seed
@@ -86,7 +86,7 @@ sobol = Sobol(d=10)
 X_sobol_raw = torch.tensor(sobol.random(num_test))
 
 # Scale Sobol samples to the proper bounds
-X_sobol = X_sobol_raw * (u_bound - l_bound) + l_bound
+X_sobol = scale(X_sobol_raw, l_bound, u_bound)
 
 print(f"Test source: {sources}")
 result = wing_mixed_variables(
@@ -100,14 +100,11 @@ y_test = result
 print(f"  Test samples: {X_test.shape[0]}, Result range: [{result.min():.4f}, {result.max():.4f}]")
 
 
-# Generate training dataprint("Generating training data...")
-
-
 sobol = Sobol(d=10)
 X_sobol_raw = torch.tensor(sobol.random(num_train))
 
 # Scale Sobol samples to the proper bounds
-X_sobol = X_sobol_raw * (u_bound - l_bound) + l_bound
+X_sobol = scale(X_sobol_raw, l_bound, u_bound)
 
 print(f"Training source: {sources}")
 result = wing_mixed_variables(
