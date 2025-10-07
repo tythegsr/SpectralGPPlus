@@ -499,69 +499,11 @@ class GPTrainerSingleProcess:
             train_x = self.train_x.to(dtype=self.dtype, device=model_device)
             train_y = self.train_y.to(dtype=self.dtype, device=model_device)
 
-            # Diagnostic: report any non-finite parameter values before forward
-            try:
-                for name, p in self.model.named_parameters():
-                    if p.requires_grad and p.data.numel() > 0:
-                        mask = ~torch.isfinite(p.data)
-                        if mask.any():
-                            num_bad = int(mask.sum().item())
-                            total = p.data.numel()
-                            print(f"[DIAG] Non-finite PARAM before forward: {name}  bad={num_bad}/{total}")
-            except Exception:
-                pass
-
-            # Check for non-finite parameter values before forward pass
-            for name, p in self.model.named_parameters():
-                if p.requires_grad and not torch.isfinite(p.data).all():
-                    raise RuntimeError(f"Non-finite parameter BEFORE forward: {name}")
-            
             output = self.model(train_x)
-            
-            # Check model output
-            if not torch.isfinite(output.mean).all():
-                raise RuntimeError(f"Non-finite model output mean")
-            if hasattr(output, 'covariance_matrix'):
-                cov = output.covariance_matrix
-                if hasattr(cov, 'to_dense'):
-                    cov_dense = cov.to_dense()
-                    if not torch.isfinite(cov_dense).all():
-                        raise RuntimeError(f"Non-finite covariance matrix")
-            
+
             loss = -mll(output, train_y)
-            
-            # Check loss
-            if not torch.isfinite(loss):
-                raise RuntimeError(f"Non-finite loss: {loss.item()}")
-            
+
             loss.backward()
-
-            # Check for non-finite gradients and report detailed information
-            for name, p in self.model.named_parameters():
-                if p.grad is None:
-                    continue
-                
-                if not torch.isfinite(p.grad).all():
-                    mask_bad = ~torch.isfinite(p.grad)
-                    num_bad = int(mask_bad.sum().item())
-                    print(f"\n[ERROR] Non-finite gradient detected in {name}")
-                    print(f"  Non-finite count: {num_bad}/{p.grad.numel()}")
-                    print(f"  Parameter value: {p.data}")
-                    print(f"  Gradient: {p.grad}")
-                    print(f"  Non-finite indices: {torch.where(mask_bad)}")
-                    raise RuntimeError(f"Non-finite gradient in {name}. This should not happen!")
-
-            # Diagnostic: report any non-finite gradients (can indicate source of NaNs)
-            try:
-                for name, p in self.model.named_parameters():
-                    if p.grad is not None and p.grad.numel() > 0:
-                        gmask = ~torch.isfinite(p.grad)
-                        if gmask.any():
-                            num_bad = int(gmask.sum().item())
-                            total = p.grad.numel()
-                            print(f"[DIAG] Non-finite GRAD after backward: {name}  bad={num_bad}/{total}")
-            except Exception:
-                pass
 
             return loss
 

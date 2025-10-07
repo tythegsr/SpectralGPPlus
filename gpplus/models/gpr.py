@@ -1,11 +1,14 @@
 import os
+
 import gpytorch
 import torch
+from linear_operator.operators import DenseLinearOperator
+
+from gpplus.utils.set_seed import set_seed
 
 from ..config import logger
 from ..kernels import GaussianKernel
-from gpplus.utils.set_seed import set_seed
-from linear_operator.operators import DenseLinearOperator
+
 
 class GPR(gpytorch.models.ExactGP):
     """Gaussian Process model for regression using GPyTorch.
@@ -28,8 +31,8 @@ class GPR(gpytorch.models.ExactGP):
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
         dtype: torch.float32 = None,
-        seed = None,
-        learnable_priors = False
+        seed=None,
+        learnable_priors=False,
     ):
         """Initializes GPR.
 
@@ -52,7 +55,7 @@ class GPR(gpytorch.models.ExactGP):
             self.dtype = train_x.dtype
         else:
             self.dtype = dtype
-        
+
         if likelihood is None:
             likelihood = gpytorch.likelihoods.GaussianLikelihood()
             logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
@@ -72,34 +75,31 @@ class GPR(gpytorch.models.ExactGP):
         logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
 
         if seed is None:
-            import random
-            self.seed = random.randint(0, 2**32 - 1)
+            self.seed = 42
         else:
             self.seed = seed
-            
+
         super().__init__(train_x, train_y, likelihood)
-        
+
         if learnable_priors:
+            self.register_parameter(name="mean", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True))
             self.register_parameter(
-                name="mean", 
-                parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
+                name="deviation", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
             )
-            self.register_parameter(
-                name="deviation", 
-                parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-            )
-            
+
             # Register priors on these hyperparameters (hyperpriors)
             self.register_prior("prior_over_mean", gpytorch.priors.NormalPrior(2.0, 30.0), "mean")
             self.register_prior("prior_over_deviation", gpytorch.priors.NormalPrior(2.0, 10.0), "deviation")
-            
+
             # Define noise prior based on learnable parameters
-            noise_prior = gpytorch.priors.NormalPrior(self.mean.detach().exp().clone(), self.deviation.detach().exp().clone())
-            
+            noise_prior = gpytorch.priors.NormalPrior(
+                self.mean.detach().exp().clone(), self.deviation.detach().exp().clone()
+            )
+
             # Attach this prior to the raw_noise parameter of the likelihood
             self.likelihood.register_prior("noise_prior", noise_prior, "raw_noise")
 
-        self.mean_module = mean_module       
+        self.mean_module = mean_module
         self.covar_module = kernel_module
         # if hasattr(self.covar_module, "source_encoder") and self.covar_module.source_encoder is not None:
         #     fidel_indices=[]
@@ -111,11 +111,12 @@ class GPR(gpytorch.models.ExactGP):
         #         if train_x[i][2]==1:
         #             fidel_indices.append(2)
         #         if train_x[i][3]==1:
-        #             fidel_indices.append(3)  
+        #             fidel_indices.append(3)
         #     self.fidel_indices=torch.tensor(fidel_indices).unsqueeze(1)
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-        """Runs the forward pass of the Gaussian Process model with ensembling if embedding or calibration is probabilistic.
+        """Runs the forward pass of the Gaussian Process model with ensembling
+            if embedding or calibration is probabilistic.
 
         Args:
             x (torch.Tensor): Test data features for prediction.
@@ -133,7 +134,9 @@ class GPR(gpytorch.models.ExactGP):
             raise TypeError("Input x must be a torch.Tensor.")
         encoder = getattr(self.covar_module, "source_encoder", None)
         embedding_is_prob = getattr(encoder, "is_probabilistic", False)
-        calibration_is_prob = hasattr(self, "calibration_type") and getattr(self, "calibration_type", None) == "probabilistic"
+        calibration_is_prob = (
+            hasattr(self, "calibration_type") and getattr(self, "calibration_type", None) == "probabilistic"
+        )
         if self.training:
             k = max(
                 getattr(encoder, "num_passes", 1) if embedding_is_prob else 1,
@@ -151,7 +154,7 @@ class GPR(gpytorch.models.ExactGP):
         for _ in range(k):
             x_pass = x.clone()
             # Always apply embedding (probabilistic or deterministic)
-            if encoder is not None and hasattr(self.covar_module.source_encoder, 'apply_embedding'):
+            if encoder is not None and hasattr(self.covar_module.source_encoder, "apply_embedding"):
                 x_pass = self.covar_module.source_encoder.apply_embedding(x_pass).to(self.dtype)
             # Always apply calibration (probabilistic or deterministic)
             if hasattr(self, "apply_calibration"):
@@ -193,12 +196,12 @@ class GPR(gpytorch.models.ExactGP):
         logger.info(f"Loading model state dict from {filepath}")
         state_dict = torch.load(filepath)
         self.load_state_dict(state_dict)
-        
+
     def initialize(self):
         """Randomly reinitialize all parameters in the model."""
         for name, param in self.named_parameters():
             if param.requires_grad:
-                if 'weight' in name:
+                if "weight" in name:
                     torch.nn.init.xavier_uniform_(param)
-                elif 'bias' in name or 'constant' in name or 'raw_' in name:
+                elif "bias" in name or "constant" in name or "raw_" in name:
                     torch.nn.init.normal_(param, mean=0.0, std=0.1)

@@ -4,7 +4,6 @@ from typing import Any, Dict, Optional
 import torch
 from torch.quasirandom import SobolEngine
 
-
 from ..config import logger
 
 
@@ -46,8 +45,8 @@ class DefaultParameterInitializer(ParameterInitializer):
             parameter_configs: Optional custom parameter configurations.
 
         Note:
-            This initializer is greatly simplified and only looks at parameter names to 
-            determine initialization strategies. All constraints are handled by the 
+            This initializer is greatly simplified and only looks at parameter names to
+            determine initialization strategies. All constraints are handled by the
             kernel and likelihood classes themselves.
         """
         self.num_runs = num_runs
@@ -345,17 +344,4 @@ class DefaultParameterInitializer(ParameterInitializer):
 
                 idx += param_length
 
-        logger.info(f"Model parameters initialized with run #{run_index} (improved method)")
-
-        # Final sanity pass: ensure all parameters are finite; fix non-finite conservatively
-        with torch.no_grad():
-            params_list = [p for p in model.parameters() if p.requires_grad]
-            if params_list:
-                flat = torch.nn.utils.parameters_to_vector(params_list)
-                nonfinite_mask = ~torch.isfinite(flat)
-                if nonfinite_mask.any():
-                    logger.warning(
-                        f"Non-finite values detected after initialization: {int(nonfinite_mask.sum())}. Replacing with zeros."
-                    )
-                    flat[nonfinite_mask] = 0.0
-                    torch.nn.utils.vector_to_parameters(flat, params_list)
+        logger.info(f"Model parameters initialized with run #{run_index}")

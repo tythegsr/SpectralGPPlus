@@ -3,11 +3,11 @@
 from typing import Optional
 
 import torch
+from gpytorch.kernels import Kernel
+from gpytorch.priors import Prior
 from linear_operator.operators import to_dense
 
 from ..constraints import SoftClamp
-from gpytorch.priors import Prior
-from gpytorch.kernels import Kernel
 
 
 class ProcessVarianceKernel(Kernel):
@@ -27,9 +27,9 @@ class ProcessVarianceKernel(Kernel):
     keyword argument to the appropriate number of batches.
 
     .. note::
-        The outputscale parameter is internally parameterized on a log scale (via raw_outputscale) 
-        for better numerical stability and optimization properties. The outputscale property applies 
-        the constraint and 10^x transformation. You can set a prior on this parameter using the 
+        The outputscale parameter is internally parameterized on a log scale (via raw_outputscale)
+        for better numerical stability and optimization properties. The outputscale property applies
+        the constraint and 10^x transformation. You can set a prior on this parameter using the
         outputscale_prior argument.
 
     Args:
@@ -49,7 +49,7 @@ class ProcessVarianceKernel(Kernel):
         raw_outputscale (Parameter):
             The raw, unconstrained log-scale parameter. This is what the optimizer updates.
         outputscale (Tensor):
-            The transformed outputscale parameter (10^constrained(raw_outputscale)). 
+            The transformed outputscale parameter (10^constrained(raw_outputscale)).
             Size/shape depends on the batch_shape arguments.
 
     Example:
@@ -76,17 +76,17 @@ class ProcessVarianceKernel(Kernel):
         if base_kernel.active_dims is not None:
             kwargs["active_dims"] = base_kernel.active_dims
         super(ProcessVarianceKernel, self).__init__(**kwargs)
-        
+
         # Default constraint for log outputscale (allows scales from 0.00001 to 1000)
         if outputscale_constraint is None:
             outputscale_constraint = SoftClamp(lower_bound=-6.0, upper_bound=3.0)
 
         self.base_kernel = base_kernel
-        
+
         # Initialize log outputscale parameter (raw parameter is in log space)
         log_outputscale = torch.zeros(*self.batch_shape) if len(self.batch_shape) else torch.tensor(0.0)
         self.register_parameter(name="raw_outputscale", parameter=torch.nn.Parameter(log_outputscale))
-        
+
         if outputscale_prior is not None:
             if not isinstance(outputscale_prior, Prior):
                 raise TypeError("Expected gpytorch.priors.Prior but got " + type(outputscale_prior).__name__)

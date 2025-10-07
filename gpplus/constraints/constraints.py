@@ -1,6 +1,6 @@
 import torch
-from torch.autograd import Function
 from gpytorch.constraints import Interval
+from torch.autograd import Function
 
 
 class SoftClampFunction(Function):

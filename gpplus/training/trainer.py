@@ -1,10 +1,8 @@
 import copy
 import os
-import random
 from typing import List, Optional
 
 import gpytorch
-import numpy as np
 import scipy
 import torch
 from joblib import Parallel, delayed
@@ -146,13 +144,13 @@ class GPTrainer:
 
         # Initialize parameters for the model copy on CPU using the initializer
         self.initializer.initialize(base_model, run_index)
-        
+
         # Snapshot initialized state dict before training
         initial_state_dict = copy.deepcopy(base_model.state_dict())
 
         # Move model_copy to device
         base_model = base_model.to(self.device)
-        
+
         # Train the model
         # Create isolated callback instances per run to avoid cross-run state mixing
         callbacks_copy = [copy.deepcopy(cb) for cb in self.callbacks] if self.callbacks else []
