@@ -195,7 +195,7 @@ for seed in seeds:
 
     metric = compute_metrics(y_test, y_pred_orig, output_std_orig, start_time=t1)
 
-    print("Metrics:")
+    print(f"Metrics for seed {seed}:")
     for k, v in metric.items():
         print(f"  {k}: {v:.4f}")
 
