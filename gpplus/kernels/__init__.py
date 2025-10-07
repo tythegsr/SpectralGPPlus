@@ -17,4 +17,3 @@ from .power_exponential_kernel import (
     PowerExponentialKernelFixed,
 )
 from .process_variance_kernel import ProcessVarianceKernel
-from ..utils.one_hot_to_latent_nn import OneHotToLatent
