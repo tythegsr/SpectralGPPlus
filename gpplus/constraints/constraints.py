@@ -8,48 +8,49 @@ class SoftClampFunction(Function):
     Custom autograd function for SoftClamp transform with proper gradient handling.
     This avoids the torch.where gradient bug.
     """
+
     @staticmethod
     def forward(ctx, raw_tensor, a, b, eps):
         xL, xR = a + eps, b - eps
-        
+
         # Compute all branches
         left = a + eps * torch.exp((raw_tensor - xL) / eps)
         mid = raw_tensor
         right = b - eps * torch.exp(-(raw_tensor - xR) / eps)
-        
+
         # Create masks
         mask_left = raw_tensor < xL
         mask_right = raw_tensor > xR
-        
+
         # Select output
         result = torch.where(mask_left, left, torch.where(mask_right, right, mid))
-        
+
         # Save for backward
         ctx.save_for_backward(raw_tensor, a, b, eps, mask_left, mask_right)
-        
+
         return result
-    
+
     @staticmethod
     def backward(ctx, grad_output):
         raw_tensor, a, b, eps, mask_left, mask_right = ctx.saved_tensors
         xL, xR = a + eps, b - eps
-        
+
         # Compute gradients for each branch
         # Left branch: d/dx[a + ε * exp((x - xL)/ε)] = exp((x - xL)/ε)
         grad_left = torch.exp((raw_tensor - xL) / eps)
-        
+
         # Middle branch: d/dx[x] = 1
         grad_mid = torch.ones_like(raw_tensor)
-        
+
         # Right branch: d/dx[b - ε * exp(-(x - xR)/ε)] = exp(-(x - xR)/ε)
         grad_right = torch.exp(-(raw_tensor - xR) / eps)
-        
+
         # Select gradient based on which branch was taken
         grad_raw = torch.where(mask_left, grad_left, torch.where(mask_right, grad_right, grad_mid))
-        
+
         # Multiply by upstream gradient
         grad_raw = grad_raw * grad_output
-        
+
         # Return gradients (matching number of forward inputs: raw_tensor, a, b, eps)
         return grad_raw, None, None, None
 
