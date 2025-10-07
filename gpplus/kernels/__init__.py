@@ -23,4 +23,3 @@ from .hybrid_kernel import HybridKernel
 from .mf_seek_kernel import MF_SEEK_Kernel
 from .process_variance_kernel import ProcessVarianceKernel
 from ..utils.one_hot_to_latent_nn import OneHotToLatent
-
