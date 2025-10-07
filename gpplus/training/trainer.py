@@ -1,8 +1,10 @@
 import copy
 import os
+import random
 from typing import List, Optional
 
 import gpytorch
+import numpy as np
 import scipy
 import torch
 from joblib import Parallel, delayed
@@ -144,12 +146,13 @@ class GPTrainer:
 
         # Initialize parameters for the model copy on CPU using the initializer
         self.initializer.initialize(base_model, run_index)
+        
         # Snapshot initialized state dict before training
         initial_state_dict = copy.deepcopy(base_model.state_dict())
 
         # Move model_copy to device
         base_model = base_model.to(self.device)
-
+        
         # Train the model
         # Create isolated callback instances per run to avoid cross-run state mixing
         callbacks_copy = [copy.deepcopy(cb) for cb in self.callbacks] if self.callbacks else []
@@ -171,6 +174,7 @@ class GPTrainer:
             min_loss_change=self.min_loss_change,
             scheduler_class=self.scheduler_class,
             scheduler_kwargs=self.scheduler_kwargs,
+            use_gradual_jitter=False,
             dtype=self.dtype,
         )
         train_result = run.train()
@@ -201,6 +205,7 @@ class GPTrainer:
                 if device_override is not None:
                     # Temporarily override the device for this run.
                     self.device = device_override
+                _worker_init()
                 result = self.train_single_process(run_index)
                 # Restore the original device.
                 self.device = original_device
@@ -215,9 +220,35 @@ class GPTrainer:
                     "error": str(e),
                 }
 
+        def _worker_init(seed=self.seed, cg_tol=5e-3, max_iters=2000):
+            # import os, random, numpy as np, torch
+            # BLAS / OpenMP
+            # os.environ["OPENBLAS_NUM_THREADS"] = "1"    # ???
+            # os.environ["OMP_NUM_THREADS"]      = "1"    # ???
+            # # RNGs
+            # random.seed(seed)
+            # np.random.seed(seed)
+            # torch.manual_seed(seed)
+            # torch.cuda.manual_seed_all(seed)
+            # torch.set_num_threads(1)
+            # torch.set_num_interop_threads(1)
+            # torch.use_deterministic_algorithms(True)
+            # torch.backends.cudnn.deterministic = True
+            # torch.backends.cudnn.benchmark     = False
+            # GPyTorch & LO settings
+            # import gpytorch.settings as gpts
+            # gpts.max_cholesky_size._global_value = 10_000
+            from gpytorch.settings import max_cholesky_size
+
+            max_cholesky_size._global_value = 10_000
+            from linear_operator.settings import cg_tolerance, max_cg_iterations
+
+            cg_tolerance._global_value = cg_tol
+            max_cg_iterations._global_value = max_iters
+
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
-            max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
+            max_jobs = min(self.num_runs, 6)
             logger.info(
                 f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
             )
@@ -229,7 +260,7 @@ class GPTrainer:
             torch.cuda.empty_cache()
             num_gpus = torch.cuda.device_count()
             # Allow as many parallel jobs as there are GPUs.
-            max_jobs = min(self.num_runs, num_gpus)
+            max_jobs = min(self.num_runs, 6)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
 
             results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(
