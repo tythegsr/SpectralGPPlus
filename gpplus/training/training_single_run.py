@@ -1,5 +1,4 @@
 import copy
-import math
 from typing import List, Optional
 
 import gpytorch
@@ -88,7 +87,7 @@ class GPTrainerSingleProcess:
         self.loocv_log_freq = loocv_log_freq
         self.use_loocv_objective = use_loocv_objective
 
-    def _compute_jitter(self, epoch: int) -> float:
+    def _compute_jitter(self, epoch: int):
         """
         Compute the jitter value for the current epoch.
 
@@ -96,7 +95,7 @@ class GPTrainerSingleProcess:
             epoch: Current epoch (0-indexed)
 
         Returns:
-            float: Jitter value for this epoch
+            Scalar value in the model's dtype: Jitter value for this epoch
         """
         if not self.use_gradual_jitter:
             return self.cholesky_jitter
@@ -105,8 +104,8 @@ class GPTrainerSingleProcess:
             return self.jitter_start
 
         # Progress from 0 to 1 over all epochs
-        progress = epoch / (self.num_epochs - 1)
-        progress = min(1.0, max(0.0, progress))  # Clamp to [0, 1]
+        progress = torch.tensor(epoch / (self.num_epochs - 1), dtype=self.dtype)
+        progress = torch.clamp(progress, 0.0, 1.0)  # Clamp to [0, 1]
 
         if self.jitter_schedule == "linear":
             # Linear interpolation
@@ -114,20 +113,21 @@ class GPTrainerSingleProcess:
 
         elif self.jitter_schedule == "exponential":
             # Exponential decay (log-linear in jitter space)
-            log_start = math.log(self.jitter_start)
-            log_end = math.log(self.jitter_end)
+            log_start = torch.log(torch.tensor(self.jitter_start, dtype=self.dtype))
+            log_end = torch.log(torch.tensor(self.jitter_end, dtype=self.dtype))
             log_jitter = log_start + progress * (log_end - log_start)
-            jitter = math.exp(log_jitter)
+            jitter = torch.exp(log_jitter)
 
         elif self.jitter_schedule == "cosine":
             # Cosine annealing (smooth start, accelerates in middle, smooth end)
-            cosine_progress = 0.5 * (1 + math.cos(math.pi * progress))
+            pi = torch.tensor(torch.pi, dtype=self.dtype)
+            cosine_progress = 0.5 * (1 + torch.cos(pi * progress))
             jitter = self.jitter_end + (self.jitter_start - self.jitter_end) * cosine_progress
 
         else:
             raise ValueError(f"Unknown jitter schedule: {self.jitter_schedule}")
 
-        return jitter
+        return jitter.item()
 
     def calculate_both_likelihoods(self, mll):
         """
