@@ -73,3 +73,4 @@ class Callback(ABC):
 class PrintLossCallback(Callback):
     def on_epoch_end(self, context: dict):
         print(f"Epoch {context['epoch']} - Loss: {context['loss']:.4f}")
+        
