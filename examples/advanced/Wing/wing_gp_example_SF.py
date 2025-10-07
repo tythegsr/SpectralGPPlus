@@ -179,28 +179,12 @@ print(f"  X_test: {X_test_scaled.shape}, y_test: {y_test.shape}")
 
 t1 = time.time()
 
-# source_encoder = gpplus.utils.encoders.MatrixEncoder(input_dim=4, z_dim=2)
-# source_encoder2 = gpplus.utils.encoders.NeuralEncoder(
-#     input_dim=4, architecture_config={"hidden_dims": [], "activation": "hardtanh", "dropout": 0.0}, z_dim=2
-# )
-
-# # Create model
-# kernel = gpplus.kernels.CombinedKernel(
-#     cont_cols=cont_cols,
-#     cat_cols=None,
-#     source_cols=source_cols,
-#     source_encoder=source_encoder,
-#     # source_encoder=source_encoder2,
-# )
-
 model = GPR(
     X_train_scaled,
     y_train_scaled,
     # kernel_module=kernel,
     kernel_module=gpplus.kernels.GaussianKernel(),
-    # mean_module=gpplus.means.MultipleMean(encoded_cols=source_cols),
     mean_module=gpytorch.means.ConstantMean(),
-    # likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train_scaled),
     likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 

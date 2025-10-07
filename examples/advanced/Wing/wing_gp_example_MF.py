@@ -218,7 +218,7 @@ model = GPR(
     y_train_scaled,
     # kernel_module=gpplus.kernels.GaussianKernel(),
     kernel_module=kernel,
-    mean_module=gpplus.means.MultipleMean(encoded_cols=source_cols),
+    mean_module=gpplus.means.MultiMean(encoded_cols=source_cols),
     # mean_module=gpytorch.means.ConstantMean(),
     likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train_scaled),
     # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
