@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 
-import math
 import warnings
 from typing import Any, Optional
 
 import torch
-from linear_operator.operators import LinearOperator
-from torch import Tensor
-from torch.distributions import Normal
-
-from gpytorch import settings
-from gpytorch.constraints import Interval
-from gpytorch.distributions import base_distributions, MultivariateNormal
-from gpytorch.priors import Prior
-from gpytorch.likelihoods import Likelihood
+from gpytorch.distributions import MultivariateNormal
 from gpytorch.likelihoods.gaussian_likelihood import _GaussianLikelihoodBase
 from gpytorch.likelihoods.noise_models import HomoskedasticNoise
+from gpytorch.priors import Prior
+from torch import Tensor
 
 from ..constraints import SoftClamp
 
@@ -23,11 +16,11 @@ from ..constraints import SoftClamp
 class LogScaleHomoskedasticNoise(HomoskedasticNoise):
     """
     Homoskedastic noise model with log-scale parameterization.
-    
+
     This is similar to GPyTorch's HomoskedasticNoise but uses log-scale
     parameterization with SoftClamp constraints for better numerical stability.
     """
-    
+
     def __init__(
         self,
         noise_prior: Optional[Prior] = None,
@@ -38,32 +31,27 @@ class LogScaleHomoskedasticNoise(HomoskedasticNoise):
         # Default constraint for log noise (allows noise from 0.0000001 to 1000)
         if noise_constraint is None:
             noise_constraint = SoftClamp(lower_bound=-7.0, upper_bound=3.0)
-        
+
         # Call parent constructor with our custom constraint
         # We'll override the constraint after initialization
-        super().__init__(
-            noise_prior=noise_prior, 
-            noise_constraint=noise_constraint, 
-            batch_shape=batch_shape,
-            **kwargs
-        )
-    
+        super().__init__(noise_prior=noise_prior, noise_constraint=noise_constraint, batch_shape=batch_shape, **kwargs)
+
     def _noise_param(self, m):
         return m.noise
-    
+
     def _noise_closure(self, m, v):
         m._set_noise(v)
-    
+
     @property
     def noise(self):
         """Get the actual noise parameter (10^raw_noise after constraint)."""
         return torch.pow(10, self.raw_noise_constraint.transform(self.raw_noise))
-    
+
     @noise.setter
     def noise(self, value):
         """Set the noise parameter (will be converted to log scale internally)."""
         self._set_noise(value)
-    
+
     def _set_noise(self, value):
         """Internal method to set noise parameter (converts to log scale)."""
         if not torch.is_tensor(value):
@@ -76,11 +64,11 @@ class LogScaleHomoskedasticNoise(HomoskedasticNoise):
 class GaussianLikelihood(_GaussianLikelihoodBase):
     r"""
     Custom Gaussian likelihood with log-scale noise parameterization.
-    
+
     This is similar to GPyTorch's GaussianLikelihood but uses log-scale
     parameterization for the noise parameter, providing better numerical
     stability and consistency with custom kernels.
-    
+
     Assumes a standard homoskedastic noise model:
 
     .. math::
@@ -96,7 +84,7 @@ class GaussianLikelihood(_GaussianLikelihoodBase):
 
     Args:
         noise_prior: Prior for noise parameter :math:`\sigma^2`.
-        noise_constraint: Constraint for raw_noise parameter. Default: `SoftClamp(-7.0, 3.0)` 
+        noise_constraint: Constraint for raw_noise parameter. Default: `SoftClamp(-7.0, 3.0)`
                          (log scale from 0.0000001 to 1000).
         batch_shape: The batch shape of the learned noise parameter (default: []).
 
@@ -122,14 +110,12 @@ class GaussianLikelihood(_GaussianLikelihoodBase):
                 "transformation, specify a different 'noise_constraint' instead.",
                 DeprecationWarning,
             )
-        
+
         # Use our custom log-scale noise model
         noise_covar = LogScaleHomoskedasticNoise(
-            noise_prior=noise_prior, 
-            noise_constraint=noise_constraint, 
-            batch_shape=batch_shape
+            noise_prior=noise_prior, noise_constraint=noise_constraint, batch_shape=batch_shape
         )
-        
+
         # Call the base class constructor with the noise covariance
         super().__init__(noise_covar=noise_covar, **kwargs)
 
@@ -156,7 +142,7 @@ class GaussianLikelihood(_GaussianLikelihoodBase):
     def marginal(self, function_dist: MultivariateNormal, *args: Any, **kwargs: Any) -> MultivariateNormal:
         r"""
         Compute the marginal distribution :math:`p(\mathbf y)`.
-        
+
         Returns:
             Analytic marginal distribution.
         """
