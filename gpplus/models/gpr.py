@@ -2,12 +2,9 @@ import os
 
 import gpytorch
 import torch
-from linear_operator.operators import DenseLinearOperator
-
-from gpplus.utils.set_seed import set_seed
 
 from ..config import logger
-from ..kernels import GaussianKernel
+from ..kernels import GaussianKernel, ProcessVarianceKernel
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -65,7 +62,7 @@ class GPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            kernel_module = gpytorch.kernels.ScaleKernel(GaussianKernel())
+            kernel_module = ProcessVarianceKernel(GaussianKernel())
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
@@ -74,45 +71,10 @@ class GPR(gpytorch.models.ExactGP):
 
         logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
 
-        if seed is None:
-            self.seed = 42
-        else:
-            self.seed = seed
-
         super().__init__(train_x, train_y, likelihood)
-
-        if learnable_priors:
-            self.register_parameter(name="mean", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True))
-            self.register_parameter(
-                name="deviation", parameter=torch.nn.Parameter(torch.tensor(1.0), requires_grad=True)
-            )
-
-            # Register priors on these hyperparameters (hyperpriors)
-            self.register_prior("prior_over_mean", gpytorch.priors.NormalPrior(2.0, 30.0), "mean")
-            self.register_prior("prior_over_deviation", gpytorch.priors.NormalPrior(2.0, 10.0), "deviation")
-
-            # Define noise prior based on learnable parameters
-            noise_prior = gpytorch.priors.NormalPrior(
-                self.mean.detach().exp().clone(), self.deviation.detach().exp().clone()
-            )
-
-            # Attach this prior to the raw_noise parameter of the likelihood
-            self.likelihood.register_prior("noise_prior", noise_prior, "raw_noise")
 
         self.mean_module = mean_module
         self.covar_module = kernel_module
-        # if hasattr(self.covar_module, "source_encoder") and self.covar_module.source_encoder is not None:
-        #     fidel_indices=[]
-        #     for i in range(len(train_x)):
-        #         if train_x[i][0]==1:
-        #             fidel_indices.append(0)
-        #         if train_x[i][1]==1:
-        #             fidel_indices.append(1)
-        #         if train_x[i][2]==1:
-        #             fidel_indices.append(2)
-        #         if train_x[i][3]==1:
-        #             fidel_indices.append(3)
-        #     self.fidel_indices=torch.tensor(fidel_indices).unsqueeze(1)
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling
@@ -132,43 +94,10 @@ class GPR(gpytorch.models.ExactGP):
         if not isinstance(x, torch.Tensor):
             logger.error("Input x must be a torch.Tensor instance.")
             raise TypeError("Input x must be a torch.Tensor.")
-        encoder = getattr(self.covar_module, "source_encoder", None)
-        embedding_is_prob = getattr(encoder, "is_probabilistic", False)
-        calibration_is_prob = (
-            hasattr(self, "calibration_type") and getattr(self, "calibration_type", None) == "probabilistic"
-        )
-        if self.training:
-            k = max(
-                getattr(encoder, "num_passes", 1) if embedding_is_prob else 1,
-                getattr(self, "num_calibration_passes", 1) if calibration_is_prob else 1,
-            )
-        else:
-            k = max(
-                getattr(encoder, "num_passes_pred", 1) if embedding_is_prob else 1,
-                getattr(self, "num_calibration_passes", 1) if calibration_is_prob else 1,
-            )
-        if k > 1:
-            set_seed(self.seed)
-        mean_sum = torch.zeros(x.size(0), dtype=x.dtype, device=x.device)
-        covar_sum = torch.zeros(x.size(0), x.size(0), dtype=x.dtype, device=x.device)
-        for _ in range(k):
-            x_pass = x.clone()
-            # Always apply embedding (probabilistic or deterministic)
-            if encoder is not None and hasattr(self.covar_module.source_encoder, "apply_embedding"):
-                x_pass = self.covar_module.source_encoder.apply_embedding(x_pass).to(self.dtype)
-            # Always apply calibration (probabilistic or deterministic)
-            if hasattr(self, "apply_calibration"):
-                x_pass = self.apply_calibration(x_pass).to(self.dtype)
-            # Compute mean and covariance as usual
-            mean = self.mean_module(x_pass).to(self.dtype)
-            covar = self.covar_module(x_pass).to(self.dtype)
-            mean_sum += mean
-            covar_sum += covar.to_dense() + torch.outer(mean, mean)
-        ensemble_mean = mean_sum / k
-        ensemble_covar = covar_sum / k
-        ensemble_covar -= torch.outer(ensemble_mean, ensemble_mean)
-        ensemble_covar = DenseLinearOperator(ensemble_covar)
-        return gpytorch.distributions.MultivariateNormal(ensemble_mean, ensemble_covar)
+
+        mean = self.mean_module(x).to(self.dtype)
+        covar = self.covar_module(x).to(self.dtype)
+        return gpytorch.distributions.MultivariateNormal(mean, covar)
 
     def save(self, filepath: str = "model_weights.pth") -> None:
         """Saves this model's state dictionary to the specified file.
@@ -196,12 +125,3 @@ class GPR(gpytorch.models.ExactGP):
         logger.info(f"Loading model state dict from {filepath}")
         state_dict = torch.load(filepath)
         self.load_state_dict(state_dict)
-
-    def initialize(self):
-        """Randomly reinitialize all parameters in the model."""
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                if "weight" in name:
-                    torch.nn.init.xavier_uniform_(param)
-                elif "bias" in name or "constant" in name or "raw_" in name:
-                    torch.nn.init.normal_(param, mean=0.0, std=0.1)
