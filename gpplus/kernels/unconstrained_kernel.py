@@ -1,7 +1,6 @@
 import warnings
 from typing import Optional, Tuple
 
-import gpytorch
 import torch
 from gpytorch.kernels import Kernel
 from gpytorch.priors import Prior
@@ -35,7 +34,7 @@ class UnconstrainedKernel(Kernel):
         param_transform = kwargs.get("param_transform")
 
         if lengthscale_constraint is None:
-            lengthscale_constraint = SoftClamp(lower_bound = -5, upper_bound = 3, margin = 1e-2)
+            lengthscale_constraint = SoftClamp(lower_bound=-5, upper_bound=3, margin=1e-2)
             # lengthscale_constraint = gpytorch.constraints.Interval(lower_bound=-5, upper_bound=3)
 
         if param_transform is not None:
