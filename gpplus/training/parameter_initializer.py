@@ -117,8 +117,8 @@ class DefaultParameterInitializer(ParameterInitializer):
         elif param_type == "raw_noise":
             return {
                 "method": "normal",
-                "mean": -4.0,
-                "std": 0.5,
+                "mean": -3.0,
+                "std": 1.0,
                 "description": "Noise parameter - log scale",
             }
         elif param_type == "constant":
@@ -200,9 +200,8 @@ class DefaultParameterInitializer(ParameterInitializer):
                 }
         else:
             return {
-                "method": "normal",
-                "mean": 0.0,
-                "std": 0.1,
+                "method": "orthogonal_matrix",
+                "gain": 0.1,
                 "description": "Unknown parameter",
             }
 
@@ -273,14 +272,14 @@ class DefaultParameterInitializer(ParameterInitializer):
             param.data = raw_value.to(dtype=param.dtype)
 
         elif method == "uniform":
-            lower = config.get("lower", -1.0)
-            upper = config.get("upper", 1.0)
+            lower = config.get("lower", -6.0)
+            upper = config.get("upper", 3.0)
             raw_value = lower + (upper - lower) * sample
             param.data = raw_value.to(dtype=param.dtype)
 
         elif method == "normal":
-            mean = config.get("mean", 0.0)
-            std = config.get("std", 1.0)
+            mean = config.get("mean", -2.0)
+            std = config.get("std", 1.5)
             raw_value = self._generate_normal_samples(sample, mean, std)
             # Direct initialization - constraints are built into kernel classes
             param.data = raw_value.to(dtype=param.dtype)
@@ -345,3 +344,95 @@ class DefaultParameterInitializer(ParameterInitializer):
                 idx += param_length
 
         logger.info(f"Model parameters initialized with run #{run_index}")
+
+class SimpleParameterInitializer(DefaultParameterInitializer):
+    """
+    Simplified parameter initializer that uses the same method for all parameters.
+
+    Features:
+    - Uses the same initialization method for all parameters
+    - Inherits parameter initialization logic from DefaultParameterInitializer
+    - Works with built-in constraints in custom kernels and likelihoods
+    - Clean and maintainable architecture
+    """
+
+    def __init__(self, num_runs: int, seed: int = None, method: str = "normal", **method_kwargs):
+        """
+        Initialize the simple parameter initializer.
+
+        Args:
+            num_runs: Total number of initialization runs.
+            seed: Random seed for reproducibility.
+            method: Method to use for all parameters ("normal", "uniform", "xavier_uniform", etc.)
+            **method_kwargs: Additional parameters for the chosen method (e.g., mean, std for normal)
+        """
+        # Initialize parent class with empty parameter_configs since we override get_initialization_config
+        super().__init__(num_runs=num_runs, seed=seed, parameter_configs={})
+        self.method = method
+        self.method_kwargs = method_kwargs
+
+    def setup(self, model: torch.nn.Module):
+        """Calculate the total number of learnable parameters and precompute Sobol samples."""
+        # Call parent setup method
+        super().setup(model)
+        
+        # Override the log message to indicate we're using SimpleParameterInitializer
+        logger.info("Using SimpleParameterInitializer")
+        logger.info(f"All parameters will use method: {self.method}")
+
+    def get_initialization_config(self, name: str, param: torch.Tensor, model: torch.nn.Module = None) -> Dict[str, Any]:
+        """Get initialization configuration - all parameters use the same method."""
+        if self.method == "normal":
+            mean = self.method_kwargs.get("mean", -2.0)
+            std = self.method_kwargs.get("std", 1.5)
+            return {
+                "method": "normal",
+                "mean": mean,
+                "std": std,
+                "description": f"Normal initialization for all parameters (mean={mean}, std={std})",
+            }
+        elif self.method == "uniform":
+            lower = self.method_kwargs.get("lower", -6.0)
+            upper = self.method_kwargs.get("upper", 3.0)
+            return {
+                "method": "uniform",
+                "lower": lower,
+                "upper": upper,
+                "description": f"Uniform initialization for all parameters (lower={lower}, upper={upper})",
+            }
+        elif self.method == "xavier_uniform":
+            fan_in, fan_out = param.size(1) if param.dim() >= 2 else 1, param.size(0)
+            limit = torch.sqrt(torch.tensor(2.0 / (fan_in + fan_out)))
+            return {
+                "method": "xavier_uniform",
+                "limit": limit.item(),
+                "description": f"Xavier uniform initialization for all parameters (limit={limit.item():.4f})",
+            }
+        elif self.method == "zeros":
+            return {
+                "method": "zeros",
+                "value": -6.0,
+                "description": "10^-6 initialization for all parameters",
+            }
+        elif self.method == "ones":
+            return {
+                "method": "constant",
+                "value": 0.0,
+                "description": "10^0 initialization for all parameters",
+            }
+        else:
+            # Fallback to uniform
+            return {
+                "method": "uniform",
+                "lower": -6.0,
+                "upper": 3.0,
+                "description": f"Fallback uniform initialization for all parameters (method '{self.method}' not recognized)",
+            }
+
+    def initialize(self, model: torch.nn.Module, run_index: int):
+        """Initialize the model parameters for a specific run using the same method for all parameters."""
+        # Call parent initialize method which handles the main logic
+        super().initialize(model, run_index)
+        
+        # Override the final log message to indicate the method used
+        logger.info(f"Model parameters initialized with run #{run_index} using {self.method} method")
