@@ -4,7 +4,8 @@ import gpytorch
 import torch
 
 from ..config import logger
-from ..kernels import GaussianKernel
+from ..kernels import GaussianKernel, LogScaleKernel
+from ..likelihoods import GaussianLikelihood
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -54,7 +55,7 @@ class GPR(gpytorch.models.ExactGP):
             self.dtype = dtype
 
         if likelihood is None:
-            likelihood = gpytorch.likelihoods.GaussianLikelihood()
+            likelihood = GaussianLikelihood()
             logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
 
         if mean_module is None:
@@ -62,7 +63,7 @@ class GPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            kernel_module = gpplus.kernels.LogScaleKernel(GaussianKernel())
+            kernel_module = LogScaleKernel(GaussianKernel())
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
