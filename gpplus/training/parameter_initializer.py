@@ -345,6 +345,7 @@ class DefaultParameterInitializer(ParameterInitializer):
 
         logger.info(f"Model parameters initialized with run #{run_index}")
 
+
 class SimpleParameterInitializer(DefaultParameterInitializer):
     """
     Simplified parameter initializer that uses the same method for all parameters.
@@ -375,12 +376,14 @@ class SimpleParameterInitializer(DefaultParameterInitializer):
         """Calculate the total number of learnable parameters and precompute Sobol samples."""
         # Call parent setup method
         super().setup(model)
-        
+
         # Override the log message to indicate we're using SimpleParameterInitializer
         logger.info("Using SimpleParameterInitializer")
         logger.info(f"All parameters will use method: {self.method}")
 
-    def get_initialization_config(self, name: str, param: torch.Tensor, model: torch.nn.Module = None) -> Dict[str, Any]:
+    def get_initialization_config(
+        self, name: str, param: torch.Tensor, model: torch.nn.Module = None
+    ) -> Dict[str, Any]:
         """Get initialization configuration - all parameters use the same method."""
         if self.method == "normal":
             mean = self.method_kwargs.get("mean", -2.0)
@@ -426,13 +429,13 @@ class SimpleParameterInitializer(DefaultParameterInitializer):
                 "method": "uniform",
                 "lower": -6.0,
                 "upper": 3.0,
-                "description": f"Fallback uniform initialization for all parameters (method '{self.method}' not recognized)",
+                "description": f"Fallback uniform initialization (method '{self.method}' not recognized)",
             }
 
     def initialize(self, model: torch.nn.Module, run_index: int):
         """Initialize the model parameters for a specific run using the same method for all parameters."""
         # Call parent initialize method which handles the main logic
         super().initialize(model, run_index)
-        
+
         # Override the final log message to indicate the method used
         logger.info(f"Model parameters initialized with run #{run_index} using {self.method} method")
