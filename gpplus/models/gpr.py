@@ -4,7 +4,7 @@ import gpytorch
 import torch
 
 from ..config import logger
-from ..kernels import GaussianKernel, ProcessVarianceKernel
+from ..kernels import GaussianKernel
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -62,7 +62,7 @@ class GPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            kernel_module = ProcessVarianceKernel(GaussianKernel())
+            kernel_module = gpplus.kernels.LogScaleKernel(GaussianKernel())
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
