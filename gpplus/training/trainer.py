@@ -49,10 +49,6 @@ class GPTrainer:
         initializer_class: ParameterInitializer = None,
         initializer_kwargs: dict = None,
         device: str = "cpu",
-        map_prior: bool = False,
-        track_loocv: bool = True,
-        loocv_log_freq: int = 50,
-        use_loocv_objective: bool = False,
         min_loss_change: float = 1e-7,
         dtype: torch.dtype = torch.float64,
     ):
@@ -79,10 +75,6 @@ class GPTrainer:
         self.seed = seed
         self.callbacks = callbacks or []
         self.cholesky_jitter = cholesky_jitter
-        self.map_prior = map_prior
-        self.track_loocv = track_loocv
-        self.loocv_log_freq = loocv_log_freq
-        self.use_loocv_objective = use_loocv_objective
         self.min_loss_change = min_loss_change
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs
@@ -165,10 +157,6 @@ class GPTrainer:
             cholesky_jitter=self.cholesky_jitter,
             callbacks=callbacks_copy,
             device=self.device,
-            map_prior=self.map_prior,
-            track_loocv=self.track_loocv,
-            loocv_log_freq=self.loocv_log_freq,
-            use_loocv_objective=self.use_loocv_objective,
             min_loss_change=self.min_loss_change,
             scheduler_class=self.scheduler_class,
             scheduler_kwargs=self.scheduler_kwargs,

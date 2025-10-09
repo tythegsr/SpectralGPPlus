@@ -25,19 +25,15 @@ class GPTrainerSingleProcess:
         num_epochs,
         convergence_patience,
         cholesky_jitter: float = 1e-6,
-        map_prior: bool = False,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
-        track_loocv: bool = True,
-        loocv_log_freq: int = 50,
-        use_loocv_objective: bool = False,
         min_loss_change: float = 1e-7,
         dtype: torch.dtype = torch.float32,
         scheduler_class: torch.optim.lr_scheduler._LRScheduler = None,
         scheduler_kwargs: dict = None,
         use_gradual_jitter: bool = True,
-        jitter_start: float = 1e-3,
-        jitter_end: float = 1e-6,
+        jitter_start: float = 1e-6,
+        jitter_end: float = 1e-3,
         jitter_schedule: str = "linear",  # "linear", "exponential", "cosine"
     ):
         self.model = model
@@ -65,7 +61,6 @@ class GPTrainerSingleProcess:
         # Store training data for easy access
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
-        self.map_prior = map_prior
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs
 
@@ -83,9 +78,6 @@ class GPTrainerSingleProcess:
             logger.warning("Likelihood does not have set_training_data method")
 
         # Track LOOCV for comparison
-        self.track_loocv = track_loocv
-        self.loocv_log_freq = loocv_log_freq
-        self.use_loocv_objective = use_loocv_objective
 
     def _compute_jitter(self, epoch: int):
         """
@@ -129,48 +121,6 @@ class GPTrainerSingleProcess:
 
         return jitter.item()
 
-    def calculate_both_likelihoods(self, mll):
-        """
-        Calculate both MLL and LOOCV likelihoods simultaneously for comparison.
-
-        Args:
-            mll: Marginal log likelihood object
-
-        Returns:
-            dict: Contains both MLL and LOOCV likelihoods
-        """
-        try:
-            # Calculate MLL loss
-            mll_loss = mll(self.model(self.train_x), self.train_y)
-
-            # Calculate LOOCV loss using GPyTorch's built-in class
-            loocv_mll = gpytorch.mlls.LeaveOneOutPseudoLikelihood(mll.likelihood, self.model)
-            loocv_loss = -loocv_mll(self.model(self.train_x), self.train_y)
-
-            return {
-                "mll_loss": mll_loss.item(),
-                "mll_likelihood": -mll_loss.item(),
-                "loocv_loss": loocv_loss.item(),
-                "loocv_likelihood": -loocv_loss.item(),
-                "difference": mll_loss.item() - loocv_loss.item(),  # MLL - LOOCV
-            }
-
-        except Exception as e:
-            logger.warning(f"LOOCV calculation failed: {e}")
-            # Return MLL only if LOOCV fails, but still continue tracking
-            try:
-                mll_loss = mll(self.model(self.train_x), self.train_y)
-                return {
-                    "mll_loss": mll_loss.item(),
-                    "mll_likelihood": -mll_loss.item(),
-                    "loocv_loss": float("nan"),  # Mark as NaN when LOOCV fails
-                    "loocv_likelihood": float("nan"),
-                    "difference": float("nan"),
-                }
-            except Exception as e2:
-                logger.warning(f"MLL calculation also failed: {e2}")
-                return None
-
     def train(self):
         """
         Train the GP model with optional gradual jitter decrease.
@@ -194,16 +144,6 @@ class GPTrainerSingleProcess:
         else:
             train_epoch = self._train_standard_epoch
 
-        # Create mll instance
-        if self.use_loocv_objective:
-            # Use LOOCV as the training objective
-            mll = gpytorch.mlls.LeaveOneOutPseudoLikelihood(self.model.likelihood, self.model)
-            logger.info("Using LOOCV as training objective")
-        else:
-            # Use standard MLL
-            mll = self.mll_class(self.model.likelihood, self.model)
-            logger.info("Using standard MLL as training objective")
-
         # Local variables for early stopping
         best_loss = float("inf")
         best_state_dict = None
@@ -212,7 +152,6 @@ class GPTrainerSingleProcess:
 
         # Traces for logging/return
         loss_trace: List[float] = []
-        loocv_trace: List[dict] = []
 
         # ---------------------------
         # on_train_start
@@ -245,18 +184,6 @@ class GPTrainerSingleProcess:
                 epoch == 0 or epoch % max(1, self.num_epochs // 100) == 0 or epoch == self.num_epochs - 1
             ):
                 logger.info(f"Epoch {epoch}: jitter = {current_jitter:.2e}")
-            # --- DIAGNOSTIC: Print optimizer parameter names and check for raw_lengthscales ---
-            # print("[DIAGNOSTIC][OPTIMIZER] Parameter names and requires_grad status:")
-            # param_id_to_name = {}
-            # for name, param in self.model.named_parameters():
-            #     print(f"  {name}: requires_grad={param.requires_grad}, id={id(param)}")
-            #     param_id_to_name[id(param)] = name
-            # print("[DIAGNOSTIC][OPTIMIZER] Parameters in optimizer:")
-            # for i, group in enumerate(optimizer.param_groups):
-            #     print(f"  Param group {i}:")
-            #     for param in group['params']:
-            #         pname = param_id_to_name.get(id(param), "<unnamed>")
-            #         print(f"    {pname}: requires_grad={param.requires_grad}, id={id(param)}")
 
             # ---------------------------
             # on_epoch_start
@@ -275,45 +202,6 @@ class GPTrainerSingleProcess:
                 loss = train_epoch(optimizer, mll)
             loss_trace.append(float(loss))
 
-            # Calculate both MLL and LOOCV every N epochs
-            likelihood_data = None
-            if self.track_loocv and epoch % self.loocv_log_freq == 0:
-                likelihood_data = self.calculate_both_likelihoods(mll)
-                if likelihood_data is not None:
-                    loocv_trace.append(
-                        {
-                            "epoch": int(epoch),
-                            "mll_loss": float(likelihood_data.get("mll_loss", float("nan"))),
-                            "loocv_loss": float(likelihood_data.get("loocv_loss", float("nan"))),
-                        }
-                    )
-                else:
-                    # Even if calculation fails, add an entry with NaN to maintain trace continuity
-                    loocv_trace.append(
-                        {
-                            "epoch": int(epoch),
-                            "mll_loss": float("nan"),
-                            "loocv_loss": float("nan"),
-                        }
-                    )
-
-            if epoch % 500 == 0:
-                # Log epoch and loss using the existing logger
-                log_msg = f"Epoch {epoch + 1}/{self.num_epochs}, Training Loss: {loss:.6f}"
-                if likelihood_data is not None:
-                    log_msg += f"\n  MLL: {likelihood_data['mll_likelihood']:.6f}, "
-                    log_msg += f"LOOCV: {likelihood_data['loocv_likelihood']:.6f}, "
-                    log_msg += f"Diff: {likelihood_data['difference']:.6f}"
-
-                    # Add overfitting indicator
-                    if likelihood_data["difference"] > 0.5:
-                        log_msg += " ⚠️ (Overfitting risk)"
-                    elif likelihood_data["difference"] < -0.1:
-                        log_msg += " ✓ (Good generalization)"
-                    else:
-                        log_msg += " ✓ (Well-aligned)"
-                logger.info(log_msg)
-
             # ---------------------------
             # on_epoch_end
             # ---------------------------
@@ -322,7 +210,6 @@ class GPTrainerSingleProcess:
                 "model": self.model,
                 "trainer": self,
                 "loss": loss,
-                "likelihood_data": likelihood_data,
                 "device": self.device,
             }
             for cb in self.callbacks:
@@ -383,28 +270,10 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             cb.on_train_end(ctx)
 
-        # Final training LOOCV loss (last computed)
-        last_loocv = None
-        if loocv_trace:
-            last_loocv = float(loocv_trace[-1].get("loocv_loss", float("nan")))
-
-        # Extract validation trace from callbacks if available (for plotting/saving outside trainer)
-        validation_trace = None
-        for cb in self.callbacks:
-            if hasattr(cb, "get_validation_data"):
-                try:
-                    validation_trace = cb.get_validation_data()
-                    break
-                except Exception:
-                    validation_trace = None
-
         return {
             "loss": best_loss,
             "state_dict": best_state_dict,
             "loss_trace": loss_trace,
-            "loocv_trace": loocv_trace,
-            "train_loocv_loss": last_loocv,
-            "validation_trace": validation_trace,
         }
 
     def _train_standard_epoch(self, optimizer, mll):
