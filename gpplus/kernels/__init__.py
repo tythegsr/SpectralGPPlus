@@ -17,3 +17,4 @@ from .power_exponential_kernel import (
     PowerExponentialKernel,
     PowerExponentialKernelFixed,
 )
+from .log_scale_kernel import LogScaleKernel
