@@ -29,8 +29,6 @@ class GPR(gpytorch.models.ExactGP):
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
         dtype: torch.float32 = None,
-        seed=None,
-        learnable_priors=False,
     ):
         """Initializes GPR.
 
@@ -42,9 +40,6 @@ class GPR(gpytorch.models.ExactGP):
             mean_module (gpytorch.means.Mean, optional): Mean function. Defaults to ConstantMean if None.
             kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
                 Defaults to a ScaleKernel * Gaussian combo if None.
-            seed (int, optional): Random seed for reproducibility. Defaults to None.
-            learnable_priors (bool, optional): If True, registers learnable Normal priors to the likelihood. 
-                Defaults to False.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
