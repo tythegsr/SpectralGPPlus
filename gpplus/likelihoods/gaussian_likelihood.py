@@ -6,14 +6,14 @@ from typing import Any, Optional
 import torch
 from gpytorch.distributions import MultivariateNormal
 from gpytorch.likelihoods.gaussian_likelihood import _GaussianLikelihoodBase
-from gpytorch.likelihoods.noise_models import HomoskedasticNoise
+from gpytorch.likelihoods.noise_models import _HomoskedasticNoise
 from gpytorch.priors import Prior
 from torch import Tensor
 
 from ..constraints import SoftClamp
 
 
-class LogScaleHomoskedasticNoise(HomoskedasticNoise):
+class LogScaleHomoskedasticNoise(_HomoskedasticNoise):
     """
     Homoskedastic noise model with log-scale parameterization.
 
