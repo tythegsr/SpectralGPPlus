@@ -103,7 +103,7 @@ class GPTrainerSingleProcess:
         with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
             # Set the model to training mode
             self.model.train()
-            
+
             logger.info(f"Starting training for {self.num_epochs} epochs.")
 
             for epoch in range(self.num_epochs):
