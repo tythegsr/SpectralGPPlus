@@ -37,10 +37,13 @@ class LogScaleHomoskedasticNoise(_HomoskedasticNoise):
         super().__init__(noise_prior=noise_prior, noise_constraint=noise_constraint, batch_shape=batch_shape, **kwargs)
 
     def _noise_param(self, m):
+        """Get the noise parameter from the model."""
         return m.noise
 
     def _noise_closure(self, m, v):
-        m._set_noise(v)
+        """Set the noise parameter in the model."""
+        return m._set_noise(v)
+        
 
     @property
     def noise(self):
