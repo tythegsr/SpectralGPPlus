@@ -182,8 +182,8 @@ class CombinedKernel(gpytorch.kernels.Kernel):
             # Set cat_kernel
             if cat_kernel is None:
                 shared_gauss_k = GaussianKernel(ard_num_dims=temp_cat_encoder[0].z_dim)
-                shared_gauss_k.lengthscale.requires_grad_(False)
-                shared_gauss_k.lengthscale.data = torch.ones(temp_cat_encoder[0].z_dim) * 0.0
+                shared_gauss_k.raw_lengthscale.requires_grad_(False)
+                shared_gauss_k.raw_lengthscale.data = torch.ones(temp_cat_encoder[0].z_dim) * 0.0
                 self.cat_kernel = shared_gauss_k
             else:
                 self.cat_kernel = cat_kernel
@@ -227,8 +227,8 @@ class CombinedKernel(gpytorch.kernels.Kernel):
             # Set source_kernel
             if source_kernel is None:
                 gauss_k_source = GaussianKernel(ard_num_dims=encoder.z_dim)
-                gauss_k_source.lengthscale.requires_grad_(False)
-                gauss_k_source.lengthscale.data = torch.ones(encoder.z_dim) * 0.0
+                gauss_k_source.raw_lengthscale.requires_grad_(False)
+                gauss_k_source.raw_lengthscale.data = torch.ones(encoder.z_dim) * 0.0
                 self.source_kernel = gauss_k_source
             else:
                 self.source_kernel = source_kernel
