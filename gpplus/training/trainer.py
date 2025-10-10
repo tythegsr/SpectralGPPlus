@@ -3,7 +3,6 @@ import os
 from typing import List, Optional
 
 import gpytorch
-import scipy
 import torch
 from joblib import Parallel, delayed
 
@@ -50,7 +49,6 @@ class GPTrainer:
         initializer_kwargs: dict = None,
         device: str = "cpu",
         min_loss_change: float = 1e-7,
-        dtype: torch.dtype = torch.float64,
     ):
         # -------------------------------------------------------
         # Set up the device (CPU or CUDA)
@@ -78,7 +76,12 @@ class GPTrainer:
         self.min_loss_change = min_loss_change
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs
-        self.dtype = dtype
+        # Get dtype from the model (which should be set from input data)
+        if hasattr(model, "dtype") and model.dtype is not None:
+            self.dtype = model.dtype
+        else:
+            self.dtype = torch.float64
+            logger.warning(f"Model has no dtype attribute. Using {self.dtype} as fallback.")
 
         """
         # Initialize model parameters if requested
@@ -102,15 +105,17 @@ class GPTrainer:
         # --------------------------------------------------
         # Handle optimizer class, use LBFGS as default
         if optimizer_class is None:
-            self.optimizer_class = scipy.optimize.LBFGS  # torch.optim.Adam # scipy.optimize.LBFGS # torch.optim.LBFGS
-            logger.warning("No optimizer class passed. Defaulting to LBFGS optimizer.")
+            from .optimizers import LBFGSScipy
+
+            self.optimizer_class = LBFGSScipy
+            logger.warning("No optimizer class passed. Defaulting to LBFGS Scipy optimizer.")
         else:
             self.optimizer_class = optimizer_class
 
         # Handle optimizer arguments
         if optimizer_kwargs is None:
-            self.optimizer_kwargs = {"lr": 0.1, "line_search_fn": "strong_wolfe"}
-            logger.warning("No optimizer arguments passed. Defaulting to learning rate of 0.1")
+            self.optimizer_kwargs = {"max_iter": 20}  # Default for LBFGSScipy
+            logger.warning("No optimizer arguments passed. Defaulting to max_iter=20")
         else:
             self.optimizer_kwargs = optimizer_kwargs
 
@@ -160,8 +165,6 @@ class GPTrainer:
             min_loss_change=self.min_loss_change,
             scheduler_class=self.scheduler_class,
             scheduler_kwargs=self.scheduler_kwargs,
-            use_gradual_jitter=False,
-            dtype=self.dtype,
         )
         train_result = run.train()
 

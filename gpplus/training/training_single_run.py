@@ -28,7 +28,6 @@ class GPTrainerSingleProcess:
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
         min_loss_change: float = 1e-7,
-        dtype: torch.dtype = torch.float32,
         scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
     ):
@@ -42,7 +41,12 @@ class GPTrainerSingleProcess:
         self.callbacks = callbacks or []
         self.device = device
         self.min_loss_change = min_loss_change
-        self.dtype = dtype
+        # Get dtype from the model (which should be set from input data)
+        if hasattr(model, "dtype") and model.dtype is not None:
+            self.dtype = model.dtype
+        else:
+            self.dtype = torch.float64
+            logger.warning(f"Model has no dtype attribute. Using {self.dtype} as fallback.")
         # Move the model to device and convert to specified dtype
         self.model = self.model.to(self.device, dtype=self.dtype)
 

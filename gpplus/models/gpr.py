@@ -28,7 +28,6 @@ class GPR(gpytorch.models.ExactGP):
         likelihood: gpytorch.likelihoods.Likelihood = None,
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
-        dtype: torch.float32 = None,
     ):
         """Initializes GPR.
 
@@ -44,10 +43,7 @@ class GPR(gpytorch.models.ExactGP):
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
-        if dtype is None:
-            self.dtype = train_x.dtype
-        else:
-            self.dtype = dtype
+        self.dtype = train_x.dtype
 
         if likelihood is None:
             likelihood = LogGaussianLikelihood()
@@ -76,6 +72,11 @@ class GPR(gpytorch.models.ExactGP):
         self.mean_module = mean_module
         self.covar_module = kernel_module
 
+        # Ensure all components use the same dtype as the input data
+        self.mean_module = self.mean_module.to(dtype=self.dtype)
+        self.covar_module = self.covar_module.to(dtype=self.dtype)
+        self.likelihood = self.likelihood.to(dtype=self.dtype)
+
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling
             if embedding or calibration is probabilistic.
@@ -95,8 +96,8 @@ class GPR(gpytorch.models.ExactGP):
             logger.error("Input x must be a torch.Tensor instance.")
             raise TypeError("Input x must be a torch.Tensor.")
 
-        mean = self.mean_module(x).to(self.dtype)
-        covar = self.covar_module(x).to(self.dtype)
+        mean = self.mean_module(x)
+        covar = self.covar_module(x)
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
     def save(self, filepath: str = "model_weights.pth") -> None:
