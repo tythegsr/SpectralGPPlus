@@ -29,12 +29,8 @@ class GPTrainerSingleProcess:
         device: str = None,
         min_loss_change: float = 1e-7,
         dtype: torch.dtype = torch.float32,
-        scheduler_class: torch.optim.lr_scheduler._LRScheduler = None,
+        scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
-        use_gradual_jitter: bool = True,
-        jitter_start: float = 1e-6,
-        jitter_end: float = 1e-3,
-        jitter_schedule: str = "linear",  # "linear", "exponential", "cosine"
     ):
         self.model = model
         self.optimizer_class = optimizer_class
@@ -63,63 +59,6 @@ class GPTrainerSingleProcess:
         self.train_y = self.model.train_targets
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs
-
-        # Gradual jitter parameters
-        self.use_gradual_jitter = use_gradual_jitter
-        self.jitter_start = jitter_start
-        self.jitter_end = jitter_end
-        self.jitter_schedule = jitter_schedule
-
-        # Ensure multifidelity likelihood knows true sample order
-        try:
-            if hasattr(self.model, "likelihood") and hasattr(self.model.likelihood, "set_training_data"):
-                self.model.likelihood.set_training_data(self.train_x)
-        except Exception:
-            logger.warning("Likelihood does not have set_training_data method")
-
-        # Track LOOCV for comparison
-
-    def _compute_jitter(self, epoch: int):
-        """
-        Compute the jitter value for the current epoch.
-
-        Args:
-            epoch: Current epoch (0-indexed)
-
-        Returns:
-            Scalar value in the model's dtype: Jitter value for this epoch
-        """
-        if not self.use_gradual_jitter:
-            return self.cholesky_jitter
-
-        if self.num_epochs <= 1:
-            return self.jitter_start
-
-        # Progress from 0 to 1 over all epochs
-        progress = torch.tensor(epoch / (self.num_epochs - 1), dtype=self.dtype)
-        progress = torch.clamp(progress, 0.0, 1.0)  # Clamp to [0, 1]
-
-        if self.jitter_schedule == "linear":
-            # Linear interpolation
-            jitter = self.jitter_start + progress * (self.jitter_end - self.jitter_start)
-
-        elif self.jitter_schedule == "exponential":
-            # Exponential decay (log-linear in jitter space)
-            log_start = torch.log(torch.tensor(self.jitter_start, dtype=self.dtype))
-            log_end = torch.log(torch.tensor(self.jitter_end, dtype=self.dtype))
-            log_jitter = log_start + progress * (log_end - log_start)
-            jitter = torch.exp(log_jitter)
-
-        elif self.jitter_schedule == "cosine":
-            # Cosine annealing (smooth start, accelerates in middle, smooth end)
-            pi = torch.tensor(torch.pi, dtype=self.dtype)
-            cosine_progress = 0.5 * (1 + torch.cos(pi * progress))
-            jitter = self.jitter_end + (self.jitter_start - self.jitter_end) * cosine_progress
-
-        else:
-            raise ValueError(f"Unknown jitter schedule: {self.jitter_schedule}")
-
-        return jitter.item()
 
     def train(self):
         """
@@ -150,9 +89,6 @@ class GPTrainerSingleProcess:
         no_improvement_epochs = 0
         previous_loss = None
 
-        # Traces for logging/return
-        loss_trace: List[float] = []
-
         # ---------------------------
         # on_train_start
         # ---------------------------
@@ -164,93 +100,77 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             cb.on_train_start(ctx)
 
-        # Set the model to training mode
-        self.model.train()
+        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
+            # Set the model to training mode
+            self.model.train()
+            
+            logger.info(f"Starting training for {self.num_epochs} epochs.")
 
-        if self.use_gradual_jitter:
-            logger.info(f"Starting training for {self.num_epochs} epochs with gradual jitter decrease.")
-            logger.info(
-                f"Jitter schedule: {self.jitter_schedule}, from {self.jitter_start:.2e} to {self.jitter_end:.2e}"
-            )
-        else:
-            logger.info(f"Starting training for {self.num_epochs} epochs with fixed jitter {self.cholesky_jitter:.2e}.")
+            for epoch in range(self.num_epochs):
+                # ---------------------------
+                # on_epoch_start
+                # ---------------------------
+                ctx: CallbackOnEpochStartContext = {
+                    "epoch": epoch,
+                    "model": self.model,
+                    "trainer": self,
+                    "device": self.device,
+                }
+                for cb in self.callbacks:
+                    cb.on_epoch_start(ctx)
 
-        for epoch in range(self.num_epochs):
-            # Compute jitter for this epoch
-            current_jitter = self._compute_jitter(epoch)
-
-            # Log jitter changes periodically
-            if self.use_gradual_jitter and (
-                epoch == 0 or epoch % max(1, self.num_epochs // 100) == 0 or epoch == self.num_epochs - 1
-            ):
-                logger.info(f"Epoch {epoch}: jitter = {current_jitter:.2e}")
-
-            # ---------------------------
-            # on_epoch_start
-            # ---------------------------
-            ctx: CallbackOnEpochStartContext = {
-                "epoch": epoch,
-                "model": self.model,
-                "trainer": self,
-                "device": self.device,
-            }
-            for cb in self.callbacks:
-                cb.on_epoch_start(ctx)
-
-            # Train for a single epoch with current jitter
-            with gpytorch.settings.cholesky_jitter(current_jitter):
+                # Train for a single epoch
                 loss = train_epoch(optimizer, mll)
-            loss_trace.append(float(loss))
 
-            # ---------------------------
-            # on_epoch_end
-            # ---------------------------
-            ctx: CallbackOnEpochEndContext = {
-                "epoch": epoch,
-                "model": self.model,
-                "trainer": self,
-                "loss": loss,
-                "device": self.device,
-            }
-            for cb in self.callbacks:
-                cb.on_epoch_end(ctx)
+                # ---------------------------
+                # on_epoch_end
+                # ---------------------------
+                ctx: CallbackOnEpochEndContext = {
+                    "epoch": epoch,
+                    "model": self.model,
+                    "trainer": self,
+                    "loss": loss,
+                    "device": self.device,
+                }
+                for cb in self.callbacks:
+                    cb.on_epoch_end(ctx)
 
-            # Update best-loss and best-state tracking
-            if loss < best_loss:
-                best_loss = loss
-                best_state_dict = copy.deepcopy(self.model.state_dict())
-                no_improvement_epochs = 0
-            else:
-                no_improvement_epochs += 1
+                # Update best-loss and best-state tracking
+                if loss < best_loss:
+                    best_loss = loss
+                    best_state_dict = copy.deepcopy(self.model.state_dict())
+                    no_improvement_epochs = 0
+                else:
+                    no_improvement_epochs += 1
 
-            # Check for early stopping conditions
-            early_stop_triggered = False
-            early_stop_reason = ""
+                # Check for early stopping conditions
+                early_stop_triggered = False
+                early_stop_reason = ""
 
-            # Condition 1: No improvement for convergence_patience epochs
-            if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
-                early_stop_triggered = True
-                early_stop_reason = f"No improvement for {self.convergence_patience} epochs"
-
-            # Condition 2: Absolute loss change is below threshold (OR condition)
-            if previous_loss is not None:
-                loss_change = abs(previous_loss - loss)
-                if loss_change < self.min_loss_change:
+                # Condition 1: No improvement for convergence_patience epochs
+                if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
                     early_stop_triggered = True
-                    if early_stop_reason:
-                        early_stop_reason += f" OR absolute loss change below {self.min_loss_change:.1e}"
-                    else:
-                        early_stop_reason = f"absolute loss change below {self.min_loss_change:.1e}"
+                    early_stop_reason = f"No improvement for {self.convergence_patience} epochs"
 
-            if early_stop_triggered:
-                logger.info(
-                    f"Early stopping triggered at epoch {epoch + 1}. "
-                    f"Reason: {early_stop_reason}. Best loss: {best_loss:.6f}"
-                )
-                break  # Stop training
+                # Condition 2: Absolute loss change is below threshold (OR condition)
+                if previous_loss is not None:
+                    loss_change = abs(previous_loss - loss)
+                    if loss_change < self.min_loss_change:
+                        early_stop_triggered = True
+                        if early_stop_reason:
+                            early_stop_reason += f" OR absolute loss change below {self.min_loss_change:.1e}"
+                        else:
+                            early_stop_reason = f"absolute loss change below {self.min_loss_change:.1e}"
 
-            # Update previous_loss for next iteration
-            previous_loss = loss
+                if early_stop_triggered:
+                    logger.info(
+                        f"Early stopping triggered at epoch {epoch + 1}. "
+                        f"Reason: {early_stop_reason}. Best loss: {best_loss:.6f}"
+                    )
+                    break  # Stop training
+
+                # Update previous_loss for next iteration
+                previous_loss = loss
 
         # Log training completion
         logger.info(f"Training completed. Best loss: {best_loss:.6f}")
@@ -270,11 +190,7 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             cb.on_train_end(ctx)
 
-        return {
-            "loss": best_loss,
-            "state_dict": best_state_dict,
-            "loss_trace": loss_trace,
-        }
+        return {"loss": best_loss, "state_dict": best_state_dict}
 
     def _train_standard_epoch(self, optimizer, mll):
         """
