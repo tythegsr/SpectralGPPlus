@@ -37,7 +37,7 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
-        scheduler_class: torch.optim.lr_scheduler._LRScheduler = None,
+        scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
         num_epochs: int = 50,
         convergence_patience=20,  # Stop if no improvement for 20 epochs
