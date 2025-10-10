@@ -207,23 +207,6 @@ class GPTrainer:
                 }
 
         def _worker_init(seed=self.seed, cg_tol=5e-3, max_iters=2000):
-            # import os, random, numpy as np, torch
-            # BLAS / OpenMP
-            # os.environ["OPENBLAS_NUM_THREADS"] = "1"    # ???
-            # os.environ["OMP_NUM_THREADS"]      = "1"    # ???
-            # # RNGs
-            # random.seed(seed)
-            # np.random.seed(seed)
-            # torch.manual_seed(seed)
-            # torch.cuda.manual_seed_all(seed)
-            # torch.set_num_threads(1)
-            # torch.set_num_interop_threads(1)
-            # torch.use_deterministic_algorithms(True)
-            # torch.backends.cudnn.deterministic = True
-            # torch.backends.cudnn.benchmark     = False
-            # GPyTorch & LO settings
-            # import gpytorch.settings as gpts
-            # gpts.max_cholesky_size._global_value = 10_000
             from gpytorch.settings import max_cholesky_size
 
             max_cholesky_size._global_value = 10_000
