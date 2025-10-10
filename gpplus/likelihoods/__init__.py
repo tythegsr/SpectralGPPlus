@@ -1,1 +1,1 @@
-from .gaussian_likelihood import GaussianLikelihood
+from .log_gaussian_likelihood import LogGaussianLikelihood
