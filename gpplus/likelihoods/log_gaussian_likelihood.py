@@ -6,14 +6,14 @@ from typing import Any, Optional
 import torch
 from gpytorch.distributions import MultivariateNormal
 from gpytorch.likelihoods.gaussian_likelihood import _GaussianLikelihoodBase
-from gpytorch.likelihoods.noise_models import _HomoskedasticNoise
+from gpytorch.likelihoods.noise_models import _HomoskedasticNoiseBase
 from gpytorch.priors import Prior
 from torch import Tensor
 
 from ..constraints import SoftClamp
 
 
-class LogScaleHomoskedasticNoise(_HomoskedasticNoise):
+class LogScaleHomoskedasticNoise(_HomoskedasticNoiseBase):
     """
     Homoskedastic noise model with log-scale parameterization.
 
@@ -63,7 +63,7 @@ class LogScaleHomoskedasticNoise(_HomoskedasticNoise):
         self.initialize(raw_noise=self.raw_noise_constraint.inverse_transform(log_value))
 
 
-class GaussianLikelihood(_GaussianLikelihoodBase):
+class LogGaussianLikelihood(_GaussianLikelihoodBase):
     r"""
     Custom Gaussian likelihood with log-scale noise parameterization.
 
@@ -82,7 +82,7 @@ class GaussianLikelihood(_GaussianLikelihoodBase):
         This likelihood can be used for exact or approximate inference.
 
     .. note::
-        GaussianLikelihood has an analytic marginal distribution.
+        LogGaussianLikelihood has an analytic marginal distribution.
 
     Args:
         noise_prior: Prior for noise parameter :math:`\sigma^2`.

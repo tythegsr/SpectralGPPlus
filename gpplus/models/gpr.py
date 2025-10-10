@@ -5,7 +5,7 @@ import torch
 
 from ..config import logger
 from ..kernels import GaussianKernel, LogScaleKernel
-from ..likelihoods import GaussianLikelihood
+from ..likelihoods import LogGaussianLikelihood
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -14,7 +14,7 @@ class GPR(gpytorch.models.ExactGP):
     The GPR class encapsulates:
       - A mean module (defaults to ConstantMean if None).
       - A kernel module (defaults to a Scale Gaussian kernel if None).
-      - A likelihood module (defaults to GaussianLikelihood if None).
+      - A likelihood module (defaults to LogGaussianLikelihood if None).
 
     Attributes:
         mean_module (gpytorch.means.Mean): The mean function of the GP.
@@ -50,8 +50,8 @@ class GPR(gpytorch.models.ExactGP):
             self.dtype = dtype
 
         if likelihood is None:
-            likelihood = GaussianLikelihood()
-            logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
+            likelihood = LogGaussianLikelihood()
+            logger.warning("No likelihood provided. Using LogGaussianLikelihood as default.")
 
         if mean_module is None:
             mean_module = gpytorch.means.ConstantMean()
@@ -66,6 +66,10 @@ class GPR(gpytorch.models.ExactGP):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
 
         logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
+
+        if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
+            logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
+            raise TypeError("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
 
         super().__init__(train_x, train_y, likelihood)
 
