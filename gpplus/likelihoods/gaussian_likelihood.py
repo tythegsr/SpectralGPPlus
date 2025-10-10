@@ -43,7 +43,6 @@ class LogScaleHomoskedasticNoise(_HomoskedasticNoise):
     def _noise_closure(self, m, v):
         """Set the noise parameter in the model."""
         return m._set_noise(v)
-        
 
     @property
     def noise(self):
