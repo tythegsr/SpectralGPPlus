@@ -97,9 +97,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                 sample = sample.reshape(param.shape)
 
                 # Parameter-specific mapping
-                if ".lengthscale" in name:
-                    scale = 3
-                    param.data = sample * 2 * scale - scale
+                if ".raw_lengthscale" in name:
+                    lower, upper = -5, 3
+                    param.data = lower + (upper - lower) * sample
                     # torch.nn.init.normal_(param, mean=1.0, std=2.0)
                 elif ".outputscale" in name:
                     lower, upper = 0.1, 10
