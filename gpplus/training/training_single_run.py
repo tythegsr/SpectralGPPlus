@@ -2,6 +2,7 @@ import copy
 from typing import List, Optional
 
 import gpytorch
+import linear_operator
 import torch
 
 from ..config import logger
@@ -104,7 +105,14 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             cb.on_train_start(ctx)
 
-        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
+        # Set jitter in both gpytorch and linear_operator settings
+        # Set the same jitter for both float32 and float64 to ensure consistent behavior
+        with (
+            gpytorch.settings.cholesky_jitter(self.cholesky_jitter),
+            linear_operator.settings.cholesky_jitter(
+                float_value=self.cholesky_jitter, double_value=self.cholesky_jitter
+            ),
+        ):
             # Set the model to training mode
             self.model.train()
 
@@ -294,6 +302,6 @@ class GPTrainerSingleProcess:
 
             loss.backward()
 
-            return loss
+            return loss.detach()
 
         return closure

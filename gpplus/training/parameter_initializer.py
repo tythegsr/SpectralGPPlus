@@ -104,7 +104,7 @@ class DefaultParameterInitializer(ParameterInitializer):
             return {
                 "method": "normal",
                 "mean": -2.0,
-                "std": 1.5,
+                "std": 2.0,
                 "description": f"Lengthscale parameter {'(ARD)' if is_ard else '(single)'} - log scale",
             }
         elif param_type == "raw_outputscale":
@@ -116,16 +116,16 @@ class DefaultParameterInitializer(ParameterInitializer):
             }
         elif param_type == "raw_noise":
             return {
-                "method": "normal",
-                "mean": -3.0,
-                "std": 1.0,
-                "description": "Noise parameter - log scale",
+                "method": "uniform",
+                "lower": -7.0,
+                "upper": 3.0,
+                "description": "Noise parameter - uniform scale",
             }
         elif param_type == "constant":
             return {
                 "method": "normal",
                 "mean": 0.0,
-                "std": 0.1,
+                "std": 1.0,
                 "description": "Mean constant parameter",
             }
         elif param_type == "weight":
@@ -220,6 +220,7 @@ class DefaultParameterInitializer(ParameterInitializer):
         config: Dict[str, Any],
         name: str = "",
         model: torch.nn.Module = None,
+        run_index: int = 0,
     ):
         """Initialize a single parameter based on the configuration and constraints."""
         method = config["method"]
@@ -229,8 +230,10 @@ class DefaultParameterInitializer(ParameterInitializer):
             # Create a temporary tensor with the correct dtype, then copy to param
             temp_param = torch.empty_like(param, dtype=param.dtype, device=param.device)
             try:
+                # Use run_index to generate different seeds for each initialization
+                generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
                 torch.nn.init.orthogonal_(
-                    temp_param, gain=config.get("gain", 1.0), generator=torch.Generator().manual_seed(self.seed)
+                    temp_param, gain=config.get("gain", 1.0), generator=torch.Generator().manual_seed(generator_seed)
                 )
                 # Check for NaN after initialization
                 if torch.isnan(temp_param).any():
@@ -238,7 +241,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     logger.error(f"temp_param: {temp_param}")
                     logger.error(f"param shape: {param.shape}, dtype: {param.dtype}")
                 param.data = temp_param
-                logger.debug(f"Orthogonal initialization successful for {name}")
+                logger.debug(f"Orthogonal initialization successful for {name} with seed {generator_seed}")
             except Exception as e:
                 logger.error(f"Orthogonal initialization failed for {name}: {e}")
                 # Fallback to normal initialization
@@ -249,21 +252,23 @@ class DefaultParameterInitializer(ParameterInitializer):
             torch.nn.init.orthogonal_(param, gain=config.get("gain", 1.0))
 
         elif method == "normal_matrix":
-            # Use PyTorch's orthogonal initialization
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
             torch.nn.init.normal_(
                 param,
                 mean=config.get("mean", 0.0),
                 std=config.get("std", 0.1),
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=torch.Generator().manual_seed(generator_seed),
             )
 
         elif method == "uniform_matrix":
-            # Use PyTorch's uniform initialization
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
             torch.nn.init.uniform_(
                 param,
                 a=config.get("lower", -0.1),
                 b=config.get("upper", 0.1),
-                generator=torch.Generator().manual_seed(self.seed),
+                generator=torch.Generator().manual_seed(generator_seed),
             )
 
         elif method == "xavier_uniform":
@@ -324,13 +329,13 @@ class DefaultParameterInitializer(ParameterInitializer):
 
                 # Initialize the parameter
                 old_value = param.data.clone()
-                self.initialize_parameter(param, sample, config, name, model)
+                self.initialize_parameter(param, sample, config, name, model, run_index)
                 new_value = param.data.clone()
 
                 logger.debug(
                     f"Initialized {name}: {config['description']} (shape={param.shape}, method={config['method']})"
                 )
-                logger.debug(f"  Old value: {old_value}")
+                # logger.debug(f"  Old value: {old_value}")
                 logger.debug(f"  New value: {new_value}")
 
                 # Special debug for key parameters
