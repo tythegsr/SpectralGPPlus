@@ -21,7 +21,11 @@ def get_latent_representations(model, qual_dict=None):
               If no encoders are found, returns None.
     """
     model.eval()
-    combined_kernel = model.covar_module
+    # Handle both direct CombinedKernel and LogScaleKernel wrapping CombinedKernel
+    if hasattr(model.covar_module, "base_kernel"):
+        combined_kernel = model.covar_module.base_kernel
+    else:
+        combined_kernel = model.covar_module
 
     # Check if categorical variables exist
     # Look for categorical encoders - prefer numbered ones, fallback to generic
@@ -59,8 +63,13 @@ def get_latent_representations(model, qual_dict=None):
             if hasattr(latent_net, "input_dim"):
                 encoder_dims = [latent_net.input_dim]
             else:
-                print(f"Warning: Encoder {encoder_name} has no input_dim attribute")
+                print(f"Warning: Encoder {encoder_name} has no input_dim attribute, skipping")
                 continue
+
+        # Skip if no dimensions found
+        if not encoder_dims:
+            print(f"Warning: No dimensions found for encoder {encoder_name}, skipping")
+            continue
 
         # Generate all possible combinations for this encoder's variables
         indices = torch.cartesian_prod(*[torch.arange(dim) for dim in encoder_dims])
