@@ -45,7 +45,6 @@ class MatrixEncoder(nn.Module):
             nn.init.uniform_(self.projection_matrix, -init_std, init_std, generator=generator)
         elif initialization == "orthogonal":
             nn.init.orthogonal_(self.projection_matrix, gain=init_std, generator=generator)
-
         else:
             raise ValueError(f"Unknown initialization method: {initialization}")
 
@@ -142,7 +141,7 @@ class NeuralEncoder(gpytorch.Module):
             self.num_passes_pred = self.num_passes
 
         if architecture_config is None:
-            architecture_config = {"hidden_dims": [], "activation": "relu", "dropout": None}
+            architecture_config = {"hidden_dims": [], "activation": "tanh", "dropout": None}
 
         activation_map = {
             "relu": nn.ReLU(),

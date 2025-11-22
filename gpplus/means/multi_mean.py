@@ -88,11 +88,12 @@ class MultiMean(nn.Module):
         # Set default means if not provided
         if means is None:
             from gpytorch.means import ConstantMean, ZeroMean
-            from gpytorch.priors import NormalPrior
+            # from gpytorch.priors import NormalPrior
 
             means = [ZeroMean()]
             if self.num_sources and self.num_sources > 1:
-                means += [ConstantMean(constant_prior=NormalPrior(0.0, 1.0))]
+                # means += [ConstantMean(constant_prior=NormalPrior(0.0, 1.0))]
+                means += [ConstantMean()]
         if not isinstance(means, list):
             means = [means]
 
