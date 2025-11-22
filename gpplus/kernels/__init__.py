@@ -9,6 +9,8 @@ from .advanced_kernels import (
     NeuralScaleKernel,
     SinhKernel,
 )
+from .mvmf_kernel import MVMFKernel  # was combined_kernel_OneCatK
+
 from .unconstrained_kernel import UnconstrainedKernel
 from .gaussian_kernel import GaussianKernel
 from .kronecker import KroneckerKernel
