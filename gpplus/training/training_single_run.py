@@ -14,6 +14,12 @@ from .callbacks import (
     CallbackOnTrainStartContext,
 )
 from .optimizers import LBFGSScipy
+from .stop_conditions import (
+    StopCondition,
+    StopConditionContext,
+    ConvergencePatienceStopCondition,
+    MinLossChangeStopCondition,
+)
 
 
 class GPTrainerSingleProcess:
@@ -24,24 +30,30 @@ class GPTrainerSingleProcess:
         optimizer_kwargs,
         mll_class,
         num_epochs,
-        convergence_patience,
         cholesky_jitter: float = 1e-6,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
-        min_loss_change: float = 1e-7,
         scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
+        stop_conditions: Optional[List[StopCondition]] = None,
     ):
         self.model = model
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.mll_class = mll_class
         self.num_epochs = num_epochs
-        self.convergence_patience = convergence_patience
         self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
         self.device = device
-        self.min_loss_change = min_loss_change
+        
+        # Set default stop conditions if none provided
+        if stop_conditions is None:
+            self.stop_conditions = [
+                ConvergencePatienceStopCondition(patience=20),
+                MinLossChangeStopCondition(min_loss_change=1e-7),
+            ]
+        else:
+            self.stop_conditions = stop_conditions
         # Get dtype from the model (which should be set from input data)
         if hasattr(model, "dtype") and model.dtype is not None:
             self.dtype = model.dtype
@@ -156,25 +168,30 @@ class GPTrainerSingleProcess:
                     no_improvement_epochs += 1
 
                 # Check for early stopping conditions
+                stop_context: StopConditionContext = {
+                    "epoch": epoch,
+                    "model": self.model,
+                    "trainer": self,
+                    "loss": loss,
+                    "previous_loss": previous_loss,
+                    "best_loss": best_loss,
+                    "no_improvement_epochs": no_improvement_epochs,
+                    "device": self.device,
+                }
+                
                 early_stop_triggered = False
-                early_stop_reason = ""
-
-                # Condition 1: No improvement for convergence_patience epochs
-                if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
-                    early_stop_triggered = True
-                    early_stop_reason = f"No improvement for {self.convergence_patience} epochs"
-
-                # Condition 2: Absolute loss change is below threshold (OR condition)
-                if previous_loss is not None:
-                    loss_change = abs(previous_loss - loss)
-                    if loss_change < self.min_loss_change:
+                early_stop_reasons = []
+                
+                # Check all stop conditions
+                for stop_condition in self.stop_conditions:
+                    should_stop, reason = stop_condition.should_stop(stop_context)
+                    if should_stop:
                         early_stop_triggered = True
-                        if early_stop_reason:
-                            early_stop_reason += f" OR absolute loss change below {self.min_loss_change:.1e}"
-                        else:
-                            early_stop_reason = f"absolute loss change below {self.min_loss_change:.1e}"
-
+                        if reason:
+                            early_stop_reasons.append(reason)
+                
                 if early_stop_triggered:
+                    early_stop_reason = " OR ".join(early_stop_reasons) if early_stop_reasons else "Stop condition met"
                     logger.info(
                         f"Early stopping triggered at epoch {epoch + 1}. "
                         f"Reason: {early_stop_reason}. Best loss: {best_loss:.6f}"

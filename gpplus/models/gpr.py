@@ -75,11 +75,6 @@ class GPR(gpytorch.models.ExactGP):
         self.mean_module = mean_module
         self.covar_module = kernel_module
 
-        # Ensure all components use the same dtype as the input data
-        self.mean_module = self.mean_module.to(dtype=self.dtype)
-        self.covar_module = self.covar_module.to(dtype=self.dtype)
-        self.likelihood = self.likelihood.to(dtype=self.dtype)
-
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling
             if embedding or calibration is probabilistic.
