@@ -53,14 +53,25 @@ class DefaultParameterInitializer(ParameterInitializer):
         self.parameter_configs = parameter_configs or {}
 
     def setup(self, model: torch.nn.Module):
-        """Calculate the total number of learnable parameters and precompute Sobol samples."""
-        self.num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        """
+        Calculate the total number of learnable parameters and precompute Sobol samples.
+
+        Excludes '.weight' and '.bias' parameters from Sobol sampling count,
+        as these are initialized separately (Xavier uniform for weights, zeros for biases).
+        """
+        # Count only parameters that will use Sobol samples (exclude .weight and .bias)
+        self.num_params = 0
+        for name, param in model.named_parameters():
+            if param.requires_grad and ".weight" not in name and ".bias" not in name:
+                self.num_params += param.numel()
+
         sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
         self.sobol_samples = sobol_engine.draw(self.num_runs)
 
         logger.info("Using DefaultParameterInitializer")
         logger.debug(f"Sobol samples generated: {self.sobol_samples.shape}")
         logger.info("All constraints are now built into kernel and likelihood classes - no manual setup needed")
+        logger.debug("Excluding .weight and .bias parameters from Sobol sampling (initialized separately)")
 
     def get_parameter_type(self, name: str, param: torch.Tensor) -> str:
         """Determine the parameter type based on parameter name only."""
@@ -268,9 +279,12 @@ class DefaultParameterInitializer(ParameterInitializer):
             )
 
         elif method == "xavier_uniform":
-            limit = config.get("limit", 1.0)
-            raw_value = (sample * 2 - 1) * limit
-            param.data = raw_value.to(dtype=param.dtype)
+            # Use PyTorch's xavier_uniform initialization directly
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index) if self.seed is not None else run_index
+            g = torch.Generator().manual_seed(generator_seed)
+            torch.nn.init.xavier_uniform_(param, generator=g)
+            logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform (seed={generator_seed})")
 
         elif method == "uniform":
             lower = config.get("lower", -6.0)
@@ -302,7 +316,17 @@ class DefaultParameterInitializer(ParameterInitializer):
             param.data = raw_value.to(dtype=param.dtype)
 
     def initialize(self, model: torch.nn.Module, run_index: int):
-        """Initialize the model parameters for a specific run using improved configuration."""
+        """
+        Initialize the model parameters for a specific run.
+
+        We exclude '.weight' and '.bias' parameters from Sobol sampling:
+        - '.weight': Xavier uniform
+        - '.bias': zeros
+        Other parameters are mapped from Sobol [0,1] samples into configured ranges.
+
+        :param model: The model whose parameters need initialization.
+        :param run_index: The run index corresponding to the precomputed Sobol sample.
+        """
         idx = 0
 
         with torch.no_grad():
@@ -317,6 +341,21 @@ class DefaultParameterInitializer(ParameterInitializer):
 
                 # Get initialization configuration
                 config = self.get_initialization_config(name, param, model)
+
+                # Handle weight parameters with Xavier uniform (exclude from Sobol sampling)
+                if ".weight" in name:
+                    # reproducible per-run, on CPU
+                    generator_seed = (self.seed + run_index) if self.seed is not None else run_index
+                    g = torch.Generator().manual_seed(generator_seed)
+                    torch.nn.init.xavier_uniform_(param, generator=g)
+                    logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform")
+                    continue
+
+                # Handle bias parameters with zeros (exclude from Sobol sampling)
+                if ".bias" in name:
+                    torch.nn.init.zeros_(param)
+                    logger.debug(f"Initialized bias parameter '{name}' with zeros")
+                    continue
 
                 # Slice the sobol_samples for the current parameter
                 sample = self.sobol_samples[run_index, idx : idx + param_length]
