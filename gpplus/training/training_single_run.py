@@ -15,10 +15,10 @@ from .callbacks import (
 )
 from .optimizers import LBFGSScipy
 from .stop_conditions import (
-    StopCondition,
-    StopConditionContext,
     ConvergencePatienceStopCondition,
     MinLossChangeStopCondition,
+    StopCondition,
+    StopConditionContext,
 )
 
 
@@ -45,7 +45,7 @@ class GPTrainerSingleProcess:
         self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
         self.device = device
-        
+
         # Set default stop conditions if none provided
         if stop_conditions is None:
             self.stop_conditions = [
@@ -178,10 +178,10 @@ class GPTrainerSingleProcess:
                     "no_improvement_epochs": no_improvement_epochs,
                     "device": self.device,
                 }
-                
+
                 early_stop_triggered = False
                 early_stop_reasons = []
-                
+
                 # Check all stop conditions
                 for stop_condition in self.stop_conditions:
                     should_stop, reason = stop_condition.should_stop(stop_context)
@@ -189,7 +189,7 @@ class GPTrainerSingleProcess:
                         early_stop_triggered = True
                         if reason:
                             early_stop_reasons.append(reason)
-                
+
                 if early_stop_triggered:
                     early_stop_reason = " OR ".join(early_stop_reasons) if early_stop_reasons else "Stop condition met"
                     logger.info(

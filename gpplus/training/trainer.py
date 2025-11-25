@@ -77,10 +77,11 @@ class GPTrainer:
         self.cholesky_jitter = cholesky_jitter
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs
-        
+
         # Set default stop conditions if none provided
         if stop_conditions is None:
             from .stop_conditions import ConvergencePatienceStopCondition, MinLossChangeStopCondition
+
             self.stop_conditions = [
                 ConvergencePatienceStopCondition(patience=20),
                 MinLossChangeStopCondition(min_loss_change=1e-7),

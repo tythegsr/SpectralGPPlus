@@ -43,7 +43,7 @@ class DefaultParameterInitializer(ParameterInitializer):
             parameter_configs: Optional custom parameter configurations.
 
         Note:
-            This initializer looks at parameter names to determine initialization strategies. 
+            This initializer looks at parameter names to determine initialization strategies.
             All constraints are handled by the model's kernel and likelihood classes.
         """
         self.num_runs = num_runs
