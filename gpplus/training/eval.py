@@ -35,9 +35,11 @@ def evaluate_gp_model(model, test_x: torch.Tensor, include_likelihood_noise: boo
     model.eval()
 
     with torch.no_grad():
-        # observed_pred = model.likelihood(model(test_x))
-
-        observed_pred = model(test_x)
+        if include_likelihood_noise:
+            observed_pred = model.likelihood(model(test_x))
+        else:
+            observed_pred = model(test_x)
+        
         # Get the mean, lower and upper confidence bounds
         mean = observed_pred.mean
         lower, upper = observed_pred.confidence_region()
