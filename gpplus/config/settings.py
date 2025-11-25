@@ -102,4 +102,3 @@ def configure_settings(
         _global_settings.cg_tolerance = cg_tolerance
     if max_cg_iterations is not None:
         _global_settings.max_cg_iterations = max_cg_iterations
-
