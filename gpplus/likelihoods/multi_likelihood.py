@@ -76,6 +76,7 @@ class MultiLikelihood(_GaussianLikelihoodBase):
         # Buffers to persist fidelity/noise indices across state_dict save/load
         self.register_buffer("fidel_indices", torch.empty(0, dtype=torch.long), persistent=True)
         self.register_buffer("noise_indices", torch.empty(0, dtype=torch.long), persistent=True)
+        # test_x will be created lazily when set_fidelity_indices(x, is_test=True) is called
 
         # Optionally set fidelity indices from provided training data to fix source order
         if training_data is not None:
@@ -104,30 +105,34 @@ class MultiLikelihood(_GaussianLikelihoodBase):
 
         return fidel_indices
 
-    def set_fidelity_indices(self, x: Tensor) -> None:
+    def set_fidelity_indices(self, x: Tensor, is_test: bool = False) -> None:
         """
-        Set the fidelity indices from input data. This should be called during training.
+        Set the fidelity indices from input data.
 
         Args:
             x: Input tensor of shape (N, D) where N is number of samples, D is number of features
+            is_test: If True, stores test data for later extraction during prediction.
+                     If False, stores as training fidelity indices (default, for training).
         """
         fidel = self._extract_fidelity_indices(x)
         # Ensure on same device
         fidel = fidel.to(device=self.noise_covar.noise.device)
-        if self.fidel_indices.numel() == 0 or self.fidel_indices.shape != fidel.shape:
-            # Resize/replace buffer
-            self.register_buffer("fidel_indices", fidel.detach(), persistent=True)
-        else:
-            self.fidel_indices.copy_(fidel)
-        if self.noise_indices.numel() == 0:
-            # Extract unique fidelities from the data to set noise_indices
-            unique_fidelities = torch.unique(fidel)
-            ni = unique_fidelities.to(device=self.noise_covar.noise.device, dtype=torch.long)
-            self.register_buffer("noise_indices", ni.detach(), persistent=True)
 
-    def set_training_data(self, training_data: Tensor) -> None:
-        """Convenience method to pass training inputs and lock in fidelity order."""
-        self.set_fidelity_indices(training_data)
+        if is_test:
+            # Store test data so we can extract fidelity indices on-demand during prediction
+            self.register_buffer("test_x", x.detach(), persistent=False)
+        else:
+            # Store as training fidelity indices (persistent)
+            if self.fidel_indices.numel() == 0 or self.fidel_indices.shape != fidel.shape:
+                # Resize/replace buffer
+                self.register_buffer("fidel_indices", fidel.detach(), persistent=True)
+            else:
+                self.fidel_indices.copy_(fidel)
+            if self.noise_indices.numel() == 0:
+                # Extract unique fidelities from the data to set noise_indices
+                unique_fidelities = torch.unique(fidel)
+                ni = unique_fidelities.to(device=self.noise_covar.noise.device, dtype=torch.long)
+                self.register_buffer("noise_indices", ni.detach(), persistent=True)
 
     @property
     def noise(self) -> Tensor:
@@ -147,19 +152,31 @@ class MultiLikelihood(_GaussianLikelihoodBase):
 
     def _shaped_noise_covar(self, base_shape: torch.Size, *params: Any, **kwargs: Any):
         """Get the noise covariance matrix for the given parameters.
-        Simple rule: use provided fidel_indices or the stored ones. Otherwise, error.
+        Automatically determines which fidelity indices to use based on shape matching.
         """
         if "fidel_indices" in kwargs and kwargs["fidel_indices"] is not None:
             pass
-        elif self.fidel_indices.numel() > 0:
-            kwargs["fidel_indices"] = self.fidel_indices
+        else:
+            # Determine which fidelity indices to use based on shape
+            # base_shape is mean.shape, which is typically (n_samples,) or (batch_shape..., n_samples)
+            n_samples = base_shape[-1] if len(base_shape) > 0 else 0
+
+            # If we have test data stored and the shape matches, extract indices from test data
+            if hasattr(self, "test_x") and self.test_x.numel() > 0 and self.test_x.shape[0] == n_samples:
+                # Extract fidelity indices from stored test data
+                test_fidel = self._extract_fidelity_indices(self.test_x)
+                kwargs["fidel_indices"] = test_fidel.to(device=self.noise_covar.noise.device)
+            elif self.fidel_indices.numel() > 0:
+                # Use training fidelity indices (for prediction strategy setup with training data)
+                kwargs["fidel_indices"] = self.fidel_indices
+            else:
+                raise ValueError(
+                    "Fidelity indices are required to build the noise matrix. "
+                    "Call likelihood.set_fidelity_indices(x) beforehand or provide fidel_indices."
+                )
+
             if self.noise_indices.numel() > 0:
                 kwargs["noise_indices"] = self.noise_indices.tolist()
-        else:
-            raise ValueError(
-                "Fidelity indices are required to build the noise matrix. "
-                "Call likelihood.set_fidelity_indices(x) beforehand or provide fidel_indices."
-            )
 
         return self.noise_covar.forward(*params, shape=base_shape, **kwargs)
 
