@@ -144,9 +144,7 @@ class GPTrainer:
             raise TypeError("train_inputs and train_targets must be torch.Tensor instances.")
 
         if train_x.dtype != train_y.dtype:
-            raise TypeError(
-                f"Training data dtype mismatch: train_x is {train_x.dtype}, train_y is {train_y.dtype}."
-            )
+            raise TypeError(f"Training data dtype mismatch: train_x is {train_x.dtype}, train_y is {train_y.dtype}.")
 
         if train_x.dtype != self.dtype:
             logger.info(f"Converting model training data from {train_x.dtype} to {self.dtype} on device {self.device}.")
