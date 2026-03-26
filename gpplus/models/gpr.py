@@ -43,8 +43,6 @@ class GPR(gpytorch.models.ExactGP):
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
-        self.dtype = train_x.dtype
-
         if likelihood is None:
             likelihood = LogGaussianLikelihood()
             logger.warning("No likelihood provided. Using LogGaussianLikelihood as default.")

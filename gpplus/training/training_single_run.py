@@ -36,6 +36,7 @@ class GPTrainerSingleProcess:
         scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
         stop_conditions: Optional[List[StopCondition]] = None,
+        dtype: torch.dtype = torch.float64,
     ):
         self.model = model
         self.optimizer_class = optimizer_class
@@ -44,7 +45,7 @@ class GPTrainerSingleProcess:
         self.num_epochs = num_epochs
         self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
-        self.device = device
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
 
         # Set default stop conditions if none provided
         if stop_conditions is None:
@@ -54,24 +55,11 @@ class GPTrainerSingleProcess:
             ]
         else:
             self.stop_conditions = stop_conditions
-        # Get dtype from the model (which should be set from input data)
-        if hasattr(model, "dtype") and model.dtype is not None:
-            self.dtype = model.dtype
-        else:
-            self.dtype = torch.float64
-            logger.warning(f"Model has no dtype attribute. Using {self.dtype} as fallback.")
-        # Move the model to device and convert to specified dtype
-        self.model = self.model.to(self.device, dtype=self.dtype)
-
-        # Update the model's internal training data to be on the same device and dtype
-        # This is crucial for GPyTorch models to work correctly
-        self.model.set_train_data(
-            self.model.train_inputs[0].to(self.device, dtype=self.dtype),
-            self.model.train_targets.to(self.device, dtype=self.dtype),
-            strict=False,
-        )
-
-        # Store training data for easy access
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(f"dtype must be a torch.dtype, got {type(dtype).__name__}.")
+        self.dtype = dtype
+        if not hasattr(self.model, "train_inputs") or not hasattr(self.model, "train_targets"):
+            raise AttributeError("model must expose train_inputs and train_targets before training.")
         self.train_x = self.model.train_inputs[0]
         self.train_y = self.model.train_targets
         self.scheduler_class = scheduler_class
@@ -234,11 +222,8 @@ class GPTrainerSingleProcess:
             loss (float): The loss value after training for one epoch.
         """
         optimizer.zero_grad()
-        # Ensure training data is in correct dtype
-        train_x = self.train_x.to(dtype=self.dtype)
-        train_y = self.train_y.to(dtype=self.dtype)
-        output = self.model(train_x)
-        loss = -mll(output, train_y)
+        output = self.model(self.train_x)
+        loss = -mll(output, self.train_y)
         loss.backward()
         optimizer.step()
         if self.scheduler is not None:
@@ -305,17 +290,8 @@ class GPTrainerSingleProcess:
 
         def closure():
             optimizer.zero_grad()
-
-            # Ensure training data is on the same device as the model
-            model_device = next(self.model.parameters()).device
-
-            # Ensure training data is in correct dtype
-            train_x = self.train_x.to(dtype=self.dtype, device=model_device)
-            train_y = self.train_y.to(dtype=self.dtype, device=model_device)
-
-            output = self.model(train_x)
-
-            loss = -mll(output, train_y)
+            output = self.model(self.train_x)
+            loss = -mll(output, self.train_y)
 
             loss.backward()
 
