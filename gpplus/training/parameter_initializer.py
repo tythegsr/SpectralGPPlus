@@ -126,7 +126,7 @@ class DefaultParameterInitializer(ParameterInitializer):
             return {
                 "method": "uniform",
                 "lower": -7.0,
-                "upper": 3.0,
+                "upper": -1.0,
                 "description": "Noise parameter - uniform scale",
             }
         elif param_type == "constant":
@@ -151,10 +151,10 @@ class DefaultParameterInitializer(ParameterInitializer):
             }
         elif param_type == "power":
             return {
-                "method": "normal",
-                "mean": 1.5,
-                "std": 0.3,
-                "description": "Power kernel parameter",
+                "method": "uniform",
+                "lower": 1.0,
+                "upper": 2.0,
+                "description": "Power kernel parameter (uniform)",
             }
         elif param_type == "projection_matrix":
             # Try to find the initialization type from the specific module
@@ -343,12 +343,19 @@ class DefaultParameterInitializer(ParameterInitializer):
                 config = self.get_initialization_config(name, param, model)
 
                 # Handle weight parameters with Xavier uniform (exclude from Sobol sampling)
+                # Only apply Xavier to parameters with at least 2 dimensions (required for fan_in/fan_out calculation)
                 if ".weight" in name:
                     # reproducible per-run, on CPU
                     generator_seed = (self.seed + run_index) if self.seed is not None else run_index
                     g = torch.Generator().manual_seed(generator_seed)
-                    torch.nn.init.xavier_uniform_(param, generator=g)
-                    logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform")
+                    if param.dim() >= 2:
+                        # Standard neural network weight matrix: use Xavier uniform
+                        torch.nn.init.xavier_uniform_(param, generator=g)
+                        logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform (shape={param.shape})")
+                    else:
+                        # 1D or scalar weight: use uniform initialization instead
+                        torch.nn.init.uniform_(param, -0.1, 0.1)
+                        logger.debug(f"Initialized 1D weight parameter '{name}' with uniform (shape={param.shape})")
                     continue
 
                 # Handle bias parameters with zeros (exclude from Sobol sampling)

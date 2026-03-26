@@ -6,7 +6,7 @@ import gpytorch
 import torch
 from joblib import Parallel, delayed
 
-from ..config import get_settings, logger
+from ..config import logger
 from .callbacks import Callback
 from .optimizers import LBFGSScipy
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
@@ -52,6 +52,7 @@ class GPTrainer:
         initializer_kwargs: dict = None,
         device: str = "cpu",
         stop_conditions: Optional[List[StopCondition]] = None,
+        dtype: torch.dtype = torch.float64,
     ):
         # -------------------------------------------------------
         # Set up the device (CPU or CUDA)
@@ -63,9 +64,10 @@ class GPTrainer:
         self.device = torch.device(device)
         logger.info(f"Using device: {self.device}")
 
-        # Keep the original model on CPU
-        self.model = model  # no .to(self.device) here
-        logger.info("Model stays on CPU in the constructor.")
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(f"dtype must be a torch.dtype, got {type(dtype).__name__}.")
+        self.dtype = dtype
+        self._prepare_model_and_data(model)
 
         # --------------------------------------------------
         #  CORE CONFIG
@@ -88,13 +90,6 @@ class GPTrainer:
             ]
         else:
             self.stop_conditions = stop_conditions
-        # Get dtype from the model (which should be set from input data)
-        if hasattr(model, "dtype") and model.dtype is not None:
-            self.dtype = model.dtype
-        else:
-            self.dtype = torch.float64
-            logger.warning(f"Model has no dtype attribute. Using {self.dtype} as fallback.")
-
         """
         # Initialize model parameters if requested
         if initialize_params:
@@ -110,7 +105,7 @@ class GPTrainer:
             self.initializer = initializer_class(num_runs=self.num_runs, seed=self.seed, **initializer_kwargs)
 
         # Precompute number of parameters and Sobol samples.
-        self.initializer.setup(model)
+        self.initializer.setup(self.model)
 
         # --------------------------------------------------
         #  OPTIMIZER
@@ -137,6 +132,35 @@ class GPTrainer:
         else:
             self.mll_class = mll_class
 
+    def _prepare_model_and_data(self, model) -> None:
+        """Normalize the master model once before any run-specific training."""
+        if not hasattr(model, "train_inputs") or not hasattr(model, "train_targets"):
+            raise AttributeError("model must expose train_inputs and train_targets before training.")
+
+        train_x = model.train_inputs[0]
+        train_y = model.train_targets
+
+        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
+            raise TypeError("train_inputs and train_targets must be torch.Tensor instances.")
+
+        if train_x.dtype != train_y.dtype:
+            raise TypeError(
+                f"Training data dtype mismatch: train_x is {train_x.dtype}, train_y is {train_y.dtype}."
+            )
+
+        if train_x.dtype != self.dtype:
+            logger.info(f"Converting model training data from {train_x.dtype} to {self.dtype} on device {self.device}.")
+
+        self.model = model.to(self.device, dtype=self.dtype)
+        self.model.set_train_data(
+            train_x.to(self.device, dtype=self.dtype),
+            train_y.to(self.device, dtype=self.dtype),
+            strict=False,
+        )
+        self.model.dtype = self.dtype
+        self.train_x = self.model.train_inputs[0]
+        self.train_y = self.model.train_targets
+
     def train_single_process(self, run_index):
         """
         Runs training for a single initialization (run_index).
@@ -152,8 +176,8 @@ class GPTrainer:
         # Initialize parameters for the model copy on CPU using the initializer
         self.initializer.initialize(base_model, run_index)
 
-        # Move model_copy to device
-        base_model = base_model.to(self.device)
+        # Move the run-specific copy to the current trainer device once.
+        base_model = base_model.to(self.device, dtype=self.dtype)
 
         # Train the model
         # Create isolated callback instances per run to avoid cross-run state mixing
@@ -163,6 +187,7 @@ class GPTrainer:
 
         run = GPTrainerSingleProcess(
             model=base_model,
+            dtype=self.dtype,
             optimizer_class=self.optimizer_class,
             optimizer_kwargs=self.optimizer_kwargs,
             mll_class=self.mll_class,
@@ -202,7 +227,6 @@ class GPTrainer:
                 if device_override is not None:
                     # Temporarily override the device for this run.
                     self.device = device_override
-                _worker_init()
                 result = self.train_single_process(run_index)
                 # Restore the original device.
                 self.device = original_device
@@ -217,17 +241,13 @@ class GPTrainer:
                     "error": str(e),
                 }
 
-        def _worker_init():
-            """Initialize worker process with global GP settings."""
-            get_settings().apply()
-
         # Cap the number of parallel jobs
         if self.device.type == "cpu":
             max_jobs = min(self.num_runs, max(1, (os.cpu_count() or 1) - 2))
             logger.info(
                 f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
             )
-            results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(
+            results = Parallel(n_jobs=max_jobs, backend="loky")(
                 delayed(safe_single_process)(run_index) for run_index in range(self.num_runs)
             )
 
@@ -238,7 +258,7 @@ class GPTrainer:
             max_jobs = min(self.num_runs, num_gpus)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
 
-            results = Parallel(n_jobs=max_jobs, backend="threading", verbose=11)(
+            results = Parallel(n_jobs=max_jobs, backend="threading")(
                 # For each run, choose a GPU device based on the run index.
                 delayed(safe_single_process)(run_index, device_override=torch.device(f"cuda:{run_index % num_gpus}"))
                 for run_index in range(self.num_runs)
