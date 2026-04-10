@@ -199,13 +199,6 @@ class GPTrainer:
         )
         train_result = run.train()
 
-        # Copy the trained parameters back to the original model
-        # This ensures constraint enforcement is preserved
-        with torch.no_grad():
-            for (name, param), (_, trained_param) in zip(self.model.named_parameters(), base_model.named_parameters()):
-                if param.requires_grad:
-                    param.data.copy_(trained_param.data.to(dtype=param.dtype))
-
         return {"run_index": run_index, **train_result}
 
     def train_multiple_process_parallel(self):
