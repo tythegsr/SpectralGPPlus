@@ -65,11 +65,15 @@ class DefaultParameterInitializer(ParameterInitializer):
             if param.requires_grad and ".weight" not in name and ".bias" not in name:
                 self.num_params += param.numel()
 
-        sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
-        self.sobol_samples = sobol_engine.draw(self.num_runs)
+        if self.num_params > 0:
+            sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
+            self.sobol_samples = sobol_engine.draw(self.num_runs)
+            logger.debug(f"Sobol samples generated: {self.sobol_samples.shape}")
+        else:
+            self.sobol_samples = None
+            logger.info("No non-weight/bias parameters found; Sobol sampling skipped.")
 
         logger.info("Using DefaultParameterInitializer")
-        logger.debug(f"Sobol samples generated: {self.sobol_samples.shape}")
         logger.info("All constraints are now built into kernel and likelihood classes - no manual setup needed")
         logger.debug("Excluding .weight and .bias parameters from Sobol sampling (initialized separately)")
 
