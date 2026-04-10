@@ -58,7 +58,6 @@ class GPR(gpytorch.models.ExactGP):
             mean_module = gpytorch.means.ConstantMean()
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
-
         if kernel_module is None:
             input_dim = train_x.shape[-1]
             kernel_module = LogScaleKernel(GaussianKernel(ard_num_dims=input_dim))  # Uses one lengthscale per dimension
