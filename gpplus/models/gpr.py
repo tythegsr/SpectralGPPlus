@@ -4,7 +4,8 @@ import gpytorch
 import torch
 
 from ..config import logger
-from ..kernels import GaussianKernel
+from ..kernels import GaussianKernel, LogScaleKernel
+from ..likelihoods import LogGaussianLikelihood
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -13,7 +14,7 @@ class GPR(gpytorch.models.ExactGP):
     The GPR class encapsulates:
       - A mean module (defaults to ConstantMean if None).
       - A kernel module (defaults to a Scale Gaussian kernel if None).
-      - A likelihood module (defaults to GaussianLikelihood if None).
+      - A likelihood module (defaults to LogGaussianLikelihood if None).
 
     Attributes:
         mean_module (gpytorch.means.Mean): The mean function of the GP.
@@ -42,34 +43,31 @@ class GPR(gpytorch.models.ExactGP):
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
+
+        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
+            logger.error("train_x and train_y must be torch.Tensor instances.")
+            raise TypeError("train_x and train_y must be torch.Tensor instances.")
+
+        logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
+
         if likelihood is None:
-            likelihood = gpytorch.likelihoods.GaussianLikelihood()
-            logger.warning("No likelihood provided. Using GaussianLikelihood as default.")
+            likelihood = LogGaussianLikelihood()
+            logger.warning("No likelihood provided. Using LogGaussianLikelihood as default.")
 
         if mean_module is None:
             mean_module = gpytorch.means.ConstantMean()
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            kernel_module = gpytorch.kernels.ScaleKernel(GaussianKernel())
-            logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
+            input_dim = train_x.shape[-1]
+            kernel_module = LogScaleKernel(GaussianKernel(ard_num_dims=input_dim))  # Uses one lengthscale per dimension
+            logger.warning(
+                f"No kernel_module provided. Using Gaussian Kernel with ARD (ard_num_dims={input_dim}) as default."
+            )
 
-        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
-            logger.error("train_x and train_y must be torch.Tensor instances.")
-            raise TypeError("train_x and train_y must be torch.Tensor instances.")
-        # if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
-        #     logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
-        #     raise TypeError("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
-
-        logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
-
-        # You can choose whether to keep these dimension checks, but if you do:
-        # if train_x.ndim != 2:
-        #     logger.error(f"Expected train_x to be 2D, got {train_x.ndimension()}D.")
-        #     raise ValueError(f"train_x must be 2D, got {train_x.ndimension()}D.")
-        # if train_y.ndim != 1:
-        #     logger.error(f"Expected train_y to be 1D, got {train_y.ndimension()}D.")
-        #     raise ValueError(f"train_y must be 1D, got {train_y.ndimension()}D.")
+        if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
+            logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
+            raise TypeError("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
 
         super().__init__(train_x, train_y, likelihood)
 
@@ -77,7 +75,8 @@ class GPR(gpytorch.models.ExactGP):
         self.covar_module = kernel_module
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
-        """Runs the forward pass of the Gaussian Process model.
+        """Runs the forward pass of the Gaussian Process model with ensembling
+            if embedding or calibration is probabilistic.
 
         Args:
             x (torch.Tensor): Test data features for prediction.
