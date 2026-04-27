@@ -9,8 +9,8 @@ from .advanced_kernels import (
     NeuralScaleKernel,
     SinhKernel,
 )
+
 from .unconstrained_kernel import UnconstrainedKernel
-from .factory import KernelFactory, KernelType
 from .gaussian_kernel import GaussianKernel
 from .kronecker import KroneckerKernel
 from .power_exponential_kernel import (

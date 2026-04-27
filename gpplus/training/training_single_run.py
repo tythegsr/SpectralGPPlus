@@ -2,6 +2,7 @@ import copy
 from typing import List, Optional
 
 import gpytorch
+import linear_operator
 import torch
 
 from ..config import logger
@@ -11,6 +12,13 @@ from .callbacks import (
     CallbackOnEpochStartContext,
     CallbackOnTrainEndContext,
     CallbackOnTrainStartContext,
+)
+from .optimizers import LBFGSScipy
+from .stop_conditions import (
+    ConvergencePatienceStopCondition,
+    MinLossChangeStopCondition,
+    StopCondition,
+    StopConditionContext,
 )
 
 
@@ -22,37 +30,61 @@ class GPTrainerSingleProcess:
         optimizer_kwargs,
         mll_class,
         num_epochs,
-        convergence_patience,
-        cholesky_jitter: float,
+        cholesky_jitter: float = 1e-6,
         callbacks: Optional[List[Callback]] = None,
         device: str = None,
+        scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
+        scheduler_kwargs: dict = None,
+        stop_conditions: Optional[List[StopCondition]] = None,
+        dtype: torch.dtype = torch.float64,
     ):
         self.model = model
         self.optimizer_class = optimizer_class
         self.optimizer_kwargs = optimizer_kwargs
         self.mll_class = mll_class
         self.num_epochs = num_epochs
-        self.convergence_patience = convergence_patience
         self.cholesky_jitter = cholesky_jitter
         self.callbacks = callbacks or []
-        self.device = device
-        # Move only the training data to device
-        # (assuming the model has train_inputs[0], train_targets)
-        # If you have multiple train_inputs, adapt accordingly.
-        self.train_x = self.model.train_inputs[0].to(self.device)
-        self.train_y = self.model.train_targets.to(self.device)
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+
+        # Set default stop conditions if none provided
+        if stop_conditions is None:
+            self.stop_conditions = [
+                ConvergencePatienceStopCondition(patience=20),
+                MinLossChangeStopCondition(min_loss_change=1e-7),
+            ]
+        else:
+            self.stop_conditions = stop_conditions
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(f"dtype must be a torch.dtype, got {type(dtype).__name__}.")
+        self.dtype = dtype
+        if not hasattr(self.model, "train_inputs") or not hasattr(self.model, "train_targets"):
+            raise AttributeError("model must expose train_inputs and train_targets before training.")
+        self.train_x = self.model.train_inputs[0]
+        self.train_y = self.model.train_targets
+        self.scheduler_class = scheduler_class
+        self.scheduler_kwargs = scheduler_kwargs
 
     def train(self):
         """
-        Train the GP model.
+        Train the GP model with optional gradual jitter decrease.
         """
         # Create an optimizer instance
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
+
+        if self.scheduler_class is not None:
+            self.scheduler = self.scheduler_class(optimizer, **self.scheduler_kwargs)
+        else:
+            self.scheduler = None
+
         # Create mll instance
         mll = self.mll_class(self.model.likelihood, self.model)
 
+        # Determine which training function to use based on optimizer type
         if isinstance(optimizer, torch.optim.LBFGS):
             train_epoch = self._train_lbfgs_epoch
+        elif isinstance(optimizer, LBFGSScipy):
+            train_epoch = self._train_scipy_lbfgs_epoch
         else:
             train_epoch = self._train_standard_epoch
 
@@ -60,6 +92,7 @@ class GPTrainerSingleProcess:
         best_loss = float("inf")
         best_state_dict = None
         no_improvement_epochs = 0
+        previous_loss = None
 
         # ---------------------------
         # on_train_start
@@ -72,7 +105,14 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             cb.on_train_start(ctx)
 
-        with gpytorch.settings.cholesky_jitter(self.cholesky_jitter):
+        # Set jitter in both gpytorch and linear_operator settings
+        # Set the same jitter for both float32 and float64 to ensure consistent behavior
+        with (
+            gpytorch.settings.cholesky_jitter(self.cholesky_jitter),
+            linear_operator.settings.cholesky_jitter(
+                float_value=self.cholesky_jitter, double_value=self.cholesky_jitter
+            ),
+        ):
             # Set the model to training mode
             self.model.train()
 
@@ -115,10 +155,43 @@ class GPTrainerSingleProcess:
                 else:
                     no_improvement_epochs += 1
 
-                # Check for early stopping
-                if self.convergence_patience is not None and no_improvement_epochs >= self.convergence_patience:
-                    logger.info(f"Early stopping triggered at epoch {epoch + 1}. Best loss: {best_loss}")
+                # Check for early stopping conditions
+                stop_context: StopConditionContext = {
+                    "epoch": epoch,
+                    "model": self.model,
+                    "trainer": self,
+                    "loss": loss,
+                    "previous_loss": previous_loss,
+                    "best_loss": best_loss,
+                    "no_improvement_epochs": no_improvement_epochs,
+                    "device": self.device,
+                }
+
+                early_stop_triggered = False
+                early_stop_reasons = []
+
+                # Check all stop conditions
+                for stop_condition in self.stop_conditions:
+                    should_stop, reason = stop_condition.should_stop(stop_context)
+                    if should_stop:
+                        early_stop_triggered = True
+                        if reason:
+                            early_stop_reasons.append(reason)
+
+                if early_stop_triggered:
+                    early_stop_reason = " OR ".join(early_stop_reasons) if early_stop_reasons else "Stop condition met"
+                    logger.info(
+                        f"Early stopping triggered at epoch {epoch + 1}. "
+                        f"Reason: {early_stop_reason}. Best loss: {best_loss:.6f}"
+                    )
                     break  # Stop training
+
+                # Update previous_loss for next iteration
+                previous_loss = loss
+
+        # Log training completion
+        logger.info(f"Training completed. Best loss: {best_loss:.6f}")
+        logger.info(f"Total epochs trained: {epoch + 1}")
 
         # ---------------------------
         # on_train_end
@@ -153,6 +226,9 @@ class GPTrainerSingleProcess:
         loss = -mll(output, self.train_y)
         loss.backward()
         optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+
         return loss.item()
 
     def _train_lbfgs_epoch(self, optimizer, mll):
@@ -160,20 +236,45 @@ class GPTrainerSingleProcess:
         Train the model for a single epoch using LBFGS optimizer.
 
         Parameters:
-            model: The Gaussian Process model being trained.
             optimizer: The LBFGS optimizer.
             mll: Marginal Log Likelihood loss.
+            epoch: Current epoch number (unused but kept for consistency).
 
         Returns:
             float: The loss value after training for one epoch.
         """
         # Get the closure function
-        closure = self._lbfgs_closure(self.model, optimizer, mll)
+        closure = self._lbfgs_closure(optimizer, mll)
         # Perform the optimizer step using the closure
         loss = optimizer.step(closure)
+        if self.scheduler is not None:
+            self.scheduler.step()
+
         return loss.item()
 
-    def _lbfgs_closure(self, model, optimizer, mll):
+    def _train_scipy_lbfgs_epoch(self, optimizer, mll):
+        """
+        Train the model for a single epoch using Scipy LBFGS optimizer.
+        Note: cholesky_jitter context is set in the main training loop.
+
+        Parameters:
+            optimizer: The Scipy LBFGS optimizer.
+            mll: Marginal Log Likelihood loss.
+
+        Returns:
+            float: The loss value after training for one epoch.
+        """
+        # Get the closure function for scipy LBFGS
+        closure = self._lbfgs_closure(optimizer, mll)
+        # Perform the optimizer step using the closure
+        optimizer.step(closure)
+        # The loss is stored in optimizer._last_loss after step()
+        loss = optimizer._last_loss
+        if self.scheduler is not None:
+            self.scheduler.step()
+        return loss.item()
+
+    def _lbfgs_closure(self, optimizer, mll):
         """
         Defines the closure for LBFGS optimizer.
         This method is reused across LBFGS training epochs.
@@ -189,9 +290,11 @@ class GPTrainerSingleProcess:
 
         def closure():
             optimizer.zero_grad()
-            output = model(self.train_x)
+            output = self.model(self.train_x)
             loss = -mll(output, self.train_y)
+
             loss.backward()
-            return loss
+
+            return loss.detach()
 
         return closure
