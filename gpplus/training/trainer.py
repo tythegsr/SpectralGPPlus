@@ -8,7 +8,9 @@ from joblib import Parallel, delayed
 
 from ..config import logger
 from .callbacks import Callback
+from .optimizers import LBFGSScipy
 from .parameter_initializer import DefaultParameterInitializer, ParameterInitializer
+from .stop_conditions import StopCondition
 from .training_single_run import GPTrainerSingleProcess
 
 
@@ -21,12 +23,14 @@ class GPTrainer:
         optimizer_class (torch.optim.Optimizer, optional): The optimizer class to use for training.
         optimizer_kwargs (dict, optional): The arguments for the optimizer, excluding 'params'.
         num_epochs (int, optional): Number of epochs to train the model. Defaults to 50.
-        convergence_patience (int, optional): Early stopping patience. Defaults to 20.
         seed (int, optional): Random seed for parameter initialization. Defaults to None.
         num_runs (int, optional): Number of runs (initializations). Defaults to 64.
         mll_class (gpytorch.mlls.MarginalLogLikelihood, optional): The Marginal Log Likelihood class to use.
         cholesky_jitter (float, optional): Jitter term for numerical stability in Cholesky. Defaults to 1e-6.
         callbacks (list[Callback]): Optional list of callback objects.
+        stop_conditions (list[StopCondition], optional): List of stop conditions to check after each epoch.
+            If None, defaults to ConvergencePatienceStopCondition(patience=20) and
+            MinLossChangeStopCondition(min_loss_change=1e-7).
         device (str, optional): Device to run on. Defaults to "cpu", but set to "cuda" or "cuda:0"
                                 if you have a GPU and want GPU training.
     """
@@ -36,15 +40,19 @@ class GPTrainer:
         model,
         optimizer_class: torch.optim.Optimizer = None,
         optimizer_kwargs: dict = None,
+        scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
+        scheduler_kwargs: dict = None,
         num_epochs: int = 50,
-        convergence_patience=20,  # Stop if no improvement for 20 epochs
         seed: int = None,
         num_runs: int = 64,
         mll_class: gpytorch.mlls.MarginalLogLikelihood = None,
         cholesky_jitter: float = 1e-6,
         callbacks: Optional[List[Callback]] = None,
         initializer_class: ParameterInitializer = None,
+        initializer_kwargs: dict = None,
         device: str = "cpu",
+        stop_conditions: Optional[List[StopCondition]] = None,
+        dtype: torch.dtype = torch.float64,
     ):
         # -------------------------------------------------------
         # Set up the device (CPU or CUDA)
@@ -56,20 +64,32 @@ class GPTrainer:
         self.device = torch.device(device)
         logger.info(f"Using device: {self.device}")
 
-        # Keep the original model on CPU
-        self.model = model  # no .to(self.device) here
-        logger.info("Model stays on CPU in the constructor.")
+        if not isinstance(dtype, torch.dtype):
+            raise TypeError(f"dtype must be a torch.dtype, got {type(dtype).__name__}.")
+        self.dtype = dtype
+        self._prepare_model_and_data(model)
 
         # --------------------------------------------------
         #  CORE CONFIG
         # --------------------------------------------------
         self.num_epochs = num_epochs
-        self.convergence_patience = convergence_patience
         self.num_runs = num_runs
         self.seed = seed
         self.callbacks = callbacks or []
         self.cholesky_jitter = cholesky_jitter
+        self.scheduler_class = scheduler_class
+        self.scheduler_kwargs = scheduler_kwargs
 
+        # Set default stop conditions if none provided
+        if stop_conditions is None:
+            from .stop_conditions import ConvergencePatienceStopCondition, MinLossChangeStopCondition
+
+            self.stop_conditions = [
+                ConvergencePatienceStopCondition(patience=20),
+                MinLossChangeStopCondition(min_loss_change=1e-7),
+            ]
+        else:
+            self.stop_conditions = stop_conditions
         """
         # Initialize model parameters if requested
         if initialize_params:
@@ -79,25 +99,28 @@ class GPTrainer:
         if initializer_class is None:
             self.initializer = DefaultParameterInitializer(num_runs=self.num_runs, seed=self.seed)
         else:
-            self.initializer = initializer_class(num_runs=self.num_runs, seed=self.seed)
+            # Pass initializer_kwargs if provided, otherwise use empty dictionary
+            if initializer_kwargs is None:
+                initializer_kwargs = {}
+            self.initializer = initializer_class(num_runs=self.num_runs, seed=self.seed, **initializer_kwargs)
 
         # Precompute number of parameters and Sobol samples.
-        self.initializer.setup(model)
+        self.initializer.setup(self.model)
 
         # --------------------------------------------------
         #  OPTIMIZER
         # --------------------------------------------------
-        # Handle optimizer class
+        # Handle optimizer class, use LBFGS as default
         if optimizer_class is None:
-            self.optimizer_class = torch.optim.LBFGS  # torch.optim.Adam
-            logger.warning("No optimizer class passed. Defaulting to LBFGS optimizer.")
+            self.optimizer_class = LBFGSScipy
+            logger.warning("No optimizer class passed. Defaulting to LBFGS Scipy optimizer.")
         else:
             self.optimizer_class = optimizer_class
 
         # Handle optimizer arguments
         if optimizer_kwargs is None:
-            self.optimizer_kwargs = {"lr": 0.01, "line_search_fn": "strong_wolfe"}
-            logger.warning("No optimizer arguments passed. Defaulting to learning rate of 0.01")
+            self.optimizer_kwargs = {"max_iter": 20}  # Default for LBFGSScipy
+            logger.warning("No optimizer arguments passed. Defaulting to max_iter=20")
         else:
             self.optimizer_kwargs = optimizer_kwargs
 
@@ -108,6 +131,33 @@ class GPTrainer:
             logger.warning("No MLL class passed. Defaulting to ExactMarginalLogLikelihood.")
         else:
             self.mll_class = mll_class
+
+    def _prepare_model_and_data(self, model) -> None:
+        """Normalize the master model once before any run-specific training."""
+        if not hasattr(model, "train_inputs") or not hasattr(model, "train_targets"):
+            raise AttributeError("model must expose train_inputs and train_targets before training.")
+
+        train_x = model.train_inputs[0]
+        train_y = model.train_targets
+
+        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
+            raise TypeError("train_inputs and train_targets must be torch.Tensor instances.")
+
+        if train_x.dtype != train_y.dtype:
+            raise TypeError(f"Training data dtype mismatch: train_x is {train_x.dtype}, train_y is {train_y.dtype}.")
+
+        if train_x.dtype != self.dtype:
+            logger.info(f"Converting model training data from {train_x.dtype} to {self.dtype} on device {self.device}.")
+
+        self.model = model.to(self.device, dtype=self.dtype)
+        self.model.set_train_data(
+            train_x.to(self.device, dtype=self.dtype),
+            train_y.to(self.device, dtype=self.dtype),
+            strict=False,
+        )
+        self.model.dtype = self.dtype
+        self.train_x = self.model.train_inputs[0]
+        self.train_y = self.model.train_targets
 
     def train_single_process(self, run_index):
         """
@@ -124,22 +174,32 @@ class GPTrainer:
         # Initialize parameters for the model copy on CPU using the initializer
         self.initializer.initialize(base_model, run_index)
 
-        # Move model_copy to device
-        base_model = base_model.to(self.device)
+        # Move the run-specific copy to the current trainer device once.
+        base_model = base_model.to(self.device, dtype=self.dtype)
 
         # Train the model
+        # Create isolated callback instances per run to avoid cross-run state mixing
+        callbacks_copy = [copy.deepcopy(cb) for cb in self.callbacks] if self.callbacks else []
+        # Create isolated stop condition instances per run to avoid cross-run state mixing
+        stop_conditions_copy = [copy.deepcopy(sc) for sc in self.stop_conditions] if self.stop_conditions else None
+
         run = GPTrainerSingleProcess(
             model=base_model,
+            dtype=self.dtype,
             optimizer_class=self.optimizer_class,
             optimizer_kwargs=self.optimizer_kwargs,
             mll_class=self.mll_class,
             num_epochs=self.num_epochs,
-            convergence_patience=self.convergence_patience,
             cholesky_jitter=self.cholesky_jitter,
-            callbacks=self.callbacks,
+            callbacks=callbacks_copy,
             device=self.device,
+            scheduler_class=self.scheduler_class,
+            scheduler_kwargs=self.scheduler_kwargs,
+            stop_conditions=stop_conditions_copy,
         )
-        return {"run_index": run_index, **run.train()}
+        train_result = run.train()
+
+        return {"run_index": run_index, **train_result}
 
     def train_multiple_process_parallel(self):
         """
@@ -178,16 +238,18 @@ class GPTrainer:
             logger.info(
                 f"Running {self.num_runs} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
             )
-            results = Parallel(n_jobs=max_jobs)(
+            results = Parallel(n_jobs=max_jobs, backend="loky")(
                 delayed(safe_single_process)(run_index) for run_index in range(self.num_runs)
             )
 
         elif str(self.device).startswith("cuda"):
+            torch.cuda.empty_cache()
             num_gpus = torch.cuda.device_count()
             # Allow as many parallel jobs as there are GPUs.
             max_jobs = min(self.num_runs, num_gpus)
             logger.info(f"Running {self.num_runs} runs distributed across {num_gpus} GPUs.")
-            results = Parallel(n_jobs=max_jobs)(
+
+            results = Parallel(n_jobs=max_jobs, backend="threading")(
                 # For each run, choose a GPU device based on the run index.
                 delayed(safe_single_process)(run_index, device_override=torch.device(f"cuda:{run_index % num_gpus}"))
                 for run_index in range(self.num_runs)
