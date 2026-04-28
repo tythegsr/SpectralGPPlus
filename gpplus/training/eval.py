@@ -1,9 +1,15 @@
 import torch
 
 from ..config import logger
+from ..likelihoods import MultiLikelihood
 
 
-def evaluate_gp_model(model, test_x: torch.Tensor, include_likelihood_noise: bool = True):
+def evaluate_gp_model(
+    model,
+    test_x: torch.Tensor,
+    include_likelihood_noise: bool = True,
+    set_test_fidelity_indices: bool = True,
+):
     """
     Evaluates the Gaussian Process model on test data.
 
@@ -16,6 +22,10 @@ def evaluate_gp_model(model, test_x: torch.Tensor, include_likelihood_noise: boo
             If True, uses model.likelihood() to include training noise in predictive variance.
             If False, uses model() directly to get latent function predictions without noise.
             Default: True (recommended for proper uncertainty quantification).
+        set_test_fidelity_indices (bool, optional):
+            If True and model.likelihood is MultiLikelihood, sets fidelity indices from
+            test_x before prediction so each test point gets the correct source-specific
+            mapping for both noisy and latent predictions. Default: True.
 
             Note: When evaluating with noisy test data, the model's predictive variance
             includes the TRAINING noise (learned from training data), but NOT any additional
@@ -35,6 +45,9 @@ def evaluate_gp_model(model, test_x: torch.Tensor, include_likelihood_noise: boo
     model.eval()
 
     with torch.no_grad():
+        if set_test_fidelity_indices and isinstance(model.likelihood, MultiLikelihood):
+            model.likelihood.set_fidelity_indices(test_x, is_test=True)
+
         if include_likelihood_noise:
             observed_pred = model.likelihood(model(test_x))
         else:
