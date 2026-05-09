@@ -147,7 +147,7 @@ source_encoder2 = gpplus.utils.encoders.NeuralEncoder(
 )
 
 # Create model
-kernel = gpplus.kernels.CombinedKernel(
+kernel = gpplus.kernels.MVMFKernel(
     cont_cols=cont_cols,
     cat_cols=None,
     source_cols=source_cols,
@@ -166,21 +166,20 @@ model = GPR(
     # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 
-num_epochs = 10000
-num_runs = 4
-lr = 0.1
+num_inits = 4
 
 print(model)
-# from gpplus.training.parameter_initializer_kian import DefaultParameterInitializer
 # Create trainer
 trainer = gpplus.training.GPTrainer(
     model=model,
-    num_epochs=num_epochs,
     seed=seed,
-    num_runs=num_runs,
-    optimizer_kwargs={"lr": lr},
-    convergence_patience=50,
-    optimizer_class=torch.optim.Adam,
+    num_epochs=10000,  # Not required if not using Adam
+    num_inits=num_inits,
+    stop_conditions=[
+        gpplus.training.ConvergencePatienceStopCondition(patience=50),
+        gpplus.training.MinLossChangeStopCondition(min_loss_change=1e-7),
+    ],
+    # optimizer_class=torch.optim.Adam,
     device="cuda",
     callbacks=[PrintInitialParametersCallback()],
     # initializer_class=DefaultParameterInitializer
@@ -194,12 +193,11 @@ y_pred_scaled, pred_lower_scaled, pred_upper_scaled, output_std_scaled = evaluat
 
 # Transform predictions back to original scale for proper metrics
 y_test_orig = y_test  # Already in original scale
-y_pred_orig = scaler_y.inverse_transform(y_pred_scaled.numpy().reshape(-1, 1)).flatten()
-output_std_orig = output_std_scaled * scaler_y.scale_[0]  # Scale the uncertainty
+y_pred_orig = scaler_y.inverse_transform(y_pred_scaled.detach().cpu().numpy().reshape(-1, 1)).flatten()
+output_std_orig = output_std_scaled.detach().cpu().numpy() * scaler_y.scale_[0]  # Scale the uncertainty
 
 
 # Compute metrics on original scale
-
 metric = compute_metrics(y_test_orig, y_pred_orig, output_std_orig, start_time=t1)
 
 print("Metrics:")

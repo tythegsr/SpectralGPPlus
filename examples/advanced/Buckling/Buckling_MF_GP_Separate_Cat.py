@@ -65,16 +65,31 @@ def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
     return metrics
 
 
-seeds = np.arange(42, 52)
+def rrmse_for_source(y_true, y_pred, source_test, source_idx: int) -> float:
+    """RRMSE on test rows where source index matches (0 = s0, 1 = s1)."""
+    if isinstance(source_test, torch.Tensor):
+        mask = (source_test == source_idx).cpu().numpy()
+    else:
+        mask = np.asarray(source_test) == source_idx
+    yt = np.asarray(y_true).reshape(-1)[mask]
+    yp = np.asarray(y_pred).reshape(-1)[mask]
+    if yt.size == 0 or float(np.std(yt)) == 0.0:
+        return float("nan")
+    return float(np.sqrt(mean_squared_error(yt, yp)) / np.std(yt))
+
+
+# Training loop below
+start_seed = 42
+num_seeds = 1
+
 full_metrics = []
 t0 = time.time()
-for seed in seeds:
-    seed = int(seed)
+for seed in range(start_seed, start_seed + num_seeds):
     set_seed(seed)
 
     # Generate training and test data for all fidelity levels s0-s3
     sources = ["s0", "s1"]
-    num_train_per_source = {"s0": 250, "s1": 250}
+    num_train_per_source = {"s0": 120, "s1": 120}
     num_test_per_source = {"s0": 5000, "s1": 5000}  # 10k total / 4 sources = 2.5k per source
 
     # Generate test data
@@ -144,14 +159,16 @@ for seed in seeds:
     cat_encoders = [cat_encoder0, cat_encoder1, cat_encoder2]
 
     # Create model
-    kernel = gpplus.kernels.CombinedKernel(
-        cont_cols=cont_cols,
-        cat_cols=cat_cols,
-        source_cols=source_cols,
-        cat_encoder="matrix",
-        # cat_encoder=cat_encoders,
-        # source_encoder=source_encoder,
-        # source_encoder=source_encoder2,
+    kernel = gpplus.kernels.LogScaleKernel(
+        gpplus.kernels.MVMFKernel(
+            cont_cols=cont_cols,
+            cat_cols=cat_cols,
+            source_cols=source_cols,
+            cat_encoder="matrix",
+            # cat_encoder=cat_encoders,
+            # source_encoder=source_encoder,
+            # source_encoder=source_encoder2,
+        )
     )
 
     model = GPR(
@@ -163,21 +180,21 @@ for seed in seeds:
         # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
     )
 
-    num_epochs = 10000
-    num_runs = 4
-    lr = 0.1
+    num_inits = 4
     print(model)
 
     # Create trainer
     trainer = gpplus.training.GPTrainer(
         model=model,
-        num_epochs=num_epochs,
+        # num_epochs=10000, # Not required if not using Adam
         seed=seed,
-        num_runs=num_runs,
-        optimizer_kwargs={"lr": lr},
-        convergence_patience=50,
-        optimizer_class=torch.optim.Adam,
-        device="cpu",
+        num_inits=num_inits,
+        stop_conditions=[
+            gpplus.training.ConvergencePatienceStopCondition(patience=10),
+            gpplus.training.MinLossChangeStopCondition(min_loss_change=1e-7),
+        ],
+        # optimizer_class=torch.optim.Adam, # Problem is slow with Adam defaults kwargs
+        device="cpu",  # Problem is slow with cuda
         callbacks=[PrintInitialParametersCallback()],
     )
 
@@ -188,16 +205,24 @@ for seed in seeds:
     y_pred_scaled, pred_lower_scaled, pred_upper_scaled, output_std_scaled = evaluate_gp_model(model, X_test)
 
     # Transform predictions back to original scale for proper metrics
-    y_pred_orig = scalerY.inverse_transform(y_pred_scaled)
-    output_std_orig = output_std_scaled * scalerY.std  # Scale the uncertainty
+    y_pred_orig = scalerY.inverse_transform(y_pred_scaled.detach().cpu().numpy().reshape(-1, 1)).flatten()
+    # Scale predictive std to original y units
+    output_std_orig = output_std_scaled.detach().cpu().numpy() * scalerY.std.detach().cpu().numpy().squeeze()
 
     # Compute metrics on original scale
 
     metric = compute_metrics(y_test, y_pred_orig, output_std_orig, start_time=t1)
 
+    source_test = data["source_test_full"]
+    metric["RRMSE_s0"] = rrmse_for_source(y_test, y_pred_orig, source_test, 0)
+    metric["RRMSE_s1"] = rrmse_for_source(y_test, y_pred_orig, source_test, 1)
+
     print(f"Metrics for seed {seed}:")
     for k, v in metric.items():
-        print(f"  {k}: {v:.4f}")
+        if isinstance(v, float) and (v != v):  # nan
+            print(f"  {k}: nan")
+        else:
+            print(f"  {k}: {v:.4f}")
 
     full_metrics.append(metric)
 
@@ -223,20 +248,20 @@ for key in full_metrics[0].keys():  # Get keys from first metric dict
         median_metrics[key] = sorted_values[n // 2]
 print("Buckling, Matrix, separate OH")
 print("\n=== FINAL RESULTS ===")
-print(f"Total time: {time.time() - t0:.2f} s\n({num_runs} restarts. Lr = {lr}. {num_epochs} epochs)")
-print(f"Average metrics across {len(seeds)} seeds (± std):")
+print(f"Total time: {time.time() - t0:.2f} s\n({num_inits} restarts)")
+print(f"Average metrics across {num_seeds} seeds (± std):")
 for metric in avg_metrics.keys():
     mean_val = avg_metrics[metric]
     std_val = std_metrics[metric]
     print(f"  {metric}: {mean_val:.6f} ± {std_val:.6f}")
 
-print(f"\nMin/Max/Median metrics across {len(seeds)} runs:")
+print(f"\nMin/Max/Median metrics across {num_seeds} runs:")
 for metric in avg_metrics.keys():
     min_val = min_metrics[metric]
     max_val = max_metrics[metric]
     median_val = median_metrics[metric]
     print(f"  {metric}: min={min_val:.6f}, max={max_val:.6f}, median={median_val:.6f}")
 
-encoder_data_dict = get_latent_representations(model)
-print(encoder_data_dict)
-plot_encoders(model)
+encoder_data_dict = get_latent_representations(model)  # Obtains the latent representations of last model trained
+print(f"Encoder data dictionary:\n{encoder_data_dict}")  # Prints the latent representations of last model trained
+plot_encoders(model)  # Plots the latent representations of last model trained

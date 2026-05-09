@@ -4,7 +4,7 @@ import torch
 from gpytorch.likelihoods import GaussianLikelihood
 
 from gpplus.models import GPR
-from gpplus.training import GPTrainer
+from gpplus.training import GPTrainer, optimizers
 
 # -------------------------------
 # Create toy training data
@@ -28,8 +28,9 @@ model_cpu = GPR(train_x, train_y, likelihood_cpu)
 # Instantiate GPTrainer for CPU
 trainer_cpu = GPTrainer(
     model=model_cpu,
+    optimizer_class=optimizers.LBFGSScipy,
     num_epochs=50,
-    num_runs=128,
+    num_inits=16,
     seed=123,
     device="cpu",  # Use CPU
 )
@@ -67,8 +68,9 @@ if torch.cuda.is_available():
     # Instantiate GPTrainer for GPU
     trainer_gpu = GPTrainer(
         model=model_gpu,
+        optimizer_class=optimizers.LBFGSScipy,
         num_epochs=50,
-        num_runs=4,
+        num_inits=16,
         seed=123,
         device="cuda",  # Use GPU
     )

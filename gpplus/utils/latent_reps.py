@@ -1,6 +1,20 @@
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
+
+
+def _cpu_numpy(x):
+    """Matplotlib expects CPU NumPy arrays; CUDA tensors crash in scatter/plot."""
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x
+
+
+def _to_cpu_tensor(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu()
+    return x
 
 
 def get_latent_representations(model, qual_dict=None):
@@ -88,9 +102,9 @@ def get_latent_representations(model, qual_dict=None):
 
         # Store in dictionary with encoder name
         encoder_data_dict[encoder_name] = {
-            "combinations": encoder_combinations,
-            "indices": indices,
-            "latent_reps": latent_reps,
+            "combinations": _to_cpu_tensor(encoder_combinations),
+            "indices": _to_cpu_tensor(indices),
+            "latent_reps": _to_cpu_tensor(latent_reps),
             "input_dim": getattr(latent_net, "input_dim", encoder_combinations.shape[1]),
         }
 
@@ -107,9 +121,9 @@ def get_latent_representations(model, qual_dict=None):
             with torch.no_grad():
                 source_latent = source_net(source_combinations.to(dtype=model.train_inputs[0].dtype))
             encoder_data_dict["source_encoder"] = {
-                "combinations": source_combinations,
-                "indices": source_indices,
-                "latent_reps": source_latent,
+                "combinations": _to_cpu_tensor(source_combinations),
+                "indices": _to_cpu_tensor(source_indices),
+                "latent_reps": _to_cpu_tensor(source_latent),
                 "input_dim": getattr(source_net, "input_dim", n_sources),
             }
 
@@ -144,30 +158,37 @@ def plot_encoders(model, qual_dict=None, save_path=None):
 
     for i, encoder_name in enumerate(encoder_names):
         encoder_data = encoder_data_dict[encoder_name]
-        indices = encoder_data["indices"]
-        latent_reps = encoder_data["latent_reps"]
+        indices = _to_cpu_tensor(encoder_data["indices"])
+        latent_reps = _to_cpu_tensor(encoder_data["latent_reps"])
+        latent_xy = _cpu_numpy(latent_reps)
 
         # Plot this encoder
         ax = axes[i]
 
         # Get unique categories for coloring
         unique_cats = indices.unique(dim=0)
-        colors = plt.cm.tab10(torch.arange(len(unique_cats)).float() / len(unique_cats))
+        n_colors = max(len(unique_cats), 1)
+        colors = plt.cm.tab10(np.arange(len(unique_cats), dtype=np.float64) / n_colors)
 
         for j, cat_combo in enumerate(unique_cats):
             # Find indices that match this category combination
             mask = (indices == cat_combo).all(dim=1)
-            points = latent_reps[mask]
+            pts_xy = latent_xy[_cpu_numpy(mask)]
 
             ax.scatter(
-                points[:, 0], points[:, 1], label=f"Cat {j}: {cat_combo.tolist()}", alpha=0.7, s=50, c=[colors[j]]
+                pts_xy[:, 0],
+                pts_xy[:, 1],
+                label=f"Cat {j}: {cat_combo.tolist()}",
+                alpha=0.7,
+                s=50,
+                c=np.atleast_2d(colors[j]),
             )
             # Annotate each point with its index
             point_indices = torch.where(mask)[0]
             for idx in point_indices:
-                x = latent_reps[idx, 0].item()
-                y = latent_reps[idx, 1].item()
-                ax.text(x, y, str(int(idx.item())), fontsize=8, ha="center", va="bottom")
+                ii = int(idx.item())
+                x, y = float(latent_xy[ii, 0]), float(latent_xy[ii, 1])
+                ax.text(x, y, str(ii), fontsize=8, ha="center", va="bottom")
 
         ax.set_xlabel("Latent Dimension 1")
         ax.set_ylabel("Latent Dimension 2")

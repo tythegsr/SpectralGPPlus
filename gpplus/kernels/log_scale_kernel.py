@@ -76,7 +76,7 @@ class LogScaleKernel(UnconstrainedKernel):
 
         # default to SoftClamp if user didn't provide a constraint
         if outputscale_constraint is None:
-            outputscale_constraint = SoftClamp(lower_bound=-5, upper_bound=3, margin=1e-2)
+            outputscale_constraint = SoftClamp(lower_bound=-5, upper_bound=4, margin=1e-2)
 
         self.base_kernel = base_kernel
         # Start at log_outputscale = 0 -> multiplicative scale of 10**0 = 1.0
