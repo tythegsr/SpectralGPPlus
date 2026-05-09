@@ -1,4 +1,5 @@
 from functools import reduce
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -53,6 +54,7 @@ class LBFGSScipy(torch.optim.Optimizer):
         self._numel_cache = None
         self._n_iter = 0
         self._last_loss = None
+        self.iteration_callback: Optional[Callable[[int, float], None]] = None
 
         # Numerical epsilon for scipy
         self.eps = np.finfo("double").eps
@@ -117,8 +119,10 @@ class LBFGSScipy(torch.optim.Optimizer):
             flat_grad = self._gather_flat_grad().cpu().numpy()
             return loss_value, flat_grad
 
-        def callback(flat_params):
+        def callback(_flat_params):
             self._n_iter += 1
+            if self.iteration_callback is not None and self._last_loss is not None:
+                self.iteration_callback(self._n_iter, float(self._last_loss.item()))
             # Optional: print progress (can be disabled)
             # print('Iter %i Loss %.5f' % (self._n_iter, self._last_loss.item()))
 

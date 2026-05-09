@@ -3,7 +3,6 @@ import time
 import gpytorch
 import numpy as np
 import torch
-from scipy.stats.qmc import Sobol
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 
@@ -82,8 +81,8 @@ u_bound = torch.tensor([200.0, 300.0, 10.0, 10.0, 45.0, 1.0, 0.18, 6.0, 2500.0, 
 # Generate test data
 print("\nGenerating test data...")
 
-sobol = Sobol(d=10)
-X_sobol_raw = torch.tensor(sobol.random(num_test))
+sobol = torch.quasirandom.SobolEngine(dimension=10, scramble=True)
+X_sobol_raw = sobol.draw(num_test).to(dtype=torch.float64)
 
 # Scale Sobol samples to the proper bounds
 X_sobol = scale(X_sobol_raw, l_bound, u_bound)
@@ -100,8 +99,8 @@ y_test = result
 print(f"  Test samples: {X_test.shape[0]}, Result range: [{result.min():.4f}, {result.max():.4f}]")
 
 
-sobol = Sobol(d=10)
-X_sobol_raw = torch.tensor(sobol.random(num_train))
+sobol = torch.quasirandom.SobolEngine(dimension=10, scramble=True)
+X_sobol_raw = sobol.draw(num_train).to(dtype=torch.float64)
 
 # Scale Sobol samples to the proper bounds
 X_sobol = scale(X_sobol_raw, l_bound, u_bound)
@@ -185,21 +184,21 @@ model = GPR(
     likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 
-num_epochs = 10000
-num_runs = 4
-lr = 0.1
+num_inits = 4
 
 print(model)
 # Create trainer
 trainer = gpplus.training.GPTrainer(
     model=model,
-    num_epochs=num_epochs,
+    # num_epochs=10000, # Not required if not using Adam
     seed=seed,
-    num_runs=num_runs,
-    optimizer_kwargs={"lr": lr},
-    convergence_patience=50,
-    optimizer_class=torch.optim.Adam,
-    device="cuda",
+    num_inits=num_inits,
+    stop_conditions=[
+        gpplus.training.ConvergencePatienceStopCondition(patience=50),
+        gpplus.training.MinLossChangeStopCondition(min_loss_change=1e-7),
+    ],
+    # optimizer_class=torch.optim.Adam,
+    device="cpu",
 )
 
 print("Training model...")
@@ -210,8 +209,8 @@ y_pred_scaled, pred_lower_scaled, pred_upper_scaled, output_std_scaled = evaluat
 
 # Transform predictions back to original scale for proper metrics
 y_test_orig = y_test  # Already in original scale
-y_pred_orig = scaler_y.inverse_transform(y_pred_scaled.numpy().reshape(-1, 1)).flatten()
-output_std_orig = output_std_scaled * scaler_y.scale_[0]  # Scale the uncertainty
+y_pred_orig = scaler_y.inverse_transform(y_pred_scaled.detach().cpu().numpy().reshape(-1, 1)).flatten()
+output_std_orig = output_std_scaled.detach().cpu().numpy() * scaler_y.scale_[0]  # Scale the uncertainty
 
 
 # Compute metrics on original scale

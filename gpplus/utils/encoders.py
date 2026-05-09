@@ -62,6 +62,9 @@ class MatrixEncoder(nn.Module):
         if x_onehot.shape[-1] != self.input_dim:
             raise ValueError(f"Expected input dimension {self.input_dim}, got {x_onehot.shape[-1]}")
 
+        # Keep input aligned with learnable matrix dtype/device (e.g. float64 on CUDA).
+        x_onehot = x_onehot.to(device=self.projection_matrix.device, dtype=self.projection_matrix.dtype)
+
         # Matrix multiplication: x_onehot @ projection_matrix
         # This is equivalent to: torch.mm(x_onehot, self.projection_matrix)
         return torch.matmul(x_onehot, self.projection_matrix)

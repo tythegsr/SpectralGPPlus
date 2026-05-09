@@ -1,5 +1,6 @@
 # Import needed libraries
 import logging
+import time
 
 import gpytorch
 import matplotlib.pyplot as plt
@@ -7,6 +8,7 @@ import torch
 
 import gpplus
 from gpplus.config import configure_logger
+from gpplus.training.stop_conditions import ConvergencePatienceStopCondition, MinLossChangeStopCondition
 from gpplus.training.trainer import GPTrainer
 
 configure_logger(logging.WARNING)
@@ -54,12 +56,24 @@ printCallback = PrintLossCallback()
 lossCallback = LossCallback()
 cllbcks = [printCallback, lossCallback]
 
-trainer = GPTrainer(model=model, num_runs=1, callbacks=cllbcks, device="cuda", convergence_patience=150)
+trainer = GPTrainer(
+    model=model,
+    num_inits=1,
+    callbacks=cllbcks,
+    device="cuda",
+    optimizer_class=torch.optim.Adam,
+    optimizer_kwargs={"lr": 0.1},
+    stop_conditions=[ConvergencePatienceStopCondition(patience=150), MinLossChangeStopCondition(min_loss_change=1e-7)],
+)
+start_time = time.perf_counter()
 trainer.train()
+elapsed_time = time.perf_counter() - start_time
+print(f"Adam training finished. Time = {elapsed_time:.2f} (s).")
 
 # Plot training loss
 plt.figure(figsize=(6, 4))
 plt.plot(range(len(lossCallback.loss)), lossCallback.loss, label="Loss")
+plt.plot([], [], " ", label=f"Time = {elapsed_time:.2f} (s).")
 plt.xlabel("Iteration")
 plt.ylabel("Loss")
 plt.title("Training Loss over Iterations")

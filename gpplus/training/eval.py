@@ -1,14 +1,24 @@
+import gpytorch
 import torch
 
 from ..config import logger
 from ..likelihoods import MultiLikelihood
 
+try:
+    from ..config.settings import get_settings
+except ImportError:
+
+    def get_settings():
+        class _NoopSettings:
+            def apply(self):
+                return None
+
+        return _NoopSettings()
+
 
 def evaluate_gp_model(
     model,
     test_x: torch.Tensor,
-    include_likelihood_noise: bool = True,
-    set_test_fidelity_indices: bool = True,
 ):
     """
     Evaluates the Gaussian Process model on test data.
@@ -18,20 +28,6 @@ def evaluate_gp_model(
             The Gaussian Process model to evaluate.
         test_x (torch.Tensor):
             Test data features.
-        include_likelihood_noise (bool, optional):
-            If True, uses model.likelihood() to include training noise in predictive variance.
-            If False, uses model() directly to get latent function predictions without noise.
-            Default: True (recommended for proper uncertainty quantification).
-        set_test_fidelity_indices (bool, optional):
-            If True and model.likelihood is MultiLikelihood, sets fidelity indices from
-            test_x before prediction so each test point gets the correct source-specific
-            mapping for both noisy and latent predictions. Default: True.
-
-            Note: When evaluating with noisy test data, the model's predictive variance
-            includes the TRAINING noise (learned from training data), but NOT any additional
-            TEST noise. If you add noise to test targets, you should either:
-            - Compare against clean (noise-free) test values, OR
-            - Manually add the test noise variance to the predictive variance before computing metrics.
 
     Returns:
         tuple:
@@ -41,17 +37,35 @@ def evaluate_gp_model(
                 - **upper** (torch.Tensor): Upper confidence bound for each test point.
                 - **stddev** (torch.Tensor): Standard deviation of the predictions.
     """
-    # Set the model and likelihood to evaluation mode
+    # Align GPyTorch / settings with training, then evaluate with
+    # slower stable fast_computations(False...) to reduce host-to-host variance.
+    get_settings().apply()
     model.eval()
 
-    with torch.no_grad():
-        if set_test_fidelity_indices and isinstance(model.likelihood, MultiLikelihood):
-            model.likelihood.set_fidelity_indices(test_x, is_test=True)
+    with (
+        torch.no_grad(),
+        gpytorch.settings.fast_computations(
+            covar_root_decomposition=False,
+            log_prob=False,
+            solves=False,
+        ),
+    ):  # gpytorch.settings.fast_pred_var():
+        # Make predictions
+        # Option 1: Without nugget (latent function f) - follows Equation 29b structure
+        # observed_pred = model(test_x)
 
-        if include_likelihood_noise:
-            observed_pred = model.likelihood(model(test_x))
-        else:
-            observed_pred = model(test_x)
+        # Option 2: With nugget (noisy observations y) - follows Equation 31b structure
+        # This adds +δI to the predictive covariance: +δ* = K_test_test - ... + +δI
+        # For MultiLikelihood, we need to set test fidelity indices from test data
+        # so each test point gets the correct nugget based on its source
+        train_inputs = getattr(model, "train_inputs", None)
+        if train_inputs and len(train_inputs) > 0:
+            reference = train_inputs[0]
+            test_x = test_x.to(device=reference.device, dtype=reference.dtype)
+
+        if isinstance(model.likelihood, MultiLikelihood):
+            model.likelihood.set_fidelity_indices(test_x, is_test=True)
+        observed_pred = model.likelihood(model(test_x))
 
         # Get the mean, lower and upper confidence bounds
         mean = observed_pred.mean
