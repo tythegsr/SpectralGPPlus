@@ -15,8 +15,11 @@ from gpplus.training import (
     MinLossChangeStopCondition,
 )
 from gpplus.training.optimizers import LBFGSScipy
+from gpplus.utils.set_seed import set_seed
 
-configure_logger(logging.WARNING)
+
+configure_logger(logging.INFO)
+set_seed(42)
 
 train_x = torch.linspace(0, 1, 10)
 train_y = torch.sin(train_x * (2 * torch.pi)) + 0.1 * torch.randn(train_x.size())
@@ -117,7 +120,10 @@ class LossCallback(gpplus.training.callbacks.Callback):
 printCallback = PrintLossCallback()
 
 
-def train_and_plot(optimizer_class, optimizer_kwargs, title_suffix):
+def train_and_plot(optimizer_class, optimizer_kwargs=None, title_suffix=None):
+    if title_suffix is None:
+        title_suffix = optimizer_class.__name__
+
     model = copy.deepcopy(base_model)
     model.train()
     model.likelihood.train()

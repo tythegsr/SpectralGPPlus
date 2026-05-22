@@ -21,6 +21,10 @@ class LBFGSScipy(torch.optim.Optimizer):
         ``param_bytes * (history_size + 1)`` bytes). If it doesn't fit in memory
         try reducing the history size, or use a different algorithm.
 
+    Callback contract:
+        Supports an iteration callback hook via ``set_iteration_callback`` for
+        integration with training callbacks.
+
     Arguments:
         max_iter (int): maximal number of iterations per optimization step
             (default: 20)
@@ -59,6 +63,10 @@ class LBFGSScipy(torch.optim.Optimizer):
         # Numerical epsilon for scipy
         self.eps = np.finfo("double").eps
 
+    def set_iteration_callback(self, callback: Optional[Callable[[int, float], None]]) -> None:
+        """Register a callback called after each scipy LBFGS iteration."""
+        self.iteration_callback = callback
+
     def _numel(self):
         if self._numel_cache is None:
             self._numel_cache = reduce(lambda total, p: total + p.numel(), self._params, 0)
@@ -94,13 +102,16 @@ class LBFGSScipy(torch.optim.Optimizer):
             p.data = params[offset : offset + numel].view_as(p.data)
             offset += numel
 
-    def step(self, closure):
+    def step(self, closure=None):
         """Performs a single optimization step.
 
         Arguments:
             closure (callable): A closure that reevaluates the model
                 and returns the loss.
         """
+
+        if closure is None:
+            raise RuntimeError("LBFGSScipy requires a closure.")
 
         group = self.param_groups[0]
         max_iter = group["max_iter"]
