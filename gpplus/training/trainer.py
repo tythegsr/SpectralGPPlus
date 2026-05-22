@@ -143,7 +143,11 @@ class GPTrainer:
 
         optimizer_name = getattr(self.optimizer_class, "__name__", str(self.optimizer_class))
         effective_optimizer_kwargs = get_effective_optimizer_kwargs(self.optimizer_class, self.optimizer_kwargs)
-        logger.info("Trainer optimizer configured: class=%s, effective_kwargs=%s", optimizer_name, effective_optimizer_kwargs)
+        logger.info(
+            "Trainer optimizer configured: class=%s, effective_kwargs=%s",
+            optimizer_name,
+            effective_optimizer_kwargs,
+        )
 
     def _prepare_model_and_data(self, model) -> None:
         if not hasattr(model, "train_inputs") or not hasattr(model, "train_targets"):
@@ -228,7 +232,11 @@ class GPTrainer:
         results = self.train_multiple_process_parallel()
         failed_runs = [result for result in results if result.get("error")]
         if failed_runs:
-            logger.warning("%s/%s runs failed. Check run-level error payloads for details.", len(failed_runs), len(results))
+            logger.warning(
+                "%s/%s runs failed. Check run-level error payloads for details.",
+                len(failed_runs),
+                len(results),
+            )
 
         best_run = select_best_run(results)
         if best_run is not None:

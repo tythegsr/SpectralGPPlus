@@ -17,7 +17,6 @@ from gpplus.training import (
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils.set_seed import set_seed
 
-
 configure_logger(logging.INFO)
 set_seed(42)
 
