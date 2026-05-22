@@ -86,9 +86,7 @@ def run_parallel_initializations(
     """Execute initialization runs across CPU cores or available GPUs."""
     if trainer_device.type == "cpu":
         max_jobs = _cpu_parallel_jobs(num_inits, n_jobs=n_jobs)
-        logger.info(
-            f"Running {num_inits} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores."
-        )
+        logger.info(f"Running {num_inits} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores.")
         return Parallel(n_jobs=max_jobs, backend="loky")(
             delayed(run_callable)(run_index, trainer_device) for run_index in range(num_inits)
         )
@@ -149,8 +147,10 @@ def check_early_stop(
             reasons.append("Stop condition met")
     if reasons:
         logger.info(
-            f"Early stopping triggered at epoch {epoch + 1}. "
-            f"Reason: {' OR '.join(reasons)}. Best loss: {best_loss:.6f}"
+            "Early stopping triggered at epoch %s. Reason: %s. Best loss: %.6f",
+            epoch + 1,
+            " OR ".join(reasons),
+            best_loss,
         )
         return True
     return False
