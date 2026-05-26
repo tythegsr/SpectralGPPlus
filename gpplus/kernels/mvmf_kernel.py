@@ -189,9 +189,7 @@ class MVMFKernel(gpytorch.kernels.Kernel):
             if not isinstance(encoder, Encoder):
                 raise TypeError(f"{name}[{i}] must be an Encoder instance")
             if encoder.input_dim != len(group):
-                raise ValueError(
-                    f"{name}[{i}].input_dim={encoder.input_dim} does not match group size={len(group)}"
-                )
+                raise ValueError(f"{name}[{i}].input_dim={encoder.input_dim} does not match group size={len(group)}")
         return encoders
 
     def _resolve_single_encoder(self, encoder_spec, input_dim, name):
