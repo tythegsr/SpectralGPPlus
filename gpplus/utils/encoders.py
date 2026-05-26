@@ -13,6 +13,7 @@ class Encoder(nn.Module):
     This wrapper keeps a single public class while reusing the existing
     implementations for numerical behavior and compatibility.
     """
+
     SUPPORTED_TYPES = {"matrix", "nn"}
 
     def __init__(
@@ -83,11 +84,7 @@ class Encoder(nn.Module):
         return f"type={self.encoder_type}, input_dim={self.input_dim}, z_dim={self.z_dim}"
 
     def __repr__(self):
-        return (
-            f"{self.__class__.__name__}("
-            f"type={self.encoder_type}, input_dim={self.input_dim}, z_dim={self.z_dim}"
-            f")"
-        )
+        return f"{self.__class__.__name__}(type={self.encoder_type}, input_dim={self.input_dim}, z_dim={self.z_dim})"
 
     def encode_pair(self, x1, x2=None, shared_sampling=True, **kwargs):
         """
@@ -125,6 +122,7 @@ class Encoder(nn.Module):
         except AttributeError:
             impl = super().__getattr__("impl")
             return getattr(impl, name)
+
 
 class MatrixEncoder(nn.Module):
     """

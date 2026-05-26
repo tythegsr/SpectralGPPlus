@@ -65,7 +65,6 @@ def get_latent_representations(model, qual_dict=None):
 
     # Loop through all categorical encoders
     for i, (encoder_name, latent_net) in enumerate(cat_encoder_entries):
-
         # Determine encoder dimensions
         if qual_dict is not None and len(cat_encoder_entries) == 1:
             # For grouped categorical encoding, use qual_dict to get proper dimensions
