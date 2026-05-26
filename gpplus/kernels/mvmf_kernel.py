@@ -174,7 +174,11 @@ class MVMFKernel(gpytorch.kernels.Kernel):
         elif isinstance(encoder_spec, (str, bytes)):
             encoder_type = self._coerce_encoder_type(encoder_spec.lower(), name)
             encoders = [
-                Encoder(input_dim=len(group), encoder_type=encoder_type, z_dim=self.z_dim)
+                Encoder(
+                    input_dim=len(group),
+                    encoder_type=encoder_type,
+                    z_dim=self.z_dim,
+                )
                 for group in col_groups
             ]
         elif hasattr(encoder_spec, "__iter__"):
