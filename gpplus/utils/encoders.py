@@ -6,6 +6,126 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class Encoder(nn.Module):
+    """
+    Unified encoder interface that can operate in matrix or neural mode.
+
+    This wrapper keeps a single public class while reusing the existing
+    implementations for numerical behavior and compatibility.
+    """
+    SUPPORTED_TYPES = {"matrix", "nn"}
+
+    def __init__(
+        self,
+        input_dim,
+        encoder_type="matrix",
+        z_dim=2,
+        matrix_config=None,
+        nn_config=None,
+    ):
+        super().__init__()
+        self.input_dim = input_dim
+        self.z_dim = z_dim
+        self.encoder_type = None
+        self._matrix_config = matrix_config or {}
+        self._nn_config = nn_config or {}
+        self._set_impl(encoder_type)
+
+    def _set_impl(self, encoder_type):
+        encoder_type = encoder_type.lower()
+        if encoder_type not in self.SUPPORTED_TYPES:
+            raise ValueError(
+                f"Unsupported encoder_type '{encoder_type}'. Expected one of {sorted(self.SUPPORTED_TYPES)}."
+            )
+
+        if encoder_type == "matrix":
+            impl = MatrixEncoder(
+                input_dim=self.input_dim,
+                z_dim=self.z_dim,
+                initialization=self._matrix_config.get("initialization", "normal"),
+                init_std=self._matrix_config.get("init_std", 0.1),
+                seed=self._matrix_config.get("seed"),
+            )
+        else:
+            impl = NeuralEncoder(
+                input_dim=self.input_dim,
+                architecture_config=self._nn_config.get("architecture_config"),
+                z_dim=self._nn_config.get("z_dim", self.z_dim),
+                num_passes=self._nn_config.get("num_passes", 1),
+                num_passes_pred=self._nn_config.get("num_passes_pred"),
+                probabilistic=self._nn_config.get("probabilistic", False),
+            )
+
+        # Register active implementation as a submodule so parameters are tracked.
+        self.impl = impl
+        self.encoder_type = encoder_type
+        self.z_dim = impl.z_dim
+
+    def switch(self, encoder_type, matrix_config=None, nn_config=None):
+        """
+        Switch active backend at runtime.
+
+        Args:
+            encoder_type: "matrix" or "nn"
+            matrix_config: Optional matrix config override
+            nn_config: Optional nn config override
+        """
+        if matrix_config is not None:
+            self._matrix_config = matrix_config
+        if nn_config is not None:
+            self._nn_config = nn_config
+        self._set_impl(encoder_type)
+
+    def forward(self, x, *args, **kwargs):
+        return self.impl(x, *args, **kwargs)
+
+    def extra_repr(self):
+        return f"type={self.encoder_type}, input_dim={self.input_dim}, z_dim={self.z_dim}"
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__}("
+            f"type={self.encoder_type}, input_dim={self.input_dim}, z_dim={self.z_dim}"
+            f")"
+        )
+
+    def encode_pair(self, x1, x2=None, shared_sampling=True, **kwargs):
+        """
+        Encode a pair of tensors with consistent stochastic sampling.
+
+        For probabilistic encoders, this reuses the same epsilon for both
+        inputs so pairwise kernel evaluations are not polluted by sampling
+        mismatch noise.
+        """
+        if x2 is None:
+            x2 = x1
+
+        local_kwargs = dict(kwargs)
+        epsilon = local_kwargs.get("epsilon")
+
+        if shared_sampling and getattr(self.impl, "is_probabilistic", False) and epsilon is None:
+            epsilon = torch.normal(
+                mean=0,
+                std=1,
+                size=[self.input_dim, self.z_dim],
+                device=x1.device,
+                dtype=x1.dtype,
+            )
+            local_kwargs["epsilon"] = epsilon
+
+        z1 = self.impl(x1, **local_kwargs)
+        z2 = self.impl(x2, **local_kwargs)
+        return z1, z2
+
+    def __getattr__(self, name):
+        # Delegate unknown attributes (e.g., projection_matrix, is_probabilistic)
+        # to the active implementation.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            impl = super().__getattr__("impl")
+            return getattr(impl, name)
+
 class MatrixEncoder(nn.Module):
     """
     Matrix-based encoder for categorical variables as described in Section 4 of the GP+ paper.
