@@ -41,21 +41,21 @@ def get_latent_representations(model, qual_dict=None):
     else:
         combined_kernel = model.covar_module
 
-    # Check if categorical variables exist
-    # Look for categorical encoders - prefer numbered ones, fallback to generic
-    cat_encoders = [attr for attr in dir(combined_kernel) if attr.startswith("cat_encoder_")]
-    if not cat_encoders and hasattr(combined_kernel, "cat_encoder"):
-        cat_encoders = ["cat_encoder"]
+    # Resolve categorical encoders into (name, module) pairs.
+    # Supports legacy "cat_encoder_i", single "cat_encoder", and ModuleList "cat_encoder".
+    cat_encoder_entries = []
+    numbered_attrs = sorted([attr for attr in dir(combined_kernel) if attr.startswith("cat_encoder_")])
+    for attr in numbered_attrs:
+        latent_net = getattr(combined_kernel, attr)
+        cat_encoder_entries.append((attr, latent_net))
 
-    # Get encoder dimensions directly from the encoders
-    cat_dims = []
-    for encoder_name in cat_encoders:
-        latent_net = getattr(combined_kernel, encoder_name)
-        if hasattr(latent_net, "input_dim"):
-            cat_dims.append(latent_net.input_dim)
-        else:
-            print(f"Warning: Encoder {encoder_name} has no input_dim attribute")
-            continue
+    if not cat_encoder_entries and hasattr(combined_kernel, "cat_encoder"):
+        cat_encoder_obj = getattr(combined_kernel, "cat_encoder")
+        if isinstance(cat_encoder_obj, torch.nn.ModuleList):
+            for i, latent_net in enumerate(cat_encoder_obj):
+                cat_encoder_entries.append((f"cat_encoder_{i}", latent_net))
+        elif cat_encoder_obj is not None:
+            cat_encoder_entries.append(("cat_encoder", cat_encoder_obj))
 
     # It's possible there are no categorical encoders but a source encoder exists.
     # So do not early-return here; we'll build whatever encoders exist.
@@ -64,11 +64,10 @@ def get_latent_representations(model, qual_dict=None):
     encoder_data_dict = {}
 
     # Loop through all categorical encoders
-    for i, encoder_name in enumerate(cat_encoders):
-        latent_net = getattr(combined_kernel, encoder_name)
+    for i, (encoder_name, latent_net) in enumerate(cat_encoder_entries):
 
         # Determine encoder dimensions
-        if qual_dict is not None and encoder_name == "cat_encoder":
+        if qual_dict is not None and len(cat_encoder_entries) == 1:
             # For grouped categorical encoding, use qual_dict to get proper dimensions
             cat_vars = sorted(qual_dict.items())
             encoder_dims = [dim for _, dim in cat_vars]

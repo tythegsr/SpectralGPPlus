@@ -89,9 +89,8 @@ for seed in range(start_seed, start_seed + num_seeds):
 
     # Generate training and test data for all fidelity levels s0-s3
     sources = ["s0", "s1"]
-    num_train_per_source = {"s0": 120, "s1": 120}
-    num_test_per_source = {"s0": 5000, "s1": 5000}  # 10k total / 4 sources = 2.5k per source
-
+    num_train_per_source = {"s0": 250, "s1": 250}
+    num_test_per_source = {"s0": 5000, "s1": 5000}  # 10k total
     # Generate test data
     print("\nGenerating test data...")
     X_test_data = []
@@ -180,7 +179,7 @@ for seed in range(start_seed, start_seed + num_seeds):
         # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
     )
 
-    num_inits = 4
+    num_inits = 16
     print(model)
 
     # Create trainer
