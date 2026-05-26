@@ -253,4 +253,3 @@ class MVMFKernel(gpytorch.kernels.Kernel):
         else:
             self.source_kernel = None
             self.source_encoder = None
-
