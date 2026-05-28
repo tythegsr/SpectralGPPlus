@@ -1,173 +1,121 @@
 import torch
 import torch.nn as nn
+from gpytorch.means import ConstantMean, Mean, ZeroMean
 
 
-class MultiMean(nn.Module):
-    def __init__(self, means=None, encoded_cols=None):
-        """
-        A mean function that can specify multiple mean modules for different fidelity sources
-        (e.g., multi-fidelity or grouped data). Each source can have its own mean function.
+class MultiMean(Mean):
+    """
+    A mean function for grouped / multi-fidelity data.
 
-        This class now works as a single mean_module that internally handles the multi-mean logic,
-        eliminating the need for separate mean_module_0, mean_module_1, etc. in the GPR model.
+    Each source (fidelity level) has its own mean module. At forward time the
+    source of each input row is read from a one-hot block of columns, and the
+    appropriate per-source mean is applied.
 
-        Args:
-            means (list[gpytorch.means.Mean] or gpytorch.means.Mean, optional):
-                Either a single mean module or a list of mean modules. If not provided:
-                - Uses ZeroMean if num_sources = 1
-                - Uses ConstantMean (with NormalPrior on constant) for multiple sources.
+    Args:
+        source_cols (list[int]):
+            Column indices of the one-hot encoded source block in the input
+            tensor. ``len(source_cols)`` defines the number of sources.
+            Required and must be a list of ints with no duplicates.
+        means (list[gpytorch.means.Mean], optional):
+            One mean module per source. If None, the first source defaults to
+            ``ZeroMean`` and the remaining sources to fresh ``ConstantMean``
+            instances. Length must equal ``len(source_cols)``.
 
-            encoded_cols (Union[list, int, numpy.ndarray, torch.Tensor], optional):
-                Either:
-                - List/array of column indices for one-hot encoded fidelity levels, OR
-                - Single integer indicating the column index containing fidelity indicators
-                If None, assumes single source (no categorical distinction).
-            training_data (torch.Tensor, optional):
-                Training data tensor to determine number of sources for single column case.
-                If provided, will count unique values in the specified column upfront.
+    Attributes:
+        source_cols (list[int]): Stored one-hot column indices.
+        num_sources (int): Number of fidelity sources (== ``len(source_cols)``).
+        means (nn.ModuleList): Per-source mean modules, registered as
+            submodules so parameters are tracked, moved with ``.to(device)``,
+            and saved/loaded via ``state_dict``.
 
-        Attributes:
-            encoded_cols: Either list of one-hot encoded columns or single source column index
-            num_sources (int): Number of fidelity sources. Defaults to 1 if encoded_cols is None.
-            means (list): List of mean modules, one per source.
+    Example:
+        >>> # 3 fidelities, one-hot encoded in columns 10, 11, 12
+        >>> mm = MultiMean(source_cols=[10, 11, 12])
+        >>> # Or with explicit per-source means:
+        >>> mm = MultiMean(
+        ...     source_cols=[10, 11, 12],
+        ...     means=[ZeroMean(), ConstantMean(), ConstantMean()],
+        ... )
+    """
 
-        Behavior:
-            - If multiple sources are provided via encoded_cols, ensures there is one mean per source.
-            - If fewer means are provided than sources, duplicates the last mean for remaining sources.
-            - Validates number of means equals number of sources.
-
-        Methods:
-            forward(x: torch.Tensor) -> torch.Tensor:
-                Computes the mean for each input point, selecting the appropriate mean function based on source index.
-                If single source, uses the only mean module.
-
-            register_to(model):
-                Registers each individual mean module (e.g., "mean_module_0", "mean_module_1", ...) to the given model.
-                Note: This is now optional since the class works as a single mean_module.
-
-        Example:
-            >>> # One-hot encoded case
-            >>> encoded_cols = [10, 11, 12]  # Columns 10, 11, 12 contain one-hot encoded sources
-            >>> means = [gpytorch.means.ConstantMean()] * 3
-            >>> multi_mean = MultipleMean(means=means, encoded_cols=encoded_cols)
-
-            >>> # Single column case
-            >>> encoded_cols = 10  # Column 10 contains source indicators (0, 1, 2, etc.)
-            >>> means = [gpytorch.means.ConstantMean()] * 3
-            >>> # Option A: Without training data (will determine sources during forward pass)
-            >>> multi_mean = MultipleMean(means=means, encoded_cols=encoded_cols)
-            >>> # Option B: With training data (determines sources upfront)
-            >>> # multi_mean = MultipleMean(means=means, encoded_cols=encoded_cols, training_data=X_train)
-        """
-
+    def __init__(self, source_cols, means=None):
         super().__init__()
 
-        # Handle encoded_cols - can be None, int, list, or dict like {10: 4}
-        if encoded_cols is None:
-            raise ValueError("encoded_cols must not be None, must be a dictionary or list of column indices")
+        # ---- validate source_cols ---------------------------------------
+        if source_cols is None:
+            raise ValueError("source_cols is required.")
+        if not isinstance(source_cols, list):
+            raise TypeError(
+                f"source_cols must be a list of ints, got {type(source_cols).__name__}. "
+                "Convert numpy arrays / tensors / ranges with list(...) at the call site."
+            )
+        if len(source_cols) == 0:
+            raise ValueError("source_cols must be non-empty.")
+        if not all(isinstance(c, int) for c in source_cols):
+            raise TypeError("source_cols must contain only ints.")
+        if len(set(source_cols)) != len(source_cols):
+            raise ValueError(f"source_cols contains duplicates: {source_cols}")
 
-        elif isinstance(encoded_cols, dict):
-            # Dictionary case like {10: 4} - column 10 has 4 sources
-            self.is_onehot = True
-            self.encoded_cols = list(encoded_cols.keys())
-            self.num_sources = sum(encoded_cols.values())
-        else:
-            # One-hot encoded columns - handle numpy arrays, tensors, lists, etc.
-            self.is_onehot = True
-            self.source_col = None  # No single source column for one-hot case
-            # Convert to list if it's not already
-            if hasattr(encoded_cols, "__len__") and not isinstance(encoded_cols, (str, bytes)):
-                # It's an array-like object (numpy array, tensor, list, etc.)
-                encoded_cols = list(encoded_cols)
-            else:
-                # Fallback: wrap in list
-                encoded_cols = [encoded_cols]
-            self.encoded_cols = encoded_cols
-            self.num_sources = len(encoded_cols)
+        self.source_cols = list(source_cols)
+        self.num_sources = len(self.source_cols)
 
-        # Set default means if not provided
+        # ---- validate / build means -------------------------------------
         if means is None:
-            from gpytorch.means import ConstantMean, ZeroMean
-            # from gpytorch.priors import NormalPrior
+            # Default: first source is ZeroMean, rest are independent ConstantMeans.
+            built = [ZeroMean()]
+            built.extend(ConstantMean() for _ in range(self.num_sources - 1))
+            means = built
+        else:
+            if not isinstance(means, list):
+                raise TypeError(
+                    f"means must be a list of gpytorch.means.Mean, got {type(means).__name__}."
+                )
+            if len(means) != self.num_sources:
+                raise ValueError(
+                    f"Got {len(means)} means but {self.num_sources} sources. "
+                    "Lengths must match exactly — duplicate explicitly if you want sharing."
+                )
+            for i, m in enumerate(means):
+                if not isinstance(m, Mean):
+                    raise TypeError(
+                        f"means[{i}] must be a gpytorch.means.Mean, got {type(m).__name__}."
+                    )
+            # Guard against accidental parameter sharing from passing the
+            # same instance twice — fail loudly rather than silently tie params.
+            if len({id(m) for m in means}) != len(means):
+                raise ValueError(
+                    "means contains the same module instance more than once, which would "
+                    "share parameters across sources. Pass independent instances."
+                )
 
-            means = [ZeroMean()]
-            if self.num_sources and self.num_sources > 1:
-                # means += [ConstantMean(constant_prior=NormalPrior(0.0, 1.0))]
-                means += [ConstantMean()]
-        if not isinstance(means, list):
-            means = [means]
+        self.means = nn.ModuleList(means)
 
-        # For single column case, we'll need to handle this during forward pass
-        # For now, create a reasonable default
-        if self.num_sources is None:
-            # Single column case without training data - use a reasonable default
-            # This will be updated during the first forward pass
-            if len(means) < 2:
-                means += [means[-1]] * (2 - len(means))
-            self.num_sources = len(means)
-        elif len(means) < self.num_sources:
-            means += [means[-1]] * (self.num_sources - len(means))
-
-        # assert len(means) == self.num_sources, f"Expected {self.num_sources} means, but got {len(means)}"
-
-        # Store the means internally but don't register them as submodules
-        # This allows the class to work as a single mean_module
-        self.means = means
-
-        # Create internal mean modules with names mean0, mean1, mean2, etc.
-        for i, m in enumerate(means):
-            self.add_module(f"mean{i}", m)
-
-        if "mean_module" in self._modules:
-            del self._modules["mean_module"]
+    # ------------------------------------------------------------------
 
     def forward(self, x):
         """
-        Forward pass that internally handles the multi-mean logic.
-        This allows the class to be used as a single mean_module in the GPR model.
+        Apply the per-source mean to each row of ``x``.
+
+        Args:
+            x: Tensor of shape ``[..., num_features]``. The columns indexed
+               by ``self.source_cols`` must form a one-hot block.
+
+        Returns:
+            Tensor of shape ``[...]`` with the mean evaluated row-wise.
         """
+        if x.shape[-1] <= max(self.source_cols):
+            raise ValueError(
+                f"Input has {x.shape[-1]} features but source_cols references "
+                f"index {max(self.source_cols)}."
+            )
 
-        if self.is_onehot:
-            # One-hot encoded case
-            source_ids_onehot = x[:, self.encoded_cols]
-            source_ids = source_ids_onehot.argmax(dim=-1)
-        else:
-            # Single column case
-            if self.source_col is not None:
-                source_ids = x[:, self.source_col].long()
-                # Update num_sources if this is the first time we've seen the data
-                if self.num_sources is None:
-                    unique_sources = torch.unique(source_ids)
-                    self.num_sources = len(unique_sources)
-                    # Ensure we have enough means
-                    while len(self.means) < self.num_sources:
-                        self.means.append(self.means[-1])
-                        self.add_module(f"mean{len(self.means) - 1}", self.means[-1])
-            else:
-                # Single source case
-                return self.means[0](x)
+        # Resolve source index per row from the one-hot block.
+        source_onehot = x[..., self.source_cols]
+        source_ids = source_onehot.argmax(dim=-1)  # shape [...]
 
-        # Create output tensor with the same dtype as input
-        # This ensures compatibility with the model's expected dtype
-        output = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
-
-        for i in range(self.num_sources):
+        output = torch.zeros(x.shape[:-1], device=x.device, dtype=x.dtype)
+        for i, mean_i in enumerate(self.means):
             mask = source_ids == i
             if mask.any():
-                mean_i = getattr(self, f"mean{i}")
-                mean_output = mean_i(x[mask])
-                # Ensure dtype and device compatibility
-                if mean_output.dtype != output.dtype or mean_output.device != output.device:
-                    mean_output = mean_output.to(dtype=output.dtype, device=output.device)
-                output[mask] = mean_output
+                output[mask] = mean_i(x[mask]).to(dtype=output.dtype)
         return output
-
-    def register_to(self, model):
-        """
-        Optional method to register individual mean modules to the model.
-        This is now optional since the class works as a single mean_module.
-        """
-        # Use the actual number of sources (may have been updated during forward pass)
-        num_sources = self.num_sources if self.num_sources is not None else len(self.means)
-        for i in range(num_sources):
-            setattr(model, f"mean_module_{i}", getattr(self, f"mean{i}"))
