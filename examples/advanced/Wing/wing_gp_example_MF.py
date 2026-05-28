@@ -91,8 +91,8 @@ X_test = data["x_test_full"]
 y_test = data["y_test_full"]
 
 # Get column information from metadata
-cont_cols = np.arange(4, 14)
-source_cols = np.arange(0, 4)
+cont_cols = list(range(4, 14))     # or [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+source_cols = list(range(0, 4))    # or [0, 1, 2, 3]
 
 print(f"Xtrainshape: {X_train.shape}")
 print(f"Xtestshape: {X_test.shape}")
@@ -160,7 +160,7 @@ model = GPR(
     y_train_scaled,
     # kernel_module=gpplus.kernels.GaussianKernel(),
     kernel_module=kernel,
-    mean_module=gpplus.means.MultiMean(encoded_cols=source_cols),
+    mean_module=gpplus.means.MultiMean(source_cols=source_cols),
     # mean_module=gpytorch.means.ConstantMean(),
     likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train_scaled),
     # likelihood=gpytorch.likelihoods.GaussianLikelihood(),

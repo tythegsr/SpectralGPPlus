@@ -111,7 +111,6 @@ for seed in range(start_seed, start_seed + num_seeds):
         gpplus.kernels.MVMFKernel(
             cont_cols=cont_cols,
             cat_cols=cat_cols,
-            cat_encoder="matrix",
         )
     )
 
