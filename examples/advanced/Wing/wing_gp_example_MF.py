@@ -126,13 +126,15 @@ t1 = time.time()
 
 
 # Create model
-kernel = gpplus.kernels.LogScaleKernel(gpplus.kernels.MVMFKernel(
-    cont_cols=cont_cols,
-    cat_cols=None,
-    source_cols=source_cols,
-    # source_encoder=source_encoder,
-    # source_encoder=source_encoder2,
-))
+kernel = gpplus.kernels.LogScaleKernel(
+    gpplus.kernels.MVMFKernel(
+        cont_cols=cont_cols,
+        cat_cols=None,
+        source_cols=source_cols,
+        # source_encoder=source_encoder,
+        # source_encoder=source_encoder2,
+    )
+)
 
 model = GPR(
     X_train,

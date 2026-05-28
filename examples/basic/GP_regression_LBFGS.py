@@ -76,7 +76,7 @@ cllbcks = [printCallback, lossCallback]
 
 trainer = GPTrainer(
     model=model,
-    num_inits=16,
+    num_inits=1,
     callbacks=cllbcks,
     device="cuda",
     optimizer_class=LBFGSScipy,
