@@ -1,4 +1,4 @@
-from .encoders import MatrixEncoder, NeuralEncoder
+from .encoders import MatrixEncoder, NeuralEncoder, BaseEncoder
 from .input_transform_net import InputTransformNet
 from .set_seed import set_seed
 from .standard_scaler import StandardScaler

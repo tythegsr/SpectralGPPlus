@@ -163,7 +163,6 @@ for seed in range(start_seed, start_seed + num_seeds):
             cont_cols=cont_cols,
             cat_cols=cat_cols,
             source_cols=source_cols,
-            cat_encoder="matrix",
             # cat_encoder=cat_encoders,
             # source_encoder=source_encoder,
             # source_encoder=source_encoder2,
@@ -174,7 +173,7 @@ for seed in range(start_seed, start_seed + num_seeds):
         X_train,
         y_train,
         kernel_module=kernel,
-        mean_module=gpplus.means.MultiMean(encoded_cols=source_cols),
+        mean_module=gpplus.means.MultiMean(source_cols=source_cols),
         likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train),
         # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
     )
