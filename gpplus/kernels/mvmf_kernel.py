@@ -52,18 +52,14 @@ def _validate_cat_cols(cat_cols):
         groups = []
         for i, group in enumerate(cat_cols):
             if not isinstance(group, list):
-                raise TypeError(
-                    f"cat_cols[{i}] must be a list of ints, got {type(group).__name__}."
-                )
+                raise TypeError(f"cat_cols[{i}] must be a list of ints, got {type(group).__name__}.")
             groups.append(_validate_int_list(group, f"cat_cols[{i}]"))
         # Reject overlap across groups — almost always a bug.
         seen = set()
         for i, group in enumerate(groups):
             overlap = seen & set(group)
             if overlap:
-                raise ValueError(
-                    f"cat_cols[{i}] overlaps with earlier groups on indices {sorted(overlap)}."
-                )
+                raise ValueError(f"cat_cols[{i}] overlaps with earlier groups on indices {sorted(overlap)}.")
             seen.update(group)
         return groups
     raise TypeError(
@@ -149,11 +145,7 @@ class MVMFKernel(gpytorch.kernels.Kernel):
 
         # Categorical kernel
         if self.cat_kernel is not None and self.cat_encoder is not None:
-            encoders = (
-                self.cat_encoder
-                if isinstance(self.cat_encoder, torch.nn.ModuleList)
-                else [self.cat_encoder]
-            )
+            encoders = self.cat_encoder if isinstance(self.cat_encoder, torch.nn.ModuleList) else [self.cat_encoder]
             z1_cat_list, z2_cat_list = [], []
             for encoder, col_group in zip(encoders, self.cat_cols):
                 cat_idx = torch.as_tensor(col_group, device=device)
@@ -217,10 +209,7 @@ class MVMFKernel(gpytorch.kernels.Kernel):
     def _resolve_encoder_list(self, encoder_spec, col_groups, name):
         """Coerce ``encoder_spec`` into a list of BaseEncoder, one per group."""
         if encoder_spec is None:
-            encoders = [
-                MatrixEncoder(input_dim=len(group), z_dim=self.z_dim)
-                for group in col_groups
-            ]
+            encoders = [MatrixEncoder(input_dim=len(group), z_dim=self.z_dim) for group in col_groups]
         elif isinstance(encoder_spec, BaseEncoder):
             if len(col_groups) != 1:
                 raise ValueError(
@@ -232,23 +221,18 @@ class MVMFKernel(gpytorch.kernels.Kernel):
             encoders = list(encoder_spec)
         else:
             raise TypeError(
-                f"{name} must be a BaseEncoder or a list of BaseEncoder; "
-                f"got {type(encoder_spec).__name__}."
+                f"{name} must be a BaseEncoder or a list of BaseEncoder; got {type(encoder_spec).__name__}."
             )
 
         if len(encoders) != len(col_groups):
             raise ValueError(
-                f"Number of {name} entries ({len(encoders)}) must match "
-                f"number of groups ({len(col_groups)})."
+                f"Number of {name} entries ({len(encoders)}) must match number of groups ({len(col_groups)})."
             )
         for i, (encoder, group) in enumerate(zip(encoders, col_groups)):
             if not isinstance(encoder, BaseEncoder):
                 raise TypeError(f"{name}[{i}] must be a BaseEncoder instance")
             if encoder.input_dim != len(group):
-                raise ValueError(
-                    f"{name}[{i}].input_dim={encoder.input_dim} does not match "
-                    f"group size={len(group)}"
-                )
+                raise ValueError(f"{name}[{i}].input_dim={encoder.input_dim} does not match group size={len(group)}")
         return encoders
 
     def _resolve_single_encoder(self, encoder_spec, input_dim, name):
@@ -257,13 +241,9 @@ class MVMFKernel(gpytorch.kernels.Kernel):
         elif isinstance(encoder_spec, BaseEncoder):
             encoder = encoder_spec
         else:
-            raise TypeError(
-                f"{name} must be a BaseEncoder; got {type(encoder_spec).__name__}."
-            )
+            raise TypeError(f"{name} must be a BaseEncoder; got {type(encoder_spec).__name__}.")
         if encoder.input_dim != input_dim:
-            raise ValueError(
-                f"{name}.input_dim={encoder.input_dim} does not match size={input_dim}"
-            )
+            raise ValueError(f"{name}.input_dim={encoder.input_dim} does not match size={input_dim}")
         return encoder
 
     def _process_cat(self, cat_encoder, cat_kernel):

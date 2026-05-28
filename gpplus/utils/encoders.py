@@ -138,9 +138,7 @@ class MatrixEncoder(BaseEncoder):
 
     def forward(self, x_onehot: torch.Tensor, **kwargs: Any) -> torch.Tensor:
         if x_onehot.shape[-1] != self.input_dim:
-            raise ValueError(
-                f"Expected input dimension {self.input_dim}, got {x_onehot.shape[-1]}"
-            )
+            raise ValueError(f"Expected input dimension {self.input_dim}, got {x_onehot.shape[-1]}")
         x_onehot = x_onehot.to(
             device=self.projection_matrix.device,
             dtype=self.projection_matrix.dtype,
@@ -152,9 +150,7 @@ class MatrixEncoder(BaseEncoder):
 
     def set_projection_matrix(self, matrix: torch.Tensor) -> None:
         if matrix.shape != (self.input_dim, self.z_dim):
-            raise ValueError(
-                f"Expected matrix shape {(self.input_dim, self.z_dim)}, got {matrix.shape}"
-            )
+            raise ValueError(f"Expected matrix shape {(self.input_dim, self.z_dim)}, got {matrix.shape}")
         self.projection_matrix.data = matrix.clone()
 
 
@@ -199,9 +195,7 @@ class NeuralEncoder(BaseEncoder):
         self.is_probabilistic = bool(probabilistic)
 
         if self.is_probabilistic and self.z_dim != 2:
-            raise NotImplementedError(
-                "Probabilistic NeuralEncoder currently only supports 2D embeddings."
-            )
+            raise NotImplementedError("Probabilistic NeuralEncoder currently only supports 2D embeddings.")
 
         # Bug fix: previously both branches assigned the same value.
         if num_passes_pred is None or num_passes == 1:
@@ -221,9 +215,7 @@ class NeuralEncoder(BaseEncoder):
             "elu": nn.ELU(),
             "hardtanh": nn.Hardtanh(),
         }
-        activation = activation_map.get(
-            architecture_config["activation"].lower(), nn.ReLU()
-        )
+        activation = activation_map.get(architecture_config["activation"].lower(), nn.ReLU())
 
         if self.is_probabilistic:
             self._build_probabilistic(input_dim, architecture_config)
@@ -234,9 +226,7 @@ class NeuralEncoder(BaseEncoder):
 
     def _build_probabilistic(self, input_dim: int, architecture_config: dict) -> None:
         vae_output_dim = 5  # mu1, mu2, L21, L11, L22
-        self.fci = Linear_VAE(
-            in_features=input_dim, out_features=vae_output_dim, bias=True, name="fci"
-        )
+        self.fci = Linear_VAE(in_features=input_dim, out_features=vae_output_dim, bias=True, name="fci")
         self.hidden_layers = list(architecture_config["hidden_dims"])
         if self.hidden_layers:
             prev_dim = vae_output_dim
@@ -244,15 +234,11 @@ class NeuralEncoder(BaseEncoder):
                 name = f"h{i + 1}"
                 setattr(self, name, Linear_VAE(prev_dim, hidden_dim, name=name))
                 prev_dim = hidden_dim
-            self.fce = Linear_VAE(
-                in_features=prev_dim, out_features=vae_output_dim, bias=True, name="fce"
-            )
+            self.fce = Linear_VAE(in_features=prev_dim, out_features=vae_output_dim, bias=True, name="fce")
         else:
             self.fce = None
 
-    def _build_deterministic(
-        self, input_dim: int, architecture_config: dict, activation: nn.Module
-    ) -> None:
+    def _build_deterministic(self, input_dim: int, architecture_config: dict, activation: nn.Module) -> None:
         layers: list[nn.Module] = []
         prev_dim = input_dim
         for hidden_dim in architecture_config["hidden_dims"]:
@@ -341,11 +327,7 @@ class NeuralEncoder(BaseEncoder):
             x2 = x1
 
         local_kwargs = dict(kwargs)
-        if (
-            self.is_probabilistic
-            and shared_sampling
-            and local_kwargs.get("epsilon") is None
-        ):
+        if self.is_probabilistic and shared_sampling and local_kwargs.get("epsilon") is None:
             n_unique = max(_num_unique_rows(x1), _num_unique_rows(x2))
             local_kwargs["epsilon"] = torch.normal(
                 mean=0.0,

@@ -67,9 +67,7 @@ class MultiMean(Mean):
             means = built
         else:
             if not isinstance(means, list):
-                raise TypeError(
-                    f"means must be a list of gpytorch.means.Mean, got {type(means).__name__}."
-                )
+                raise TypeError(f"means must be a list of gpytorch.means.Mean, got {type(means).__name__}.")
             if len(means) != self.num_sources:
                 raise ValueError(
                     f"Got {len(means)} means but {self.num_sources} sources. "
@@ -77,9 +75,7 @@ class MultiMean(Mean):
                 )
             for i, m in enumerate(means):
                 if not isinstance(m, Mean):
-                    raise TypeError(
-                        f"means[{i}] must be a gpytorch.means.Mean, got {type(m).__name__}."
-                    )
+                    raise TypeError(f"means[{i}] must be a gpytorch.means.Mean, got {type(m).__name__}.")
             # Guard against accidental parameter sharing from passing the
             # same instance twice — fail loudly rather than silently tie params.
             if len({id(m) for m in means}) != len(means):
@@ -105,8 +101,7 @@ class MultiMean(Mean):
         """
         if x.shape[-1] <= max(self.source_cols):
             raise ValueError(
-                f"Input has {x.shape[-1]} features but source_cols references "
-                f"index {max(self.source_cols)}."
+                f"Input has {x.shape[-1]} features but source_cols references index {max(self.source_cols)}."
             )
 
         # Resolve source index per row from the one-hot block.
