@@ -116,9 +116,6 @@ X_train = X_sobol
 y_train = result
 print(f"  Training samples: {X_train.shape[0]}, Result range: [{result.min():.4f}, {result.max():.4f}]")
 
-X_train = X_train
-y_train = y_train
-
 cont_cols = np.arange(0, 10)
 
 # Shuffle both training and test datasets
@@ -146,23 +143,10 @@ scaler_X = StandardScaler()
 X_train_scaled = scaler_X.fit_transform(X_train[:, :10])
 X_test_scaled = scaler_X.transform(X_test[:, :10])
 
-# Combine scaled continuous features with source one-hot for training
-X_train_scaled = torch.cat(
-    [
-        torch.tensor(X_train_scaled, dtype=torch.float64),
-        X_train[:, 10:],  # Source one-hot columns
-    ],
-    dim=1,
-)
-
-# Combine scaled continuous features with source one-hot for test
-X_test_scaled = torch.cat(
-    [
-        torch.tensor(X_test_scaled, dtype=torch.float64),
-        X_test[:, 10:],  # Source one-hot columns
-    ],
-    dim=1,
-)
+# SF setup: use only the 10 scaled continuous features.
+# Do not append any source columns.
+X_train_scaled = torch.tensor(X_train_scaled, dtype=torch.float64)
+X_test_scaled = torch.tensor(X_test_scaled, dtype=torch.float64)
 
 
 # Standardize y
@@ -175,16 +159,24 @@ print(f"  X_test: {X_test_scaled.shape}, y_test: {y_test.shape}")
 
 t1 = time.time()
 
+kernel = gpplus.kernels.LogScaleKernel(
+    gpplus.kernels.MVMFKernel(
+        cont_cols=cont_cols.tolist(),
+        cat_cols=None,
+        source_cols=None,
+    )
+)
+
 model = GPR(
     X_train_scaled,
     y_train_scaled,
-    # kernel_module=kernel,
-    kernel_module=gpplus.kernels.GaussianKernel(),
+    kernel_module=kernel,
+    # kernel_module=gpplus.kernels.GaussianKernel(),
     mean_module=gpytorch.means.ConstantMean(),
     likelihood=gpytorch.likelihoods.GaussianLikelihood(),
 )
 
-num_inits = 4
+num_inits = 16
 
 print(model)
 # Create trainer

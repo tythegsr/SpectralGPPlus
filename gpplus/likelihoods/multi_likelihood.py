@@ -16,7 +16,7 @@ class MultiLikelihood(_GaussianLikelihoodBase):
     Multifidelity likelihood that allows different noise levels for each fidelity source.
 
     Args:
-        encoded_cols: Either:
+        source_cols: Either:
             - Tensor, list, or numpy array of column indices for one-hot encoded fidelity levels, OR
             - Single integer indicating the column index containing fidelity indicators
         noise_prior: Prior distribution for noise parameters
@@ -27,7 +27,7 @@ class MultiLikelihood(_GaussianLikelihoodBase):
 
     def __init__(
         self,
-        encoded_cols: Union[int, List[int], Tensor],
+        source_cols: Union[int, List[int], Tensor],
         noise_prior=None,
         noise_constraint=None,
         batch_shape=torch.Size(),
@@ -35,15 +35,15 @@ class MultiLikelihood(_GaussianLikelihoodBase):
         log_scale=True,
         **kwargs,
     ):
-        # Store encoded_cols and determine if it's one-hot or single column
-        self.encoded_cols = encoded_cols
-        self.is_onehot = isinstance(encoded_cols, (list, tuple, Tensor, np.ndarray))
+        # Store source_cols and determine if it's one-hot or single column
+        self.source_cols = source_cols
+        self.is_onehot = isinstance(source_cols, (list, tuple, Tensor, np.ndarray))
 
         if self.is_onehot:
-            self.encoded_cols = torch.tensor(encoded_cols, dtype=torch.long)
-            self.num_fidelities = len(encoded_cols)
+            self.source_cols = torch.tensor(source_cols, dtype=torch.long)
+            self.num_fidelities = len(source_cols)
         else:
-            self.source_col = int(encoded_cols)
+            self.source_col = int(source_cols)
             if training_data is not None:
                 fidel_indices = training_data[:, self.source_col].long()
                 self.num_fidelities = len(torch.unique(fidel_indices))
@@ -87,7 +87,7 @@ class MultiLikelihood(_GaussianLikelihoodBase):
 
     def _extract_fidelity_indices(self, x: Tensor) -> Tensor:
         """
-        Extract fidelity indices from input data based on encoded_cols.
+        Extract fidelity indices from input data based on source_cols.
 
         Args:
             x: Input tensor of shape (N, D) where N is number of samples, D is number of features
@@ -97,7 +97,7 @@ class MultiLikelihood(_GaussianLikelihoodBase):
         """
         if self.is_onehot:
             # One-hot encoded case: find which column has value 1
-            onehot_cols = x[:, self.encoded_cols]  # Shape: (N, num_fidelities)
+            onehot_cols = x[:, self.source_cols]  # Shape: (N, num_fidelities)
             fidel_indices = torch.argmax(onehot_cols, dim=1)  # Shape: (N,)
         else:
             # Single column case: use values directly as fidelity indices

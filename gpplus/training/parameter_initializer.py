@@ -8,6 +8,16 @@ from ..config import logger
 from .parameter_init_utils import get_initialization_config, initialize_parameter
 
 
+def _make_generator_for_device(device: torch.device, seed: int) -> torch.Generator:
+    """Create a seeded RNG generator on the same device as initialized tensors."""
+    generator_device = device if device.type == "cuda" else torch.device("cpu")
+    try:
+        return torch.Generator(device=generator_device).manual_seed(seed)
+    except TypeError:
+        # Backward compatibility for torch builds without device argument support.
+        return torch.Generator().manual_seed(seed)
+
+
 class ParameterInitializer(ABC):
     """Abstract base class for parameter initializers."""
 
@@ -120,7 +130,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                 if ".weight" in name:
                     # reproducible per-run, on CPU
                     generator_seed = (self.seed + run_index) if self.seed is not None else run_index
-                    g = torch.Generator().manual_seed(generator_seed)
+                    g = _make_generator_for_device(param.device, generator_seed)
                     if param.dim() >= 2:
                         # Standard neural network weight matrix: use Xavier uniform
                         torch.nn.init.xavier_uniform_(param, generator=g)

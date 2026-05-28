@@ -134,7 +134,7 @@ def train_and_plot(optimizer_class, optimizer_kwargs=None, title_suffix=None):
         model=model,
         optimizer_class=optimizer_class,
         optimizer_kwargs=optimizer_kwargs,
-        num_inits=1,
+        num_inits=16,
         callbacks=cllbcks,
         device="cuda",
         stop_conditions=[

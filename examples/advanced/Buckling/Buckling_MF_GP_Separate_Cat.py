@@ -174,7 +174,7 @@ for seed in range(start_seed, start_seed + num_seeds):
         y_train,
         kernel_module=kernel,
         mean_module=gpplus.means.MultiMean(source_cols=source_cols),
-        likelihood=gpplus.likelihoods.MultiLikelihood(encoded_cols=source_cols, training_data=X_train),
+        likelihood=gpplus.likelihoods.MultiLikelihood(source_cols=source_cols, training_data=X_train),
         # likelihood=gpytorch.likelihoods.GaussianLikelihood(),
     )
 
