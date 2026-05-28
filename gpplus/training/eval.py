@@ -4,17 +4,6 @@ import torch
 from ..config import logger
 from ..likelihoods import MultiLikelihood
 
-try:
-    from ..config.settings import get_settings
-except ImportError:
-
-    def get_settings():
-        class _NoopSettings:
-            def apply(self):
-                return None
-
-        return _NoopSettings()
-
 
 def evaluate_gp_model(
     model,
@@ -39,7 +28,6 @@ def evaluate_gp_model(
     """
     # Align GPyTorch / settings with training, then evaluate with
     # slower stable fast_computations(False...) to reduce host-to-host variance.
-    get_settings().apply()
     model.eval()
 
     with (

@@ -57,7 +57,7 @@ def compute_metrics(y_true, y_hat, output_std=None, start_time=None):
 
 num_train = 120
 num_test = 5000
-num_inits = 4
+num_inits = 16
 
 start_seed = 42
 num_seeds = 1

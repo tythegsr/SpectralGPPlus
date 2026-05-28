@@ -5,6 +5,16 @@ import torch
 from ..config import logger
 
 
+def _make_generator_for_device(device: torch.device, seed: int) -> torch.Generator:
+    """Create a seeded RNG generator on the same device as initialized tensors."""
+    generator_device = device if device.type == "cuda" else torch.device("cpu")
+    try:
+        return torch.Generator(device=generator_device).manual_seed(seed)
+    except TypeError:
+        # Backward compatibility for torch builds without device argument support.
+        return torch.Generator().manual_seed(seed)
+
+
 def get_parameter_type(name: str, param: torch.Tensor) -> str:
     """Determine parameter type from name/shape."""
     if "projection_matrix" in name:
@@ -162,7 +172,9 @@ def initialize_parameter(
         try:
             generator_seed = (seed + run_index * 1000) if seed is not None else (run_index * 1000)
             torch.nn.init.orthogonal_(
-                temp_param, gain=config.get("gain", 1.0), generator=torch.Generator().manual_seed(generator_seed)
+                temp_param,
+                gain=config.get("gain", 1.0),
+                generator=_make_generator_for_device(temp_param.device, generator_seed),
             )
             if torch.isnan(temp_param).any():
                 logger.error("NaN detected in orthogonal initialization for %s", name)
@@ -186,7 +198,7 @@ def initialize_parameter(
             param,
             mean=config.get("mean", 0.0),
             std=config.get("std", 0.1),
-            generator=torch.Generator().manual_seed(generator_seed),
+            generator=_make_generator_for_device(param.device, generator_seed),
         )
         return
 
@@ -196,13 +208,13 @@ def initialize_parameter(
             param,
             a=config.get("lower", -0.1),
             b=config.get("upper", 0.1),
-            generator=torch.Generator().manual_seed(generator_seed),
+            generator=_make_generator_for_device(param.device, generator_seed),
         )
         return
 
     if method == "xavier_uniform":
         generator_seed = (seed + run_index) if seed is not None else run_index
-        g = torch.Generator().manual_seed(generator_seed)
+        g = _make_generator_for_device(param.device, generator_seed)
         torch.nn.init.xavier_uniform_(param, generator=g)
         logger.debug("Initialized weight parameter '%s' with Xavier uniform (seed=%s)", name, generator_seed)
         return

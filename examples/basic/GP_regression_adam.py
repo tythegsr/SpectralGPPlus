@@ -58,7 +58,7 @@ cllbcks = [printCallback, lossCallback]
 
 trainer = GPTrainer(
     model=model,
-    num_inits=1,
+    num_inits=16,
     callbacks=cllbcks,
     device="cuda",
     optimizer_class=torch.optim.Adam,
