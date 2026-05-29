@@ -1,1 +1,1 @@
-from . import constraints, kernels, means, models, training, utils
+from . import constraints, kernels, likelihoods, means, models, training, utils

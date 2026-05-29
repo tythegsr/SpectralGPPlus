@@ -40,7 +40,7 @@ class Callback(ABC):
         Args:
             context (dict): A dictionary containing training state info.
         """
-        pass
+        ...
 
     def on_epoch_end(self, context: CallbackOnEpochEndContext):
         """
@@ -49,7 +49,7 @@ class Callback(ABC):
         Args:
             context (dict): A dictionary containing training state info.
         """
-        pass
+        ...
 
     def on_train_start(self, context: CallbackOnTrainStartContext):
         """
@@ -58,7 +58,7 @@ class Callback(ABC):
         Args:
             context (dict): A dictionary containing training state info.
         """
-        pass
+        ...
 
     def on_train_end(self, context: CallbackOnTrainEndContext):
         """
@@ -67,9 +67,25 @@ class Callback(ABC):
         Args:
             context (dict): A dictionary containing training state info.
         """
-        pass
+        ...
+
+    def register_with_optimizer(self, optimizer: Any, model: Any = None, trainer: Any = None):
+        """
+        Optional hook called once after optimizer creation.
+
+        Use this to attach optimizer-specific callbacks (for example,
+        LBFGS iteration callbacks) without relying on duck-typed checks.
+        """
+        ...
 
 
 class PrintLossCallback(Callback):
     def on_epoch_end(self, context: dict):
         print(f"Epoch {context['epoch']} - Loss: {context['loss']:.4f}")
+
+
+class PrintInitialParametersCallback(Callback):
+    def on_train_start(self, context: dict):
+        print("Initial parameters: ")
+        for name, param in context["model"].named_parameters():
+            print(name, param.data)

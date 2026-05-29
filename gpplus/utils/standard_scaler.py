@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 
 
@@ -52,6 +53,9 @@ class StandardScaler:
         # safe_std = torch.where(self.std == 0, torch.ones_like(self.std), self.std)
         # return (data - self.mean) / safe_std
 
+        if isinstance(data, np.ndarray):
+            tensor = torch.as_tensor(data, dtype=self.mean.dtype, device=self.mean.device)
+            return ((tensor - self.mean) / self.std).detach().cpu().numpy()
         return (data - self.mean) / self.std
 
     def inverse_transform(self, data: torch.Tensor) -> torch.Tensor:
@@ -68,6 +72,9 @@ class StandardScaler:
         """
         if self.mean is None or self.std is None:
             raise ValueError("StandardScaler has not been fitted. Call `fit` first.")
+        if isinstance(data, np.ndarray):
+            tensor = torch.as_tensor(data, dtype=self.mean.dtype, device=self.mean.device)
+            return (tensor * self.std + self.mean).detach().cpu().numpy()
         return data * self.std + self.mean
 
 
