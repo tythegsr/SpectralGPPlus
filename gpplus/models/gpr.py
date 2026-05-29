@@ -43,6 +43,7 @@ class GPR(gpytorch.models.ExactGP):
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
+        self.dtype = train_x.dtype
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             logger.error("train_x and train_y must be torch.Tensor instances.")
@@ -62,8 +63,15 @@ class GPR(gpytorch.models.ExactGP):
             input_dim = train_x.shape[-1]
             kernel_module = LogScaleKernel(GaussianKernel(ard_num_dims=input_dim))  # Uses one lengthscale per dimension
             logger.warning(
-                f"No kernel_module provided. Using Gaussian Kernel with ARD (ard_num_dims={input_dim}) as default."
+                "No kernel_module provided. Using LogScaleKernel(GaussianKernel(ard_num_dims=None)) "
+                f"(single lengthscale; input_dim={input_dim})."
             )
+
+        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
+            logger.error("train_x and train_y must be torch.Tensor instances.")
+            raise TypeError("train_x and train_y must be torch.Tensor instances.")
+
+        logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
 
         if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
             logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
@@ -73,6 +81,11 @@ class GPR(gpytorch.models.ExactGP):
 
         self.mean_module = mean_module
         self.covar_module = kernel_module
+
+        # Ensure all components use the same dtype as the input data
+        self.mean_module = self.mean_module.to(dtype=self.dtype)
+        self.covar_module = self.covar_module.to(dtype=self.dtype)
+        self.likelihood = self.likelihood.to(dtype=self.dtype)
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling

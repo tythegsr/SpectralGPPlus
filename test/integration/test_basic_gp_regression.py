@@ -23,7 +23,7 @@ def test_gpr_training_single_job_cpu():
     # Training loop
     device = "cpu"
     trainer = GPTrainer(
-        model=model, optimizer_class=torch.optim.Adam, optimizer_kwargs={"lr": 0.1}, num_runs=1, device=device
+        model=model, optimizer_class=torch.optim.Adam, optimizer_kwargs={"lr": 0.1}, num_inits=1, device=device
     )
     print("training")
     res = trainer.train()

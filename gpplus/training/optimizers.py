@@ -1,4 +1,5 @@
 from functools import reduce
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -19,6 +20,10 @@ class LBFGSScipy(torch.optim.Optimizer):
         This is a very memory intensive optimizer (it requires additional
         ``param_bytes * (history_size + 1)`` bytes). If it doesn't fit in memory
         try reducing the history size, or use a different algorithm.
+
+    Callback contract:
+        Supports an iteration callback hook via ``set_iteration_callback`` for
+        integration with training callbacks.
 
     Arguments:
         max_iter (int): maximal number of iterations per optimization step
@@ -53,9 +58,14 @@ class LBFGSScipy(torch.optim.Optimizer):
         self._numel_cache = None
         self._n_iter = 0
         self._last_loss = None
+        self.iteration_callback: Optional[Callable[[int, float], None]] = None
 
         # Numerical epsilon for scipy
         self.eps = np.finfo("double").eps
+
+    def set_iteration_callback(self, callback: Optional[Callable[[int, float], None]]) -> None:
+        """Register a callback called after each scipy LBFGS iteration."""
+        self.iteration_callback = callback
 
     def _numel(self):
         if self._numel_cache is None:
@@ -92,13 +102,16 @@ class LBFGSScipy(torch.optim.Optimizer):
             p.data = params[offset : offset + numel].view_as(p.data)
             offset += numel
 
-    def step(self, closure):
+    def step(self, closure=None):
         """Performs a single optimization step.
 
         Arguments:
             closure (callable): A closure that reevaluates the model
                 and returns the loss.
         """
+
+        if closure is None:
+            raise RuntimeError("LBFGSScipy requires a closure.")
 
         group = self.param_groups[0]
         max_iter = group["max_iter"]
@@ -117,8 +130,10 @@ class LBFGSScipy(torch.optim.Optimizer):
             flat_grad = self._gather_flat_grad().cpu().numpy()
             return loss_value, flat_grad
 
-        def callback(flat_params):
+        def callback(_flat_params):
             self._n_iter += 1
+            if self.iteration_callback is not None and self._last_loss is not None:
+                self.iteration_callback(self._n_iter, float(self._last_loss.item()))
             # Optional: print progress (can be disabled)
             # print('Iter %i Loss %.5f' % (self._n_iter, self._last_loss.item()))
 
