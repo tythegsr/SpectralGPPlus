@@ -5,17 +5,6 @@ import torch
 from torch.quasirandom import SobolEngine
 
 from ..config import logger
-from .parameter_init_utils import get_initialization_config, initialize_parameter
-
-
-def _make_generator_for_device(device: torch.device, seed: int) -> torch.Generator:
-    """Create a seeded RNG generator on the same device as initialized tensors."""
-    generator_device = device if device.type == "cuda" else torch.device("cpu")
-    try:
-        return torch.Generator(device=generator_device).manual_seed(seed)
-    except TypeError:
-        # Backward compatibility for torch builds without device argument support.
-        return torch.Generator().manual_seed(seed)
 
 
 class ParameterInitializer(ABC):
@@ -44,12 +33,7 @@ class DefaultParameterInitializer(ParameterInitializer):
     - Allows the user to specify custom initialization strategies for specific parameters.
     """
 
-    def __init__(
-        self,
-        num_inits: int,
-        seed: int = None,
-        parameter_configs: Optional[Dict[str, Dict[str, Any]]] = None,
-    ):
+    def __init__(self, num_inits: int, seed: int = None, parameter_configs: Optional[Dict[str, Dict[str, Any]]] = None):
         """
         Initialize the default parameter initializer.
 
@@ -81,17 +65,255 @@ class DefaultParameterInitializer(ParameterInitializer):
             if param.requires_grad and ".weight" not in name and ".bias" not in name:
                 self.num_params += param.numel()
 
-        if self.num_params > 0:
-            sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
-            self.sobol_samples = sobol_engine.draw(self.num_inits)
-            logger.debug(f"Sobol samples generated: {self.sobol_samples.shape}")
-        else:
-            self.sobol_samples = None
-            logger.info("No non-weight/bias parameters found; Sobol sampling skipped.")
+        sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
+        self.sobol_samples = sobol_engine.draw(self.num_inits)
 
         logger.info("Using DefaultParameterInitializer")
+        logger.debug(f"Sobol samples generated: {self.sobol_samples.shape}")
         logger.info("All constraints are now built into kernel and likelihood classes - no manual setup needed")
         logger.debug("Excluding .weight and .bias parameters from Sobol sampling (initialized separately)")
+
+    def get_parameter_type(self, name: str, param: torch.Tensor) -> str:
+        """Determine the parameter type based on parameter name only."""
+        if "projection_matrix" in name:
+            return "projection_matrix"
+        elif "raw_lengthscale" in name:
+            return "raw_lengthscale"
+        elif "raw_outputscale" in name:
+            return "raw_outputscale"
+        elif "raw_noise" in name:
+            return "raw_noise"
+        elif "weight" in name and param.dim() >= 2:
+            return "weight"
+        elif "bias" in name and param.dim() == 1:
+            return "bias"
+        elif "power" in name:
+            return "power"
+        elif "constant" in name:
+            return "constant"
+        else:
+            return "unknown"
+
+    def get_initialization_config(
+        self, name: str, param: torch.Tensor, model: torch.nn.Module = None
+    ) -> Dict[str, Any]:
+        """Get initialization configuration based on parameter name only."""
+        param_type = self.get_parameter_type(name, param)
+
+        # Check for custom configuration first
+        if param_type in self.parameter_configs:
+            config = self.parameter_configs[param_type].copy()
+            config["description"] = f"{param_type} parameter (custom config)"
+            return config
+
+        # Default configurations based on parameter type
+        if param_type == "raw_lengthscale":
+            is_ard = param.dim() == 2 and param.shape[1] > 1
+            return {
+                "method": "normal",
+                "mean": -2.0,
+                "std": 2.0,
+                "description": f"Lengthscale parameter {'(ARD)' if is_ard else '(single)'} - log scale",
+            }
+        elif param_type == "raw_outputscale":
+            return {
+                "method": "normal",
+                "mean": -2.0,
+                "std": 0.5,
+                "description": "Outputscale parameter - log scale",
+            }
+        elif param_type == "raw_noise":
+            return {
+                "method": "uniform",
+                "lower": -7.0,
+                "upper": -1.0,
+                "description": "Noise parameter - uniform scale",
+            }
+        elif param_type == "constant":
+            return {
+                "method": "normal",
+                "mean": 0.0,
+                "std": 1.0,
+                "description": "Mean constant parameter",
+            }
+        elif param_type == "weight":
+            fan_in, fan_out = param.size(1), param.size(0)
+            limit = torch.sqrt(torch.tensor(2.0 / (fan_in + fan_out)))
+            return {
+                "method": "xavier_uniform",
+                "limit": limit.item(),
+                "description": f"Neural network weight ({fan_in}->{fan_out})",
+            }
+        elif param_type == "bias":
+            return {
+                "method": "zeros",
+                "description": "Neural network bias",
+            }
+        elif param_type == "power":
+            return {
+                "method": "uniform",
+                "lower": 1.0,
+                "upper": 2.0,
+                "description": "Power kernel parameter (uniform)",
+            }
+        elif param_type == "projection_matrix":
+            # Try to find the initialization type from the specific module
+            init_type = "orthogonal"
+            init_std = 0.1
+
+            # Look for the parameter in the model's modules
+            if model is not None:
+                # Find the specific module that contains this parameter
+                for module_name, module in model.named_modules():
+                    if hasattr(module, "_param_init_types") and "projection_matrix" in module._param_init_types:
+                        # Check if this parameter name starts with the module name followed by a dot
+                        if name.startswith(module_name + "."):
+                            init_type = module._param_init_types["projection_matrix"]
+                            # Get init_std from the module if available
+                            if (
+                                hasattr(module, "_param_init_params")
+                                and "projection_matrix" in module._param_init_params
+                            ):
+                                init_std = module._param_init_params["projection_matrix"]["init_std"]
+                            else:
+                                init_std = 0.1
+                            break
+
+            if init_type == "orthogonal":
+                return {
+                    "method": "orthogonal_matrix",
+                    "gain": init_std,
+                    "description": "Matrix encoder projection matrix (orthogonal)",
+                }
+            elif init_type == "normal":
+                return {
+                    "method": "normal_matrix",
+                    "mean": 0.0,
+                    "std": init_std,
+                    "description": "Matrix encoder projection matrix (normal)",
+                }
+            elif init_type == "uniform":
+                return {
+                    "method": "uniform_matrix",
+                    "lower": -init_std,
+                    "upper": init_std,
+                    "description": "Matrix encoder projection matrix (uniform)",
+                }
+            else:
+                # Default to orthogonal if unknown type
+                return {
+                    "method": "orthogonal_matrix",
+                    "gain": init_std,
+                    "description": "Matrix encoder projection matrix (default orthogonal)",
+                }
+        else:
+            return {
+                "method": "orthogonal_matrix",
+                "gain": 0.1,
+                "description": "Unknown parameter",
+            }
+
+    def _generate_normal_samples(self, sample: torch.Tensor, mean: float, std: float) -> torch.Tensor:
+        """Generate normal samples using inverse CDF from Sobol samples."""
+        # Use inverse CDF of normal distribution directly
+        # Ensure all operations maintain the same dtype as the input sample
+        z = torch.erfinv(2.0 * sample - 1.0) * torch.sqrt(torch.tensor(2.0, dtype=sample.dtype, device=sample.device))
+        return mean + std * z
+
+    def initialize_parameter(
+        self,
+        param: torch.Tensor,
+        sample: torch.Tensor,
+        config: Dict[str, Any],
+        name: str = "",
+        model: torch.nn.Module = None,
+        run_index: int = 0,
+    ):
+        """Initialize a single parameter based on the configuration and constraints."""
+        method = config["method"]
+
+        if method == "orthogonal_matrix":
+            # Use PyTorch's orthogonal initialization
+            # Create a temporary tensor with the correct dtype, then copy to param
+            temp_param = torch.empty_like(param, dtype=param.dtype, device=param.device)
+            try:
+                # Use run_index to generate different seeds for each initialization
+                generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
+                torch.nn.init.orthogonal_(
+                    temp_param, gain=config.get("gain", 1.0), generator=torch.Generator().manual_seed(generator_seed)
+                )
+                # Check for NaN after initialization
+                if torch.isnan(temp_param).any():
+                    logger.error(f"NaN detected in orthogonal initialization for {name}")
+                    logger.error(f"temp_param: {temp_param}")
+                    logger.error(f"param shape: {param.shape}, dtype: {param.dtype}")
+                param.data = temp_param
+                logger.debug(f"Orthogonal initialization successful for {name} with seed {generator_seed}")
+            except Exception as e:
+                logger.error(f"Orthogonal initialization failed for {name}: {e}")
+                # Fallback to normal initialization
+                torch.nn.init.normal_(temp_param, mean=0.0, std=0.1)
+                param.data = temp_param
+
+        elif method == "orthogonal":
+            torch.nn.init.orthogonal_(param, gain=config.get("gain", 1.0))
+
+        elif method == "normal_matrix":
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
+            torch.nn.init.normal_(
+                param,
+                mean=config.get("mean", 0.0),
+                std=config.get("std", 0.1),
+                generator=torch.Generator().manual_seed(generator_seed),
+            )
+
+        elif method == "uniform_matrix":
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
+            torch.nn.init.uniform_(
+                param,
+                a=config.get("lower", -0.1),
+                b=config.get("upper", 0.1),
+                generator=torch.Generator().manual_seed(generator_seed),
+            )
+
+        elif method == "xavier_uniform":
+            # Use PyTorch's xavier_uniform initialization directly
+            # Use run_index to generate different seeds for each initialization
+            generator_seed = (self.seed + run_index) if self.seed is not None else run_index
+            g = torch.Generator().manual_seed(generator_seed)
+            torch.nn.init.xavier_uniform_(param, generator=g)
+            logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform (seed={generator_seed})")
+
+        elif method == "uniform":
+            lower = config.get("lower", -6.0)
+            upper = config.get("upper", 3.0)
+            raw_value = lower + (upper - lower) * sample
+            param.data = raw_value.to(dtype=param.dtype)
+
+        elif method == "normal":
+            mean = config.get("mean", -2.0)
+            std = config.get("std", 1.5)
+            raw_value = self._generate_normal_samples(sample, mean, std)
+            # Direct initialization - constraints are built into kernel classes
+            param.data = raw_value.to(dtype=param.dtype)
+            logger.debug(f"Direct initialization: {name} = {raw_value} (constraints built into kernel classes)")
+
+        elif method == "zeros":
+            torch.nn.init.zeros_(param)
+
+        elif method == "constant":
+            value = config.get("value", 0.0)
+            param.data = torch.full_like(param, value, dtype=param.dtype)
+
+        elif method == "skip":
+            pass
+
+        else:
+            # Fallback to normal with conservative parameters
+            raw_value = 0.1 * (sample * 2 - 1)
+            param.data = raw_value.to(dtype=param.dtype)
 
     def initialize(self, model: torch.nn.Module, run_index: int):
         """
@@ -118,19 +340,14 @@ class DefaultParameterInitializer(ParameterInitializer):
                     continue
 
                 # Get initialization configuration
-                config = get_initialization_config(
-                    name=name,
-                    param=param,
-                    parameter_configs=self.parameter_configs,
-                    model=model,
-                )
+                config = self.get_initialization_config(name, param, model)
 
                 # Handle weight parameters with Xavier uniform (exclude from Sobol sampling)
                 # Only apply Xavier to parameters with at least 2 dimensions (required for fan_in/fan_out calculation)
                 if ".weight" in name:
                     # reproducible per-run, on CPU
                     generator_seed = (self.seed + run_index) if self.seed is not None else run_index
-                    g = _make_generator_for_device(param.device, generator_seed)
+                    g = torch.Generator().manual_seed(generator_seed)
                     if param.dim() >= 2:
                         # Standard neural network weight matrix: use Xavier uniform
                         torch.nn.init.xavier_uniform_(param, generator=g)
@@ -138,7 +355,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     else:
                         # 1D or scalar weight: use uniform initialization instead
                         torch.nn.init.uniform_(param, -0.1, 0.1)
-                        logger.debug(f"Initialized 1D weight parameter '{name}' with uniform (shape={param.shape})")
+                        logger.debug(f"Initialized 1D/scalar weight parameter '{name}' with uniform (shape={param.shape})")
                     continue
 
                 # Handle bias parameters with zeros (exclude from Sobol sampling)
@@ -154,14 +371,7 @@ class DefaultParameterInitializer(ParameterInitializer):
 
                 # Initialize the parameter
                 old_value = param.data.clone()
-                initialize_parameter(
-                    param=param,
-                    sample=sample,
-                    config=config,
-                    seed=self.seed,
-                    name=name,
-                    run_index=run_index,
-                )
+                self.initialize_parameter(param, sample, config, name, model, run_index)
                 new_value = param.data.clone()
 
                 logger.debug(
@@ -181,3 +391,30 @@ class DefaultParameterInitializer(ParameterInitializer):
                 idx += param_length
 
         logger.info(f"Model parameters initialized with run #{run_index}")
+
+
+class RFFParameterInitializer(DefaultParameterInitializer):
+    """
+    Hyperparameter initialization via Sobol samples, plus a fresh RFF frequency
+    draw per run (independent ``randn_weights`` buffer for each init).
+    """
+
+    def initialize(self, model: torch.nn.Module, run_index: int) -> None:
+        self._resample_rff_weights(model, run_index)
+        super().initialize(model, run_index)
+
+    def _resample_rff_weights(self, model: torch.nn.Module, run_index: int) -> None:
+        from ..models.rff_gpr import RFFGPR
+
+        if not isinstance(model, RFFGPR):
+            return
+
+        gen_seed = (self.seed + run_index) if self.seed is not None else run_index
+        torch.manual_seed(gen_seed)
+        model._rff_kernel.resample_weights(spectral=False)
+        model.invalidate_feature_cache()
+        logger.info(
+            "Resampled RFF frequencies for run #%s (seed=%s)",
+            run_index,
+            gen_seed,
+        )

@@ -19,3 +19,4 @@ from .power_exponential_kernel import (
 )
 from .mvmf_kernel import MVMFKernel
 from .log_scale_kernel import LogScaleKernel
+from .rff_kernel import RFFKernel

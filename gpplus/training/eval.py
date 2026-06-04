@@ -1,8 +1,20 @@
+from __future__ import annotations
+
 import gpytorch
 import torch
+from typing import TYPE_CHECKING
 
-from ..config import logger
+from ..config import get_settings, logger
+
+if TYPE_CHECKING:
+    from ..models.rff_gpr import RFFGPR
 from ..likelihoods import MultiLikelihood
+from ..models.rff_gpr import _drop_singleton_batch
+from ..utils.rff_utils import (
+    woodbury_factor,
+    woodbury_predictive_mean,
+    woodbury_predictive_var_diag,
+)
 
 
 def evaluate_gp_model(
@@ -26,8 +38,7 @@ def evaluate_gp_model(
                 - **upper** (torch.Tensor): Upper confidence bound for each test point.
                 - **stddev** (torch.Tensor): Standard deviation of the predictions.
     """
-    # Align GPyTorch / settings with training, then evaluate with
-    # slower stable fast_computations(False...) to reduce host-to-host variance.
+    get_settings().apply()
     model.eval()
 
     with (
@@ -62,3 +73,81 @@ def evaluate_gp_model(
 
         logger.info("Evaluation completed.")
         return mean, lower, upper, stddev
+
+
+def evaluate_rff_gp_model(
+    model: RFFGPR,
+    test_x: torch.Tensor,
+    jitter: float = 1e-6,
+    chunk_size: int = 512,
+):
+    """
+    Evaluate an :class:`~gpplus.models.RFFGPR` model using Woodbury prediction.
+
+    Predictions are computed in chunks of ``chunk_size`` test points so the
+    Woodbury solve RHS stays ``(n_train, chunk_size)`` instead of ``(n_train, n_test)``.
+
+    Prefer this over :func:`evaluate_gp_model` for RFF models so inference avoids
+    dense n x n linear algebra.
+    """
+    model.eval()
+    train_inputs = getattr(model, "train_inputs", None)
+    if train_inputs and len(train_inputs) > 0:
+        reference = train_inputs[0]
+        test_x = test_x.to(device=reference.device, dtype=reference.dtype)
+
+    n_test = test_x.shape[0]
+    if n_test == 0:
+        empty = test_x.new_zeros(0)
+        return empty, empty, empty, empty
+
+    with torch.no_grad():
+        if chunk_size <= 0 or n_test <= chunk_size:
+            mean, lower, upper = model.predict(test_x, jitter=jitter)
+            stddev = (upper - lower) / 4.0
+        else:
+            train_x = _drop_singleton_batch(model.train_inputs[0])
+            train_y = _drop_singleton_batch(model.train_targets)
+            z_train = model.train_features()
+            noise = model.likelihood.noise
+            chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
+            mean_train = model.mean_module(train_x)
+            if mean_train.dim() > 1 and mean_train.shape[0] == 1:
+                mean_train = mean_train.squeeze(0)
+            y_centered = train_y - mean_train
+
+            mean_chunks = []
+            lower_chunks = []
+            upper_chunks = []
+            for start in range(0, n_test, chunk_size):
+                chunk_x = test_x[start : start + chunk_size]
+                z_test = model.scaled_features(chunk_x)
+                f_mean = woodbury_predictive_mean(
+                    noise,
+                    z_train,
+                    z_test,
+                    y_centered,
+                    jitter=jitter,
+                    chol=chol,
+                    noise=noise_clamped,
+                )
+                f_mean = f_mean + model.mean_module(chunk_x)
+                f_var = woodbury_predictive_var_diag(
+                    noise,
+                    z_train,
+                    z_test,
+                    jitter=jitter,
+                    chol=chol,
+                    noise=noise_clamped,
+                )
+                obs_std = (f_var + noise).clamp_min(0.0).sqrt()
+                mean_chunks.append(f_mean)
+                lower_chunks.append(f_mean - 2 * obs_std)
+                upper_chunks.append(f_mean + 2 * obs_std)
+            mean = torch.cat(mean_chunks, dim=0)
+            lower = torch.cat(lower_chunks, dim=0)
+            upper = torch.cat(upper_chunks, dim=0)
+            stddev = (upper - lower) / 4.0
+
+    logger.info("RFF evaluation completed.")
+    return mean, lower, upper, stddev
