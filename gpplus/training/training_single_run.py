@@ -14,6 +14,7 @@ from .stop_conditions import (
     MinLossChangeStopCondition,
     StopCondition,
 )
+from .rff_mll import RFFWoodburyMarginalLogLikelihood
 from .trainer_utils import SingleRunResult, check_early_stop, select_epoch_train_fn
 
 
@@ -85,10 +86,19 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             getattr(cb, hook_name)(ctx)
 
+    def _negative_mll_loss(self, mll, train_x: torch.Tensor, train_y: torch.Tensor) -> torch.Tensor:
+        """MLL loss; skips ExactGP forward when using Woodbury MLL."""
+        if isinstance(mll, RFFWoodburyMarginalLogLikelihood):
+            return -mll(None, train_y)
+        output = self.model(train_x)
+        return -mll(output, train_y)
+
     def _register_optimizer_callbacks(self, optimizer) -> None:
-        """Attach optimizer-level callbacks via the callback contract."""
+        """Attach optimizer-level callbacks that implement register_with_optimizer."""
         for cb in self.callbacks:
-            cb.register_with_optimizer(optimizer, model=self.model, trainer=self)
+            register = getattr(cb, "register_with_optimizer", None)
+            if callable(register):
+                register(optimizer, model=self.model, trainer=self)
 
     def train(self) -> SingleRunResult:
         optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
@@ -189,14 +199,24 @@ class GPTrainerSingleProcess:
                 "device": self.device,
             },
         )
-        return {"loss": best_loss, "state_dict": best_state_dict}
+        callback_data: dict = {}
+        for cb in self.callbacks:
+            if hasattr(cb, "get_stored_parameters"):
+                stored_params = cb.get_stored_parameters()
+                if stored_params:
+                    callback_data[cb.__class__.__name__] = stored_params
+
+        return {
+            "loss": best_loss,
+            "state_dict": best_state_dict,
+            "callback_data": callback_data,
+        }
 
     def _train_standard_epoch(self, optimizer, mll) -> float:
         optimizer.zero_grad()
         train_x = self.train_x.to(dtype=self.dtype)
         train_y = self.train_y.to(dtype=self.dtype)
-        output = self.model(train_x)
-        loss = -mll(output, train_y)
+        loss = self._negative_mll_loss(mll, train_x, train_y)
         loss.backward()
         optimizer.step()
         if self.scheduler is not None:
@@ -220,7 +240,8 @@ class GPTrainerSingleProcess:
 
     def _lbfgs_step(self, optimizer, mll):
         optimizer.zero_grad()
-        output = self.model(self.train_x)
-        loss = -mll(output, self.train_y)
+        train_x = self.train_x.to(dtype=self.dtype)
+        train_y = self.train_y.to(dtype=self.dtype)
+        loss = self._negative_mll_loss(mll, train_x, train_y)
         loss.backward()
         return loss.detach()

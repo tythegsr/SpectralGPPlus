@@ -1,0 +1,17 @@
+{
+  "title": "Ackley_40Dx_10Dn_[-5.0, 10.0]_rffD10_noiseTest0.0_noiseTrain0.0",
+  "dimensions": 40,
+  "n_train": 400,
+  "n_test": 5000,
+  "num_rff": 10,
+  "feature_dim": 20,
+  "ard": true,
+  "rmse": 0.7384879480833481,
+  "rrmse": 1.1155605861603497,
+  "mae": 0.5921196187296789,
+  "r2": -0.2447243662676759,
+  "best_train_loss": 523.4318164247923,
+  "train_time_s": 4.619298458099365,
+  "noise_train": 0.0,
+  "noise_test": 0.0
+}
