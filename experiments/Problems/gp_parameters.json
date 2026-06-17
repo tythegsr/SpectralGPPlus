@@ -1,0 +1,36 @@
+[
+  {
+    "run": 1,
+    "epoch": 9999,
+    "best_loss": 0.1264047834674736,
+    "timestamp": "2025-10-17T14:59:01.954706",
+    "initial": {
+      "raw_noise": -4.906953216165986,
+      "raw_outputscale": -1.7246562435524269,
+      "raw_lengthscales": [
+        0.0,
+        0.0
+      ],
+      "kernel_type": "ScaleKernel",
+      "input_dim": 24
+    },
+    "final": {
+      "raw_noise": -3.9823074486250465,
+      "raw_outputscale": 0.01044184909761315,
+      "raw_lengthscales": [
+        0.0,
+        0.0
+      ],
+      "kernel_type": "ScaleKernel",
+      "input_dim": 24
+    },
+    "deltas": {
+      "raw_noise": 0.9246457675409396,
+      "raw_outputscale": 1.7350980926500401,
+      "raw_lengthscales": [
+        0.0,
+        0.0
+      ]
+    }
+  }
+]

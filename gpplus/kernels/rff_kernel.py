@@ -17,6 +17,9 @@ class RFFKernel(UnconstrainedKernel):
     """
     RBF random Fourier feature kernel (Sutherland–Schneider cos/sin features).
 
+    When ``orthogonal=True``, frequency weights use full ORF (Yu et al.
+    arXiv:1610.09072): orthogonal Q from QR with chi(d) column scaling (S @ Q).
+
     Training with :class:`~gpplus.models.RFFGPR` and
     :class:`~gpplus.training.rff_mll.RFFWoodburyMarginalLogLikelihood` uses
   Woodbury solves on a (2D)x(2D) system instead of an n x n Cholesky.

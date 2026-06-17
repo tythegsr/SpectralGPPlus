@@ -1,0 +1,551 @@
+% Upload this file (or the whole docs/overleaf/ folder) to Overleaf.
+% Compile with pdfLaTeX.
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{xcolor}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black}
+
+\tcbset{enhanced, boxrule=0.6pt, arc=2pt, left=8pt, right=8pt, top=6pt, bottom=6pt}
+
+\newtcolorbox{samebox}{
+  colback=green!6,
+  colframe=green!50!black,
+  title={\textbf{Same object} (only notation / transpose)},
+}
+
+\newtcolorbox{diffbox}{
+  colback=orange!8,
+  colframe=orange!70!black,
+  title={\textbf{Different appearance} (shape or symbol role)},
+}
+
+\newcommand{\noise}{\sigma^2}
+\newcommand{\Sig}{\Sigma}
+\newcommand{\Ph}{\Phi}
+\newcommand{\Zmat}{Z}
+
+\title{Woodbury Form for RFF Gaussian Process Marginal Likelihood\\[0.4em]
+\large Equivalence of Two $\Sig^{-1}$ Writings (GPPlus notation)}
+\author{GPPlus --- \texttt{rff\_mll.py} / \texttt{rff\_utils.py}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note shows why the Woodbury inverse written with a matrix $\Zmat$ (features $\times$ points)
+matches the form in \texttt{gpplus/utils/rff\_utils.py} with $\Ph$ (points $\times$ features).
+It also explains \textbf{where the $(\noise I)^{-1}$ factors go} in code (they are never Cholesky-factorized)
+and \textbf{why only the $m\times m$ middle matrix $M$} gets a Cholesky decomposition in the solve and MLL.
+Green boxes mark \emph{identical} mathematics; orange boxes mark \emph{different} layout or symbols.
+
+A final section summarizes \textbf{Orthogonal Random Features (ORF)} as implemented in GPPlus when
+\texttt{RFFKernel(orthogonal=True)}: full Yu et al.\ sampling $\mathbf S\mathbf Q$ with $\chi(d)$ scaling,
+independent blocks when $D>d$, and the same cos/sin featurization and Woodbury pipeline as standard RFF.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Target covariance (both equations describe the same $\Sig$)}
+%=============================================================================
+
+After subtracting the GP mean, the marginal covariance of $y\in\mathbb{R}^n$ is
+\begin{equation}
+  \label{eq:sigma}
+  \boxed{\;
+    \Sig \;=\; \noise\, I_n \;+\; \text{(low-rank term)}
+  \;}
+\end{equation}
+with homoskedastic noise variance $\noise$ (GPPlus: \texttt{likelihood.noise}).
+
+For RFF, the low-rank term is a Gram matrix of scaled features.
+The fork is only \textbf{matrix layout}: features-as-rows ($\Ph$) vs features-as-columns ($\Zmat$).
+
+%=============================================================================
+\section{Two writings of $\Sig^{-1}$ (side by side)}
+%=============================================================================
+
+\begin{diffbox}
+\textbf{Your equation} ($\Zmat\in\mathbb{R}^{m\times n}$ so the middle factor is $m\times m$):
+\begin{equation}
+  \label{eq:user}
+  \Sig^{-1}
+  = (\noise I_n)^{-1}
+  - (\noise I_n)^{-1}\,
+    \Zmat^{\top}\,
+    \underbrace{\Bigl(I_m^{-1} + \Zmat\,(\noise I_n)^{-1}\,\Zmat^{\top}\Bigr)^{-1}}_{M}\,
+    \Zmat\,
+    (\noise I_n)^{-1}.
+\end{equation}
+\end{diffbox}
+
+\begin{diffbox}
+\textbf{Docstring / \texttt{rff\_utils}} ($\Ph\in\mathbb{R}^{n\times m}$, one row per training point):
+\begin{equation}
+  \label{eq:code}
+  \Sig^{-1}
+  = (\noise I_n)^{-1}
+  - (\noise I_n)^{-1}\,
+    \Ph\,
+    \underbrace{\Bigl(I_m + \Ph^{\top}\,(\noise I_n)^{-1}\,\Ph\Bigr)^{-1}}_{M}\,
+    \Ph^{\top}\,
+    (\noise I_n)^{-1}.
+\end{equation}
+\end{diffbox}
+
+\begin{samebox}
+\textbf{Similarities}
+\begin{itemize}
+  \item Same $\Sig$: Woodbury inverse of $\noise I_n$ plus a rank-$\le m$ term.
+  \item Same middle matrix $M\in\mathbb{R}^{m\times m}$ (Section~\ref{sec:link}).
+  \item Same work: Cholesky $M$ in $O(m^3)$, not Cholesky $\Sig$ in $O(n^3)$.
+  \item Same MLL log-determinant: $\log|\Sig| = n\log\noise + \log|M|$ --- noise term explicit, $\log|M|$ from Cholesky of $M$ (Section~\ref{sec:logdet}).
+\end{itemize}
+\end{samebox}
+
+\begin{diffbox}
+\textbf{Differences (transpose / naming only)}
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{Your $\Zmat$} ($m\times n$) & \textbf{Code $\Ph$} ($n\times m$) \\
+\midrule
+Layout & features $\times$ points & points $\times$ features \\
+Link & $\Ph = \Zmat^{\top}$ & $\Zmat = \Ph^{\top}$ \\
+Low-rank part in $\Sig$ & $\Zmat^{\top}\Zmat$ & $\Ph\Ph^{\top}$ \\
+Factor after $(\noise I)^{-1}$ (left) & $\Zmat^{\top}$ & $\Ph$ \\
+Factor before $(\noise I)^{-1}$ (right) & $\Zmat$ & $\Ph^{\top}$ \\
+Middle matrix & $I + \Zmat(\noise I)^{-1}\Zmat^{\top}$ & $I + \Ph^{\top}(\noise I)^{-1}\Ph$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Each orange row is a transpose pair; the last row is the \emph{same} $M$.
+\end{diffbox}
+
+%=============================================================================
+\section{Why \eqref{eq:user} and \eqref{eq:code} are the same}
+%=============================================================================
+\label{sec:link}
+
+Define
+\begin{equation}
+  \Ph \;:=\; \Zmat^{\top} \in \mathbb{R}^{n\times m}.
+\end{equation}
+
+\subsection{Covariance}
+
+\begin{samebox}
+\[
+  \noise I_n + \Ph\Ph^{\top}
+  \;=\; \noise I_n + \Zmat^{\top}\Zmat
+  \;=\; \Sig.
+\]
+\end{samebox}
+
+\subsection{Middle matrix $M$}
+
+Your middle:
+\[
+  I_m + \Zmat\,(\noise I_n)^{-1}\,\Zmat^{\top}
+  = I_m + \frac{1}{\noise}\,\Zmat\Zmat^{\top}.
+\]
+Code middle:
+\[
+  I_m + \Ph^{\top}\,(\noise I_n)^{-1}\,\Ph
+  = I_m + \frac{1}{\noise}\,\Ph^{\top}\Ph.
+\]
+Since $\Ph^{\top}\Ph = \Zmat\Zmat^{\top}$,
+\begin{samebox}
+\[
+  \boxed{M \;=\; I_m + \frac{\Zmat\Zmat^{\top}}{\noise}
+       \;=\; I_m + \frac{\Ph^{\top}\Ph}{\noise}
+       \;=\; I_m + \Ph^{\top}(\noise I_n)^{-1}\Ph.}
+\]
+Note $I_m^{-1}=I_m$, so your $I^{-1}+\cdots$ equals the code's $I+\cdots$.
+\end{samebox}
+
+\subsection{Correction term}
+
+Your correction:
+\[
+  (\noise I_n)^{-1}\,\Zmat^{\top}\,M^{-1}\,\Zmat\,(\noise I_n)^{-1}.
+\]
+With $\Zmat^{\top}=\Ph$ and $\Zmat=\Ph^{\top}$:
+\[
+  (\noise I_n)^{-1}\,\Ph\,M^{-1}\,\Ph^{\top}\,(\noise I_n)^{-1},
+\]
+the second term in \eqref{eq:code}. Hence \eqref{eq:user} $=$ \eqref{eq:code}.
+
+%=============================================================================
+\section{Derivation from Woodbury}
+%=============================================================================
+
+\begin{theorem}[Woodbury]
+For conformable matrices with $A,C$ invertible:
+\begin{equation}
+  \label{eq:woodbury}
+  (A + U C V)^{-1}
+  = A^{-1} - A^{-1} U \bigl(C^{-1} + V A^{-1} U\bigr)^{-1} V A^{-1}.
+\end{equation}
+\end{theorem}
+
+\begin{proof}[Sketch]
+Let $M := C^{-1} + V A^{-1} U$. Multiply the RHS of \eqref{eq:woodbury} on the right by $(A+UCV)$:
+\[
+\begin{aligned}
+  &\bigl[A^{-1} - A^{-1} U M^{-1} V A^{-1}\bigr](A + U C V) \\
+  &= I + A^{-1}UCV - A^{-1} U M^{-1} V - A^{-1} U (M - C^{-1}) C V \\
+  &= I + A^{-1}UCV - A^{-1} U M^{-1} V - A^{-1} U C V + A^{-1} U M^{-1} V = I.
+\end{aligned}
+\]
+\end{proof}
+
+\subsection{Code convention: $\Sig = \noise I_n + \Ph\Ph^{\top}$}
+
+Take $A=\noise I_n$, $U=\Ph$, $C=I_m$, $V=\Ph^{\top}$. Then \eqref{eq:woodbury} is \eqref{eq:code}.
+
+\subsection{Your convention: $\Sig = \noise I_n + \Zmat^{\top}\Zmat$}
+
+With $\Ph=\Zmat^{\top}$, the same choice of $A,U,C,V$ yields \eqref{eq:user}.
+
+%=============================================================================
+\section{Where each part of $\Sig^{-1}$ goes}
+\label{sec:split}
+%=============================================================================
+
+Woodbury does \emph{not} replace $\Sig^{-1}$ by $M^{-1}$ alone. It \textbf{splits} the inverse into a
+\textbf{diagonal part} (cheap) and a \textbf{low-rank correction} (compressed into $M$).
+
+\subsection{Term-by-term decomposition (code convention)}
+
+Write \eqref{eq:code} as
+\begin{equation}
+  \label{eq:split}
+  \boxed{
+  \Sig^{-1}
+  = \underbrace{(\noise I_n)^{-1}}_{\text{(A) diagonal --- no Cholesky}}
+  - \underbrace{(\noise I_n)^{-1}\,\Ph}_{\text{(B) matvec}}
+  \;\underbrace{M^{-1}}_{\text{(C) only $m\times m$ solve}}
+  \;\underbrace{\Ph^{\top}(\noise I_n)^{-1}}_{\text{(D) matvec}}.
+  }
+\end{equation}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Piece} & \textbf{Math} & \textbf{Cost} & \textbf{In GPPlus} \\
+\midrule
+(A) & $(\noise I)^{-1}$ & $O(n)$ divides & \texttt{b / noise}, \texttt{inv\_noise\_b} \\
+(B),(D) & $\Ph$, $\Ph^{\top}$ & $O(nm)$ matvecs & \texttt{z\_train}, \texttt{z\_train.T @ \ldots} \\
+(C) & $M^{-1}v$ & $O(m^2)$ after $O(m^3)$ Cholesky & \texttt{cholesky\_solve(..., chol)} \\
+\midrule
+\multicolumn{4}{@{}l@{}}{%
+\textbf{Not used:} $n\times n$ Cholesky or LU of $\Sig=\noise I_n+\Ph\Ph^{\top}$ ($O(n^3)$).} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{samebox}
+\textbf{The ``other part'' $(\noise I)^{-1}$ is still in the formula.}
+It appears as:
+\begin{itemize}
+  \item the \textbf{leading term} $(\noise I)^{-1}$ (vector: divide by $\noise$);
+  \item the \textbf{left and right} factors wrapping $M^{-1}$ in the correction.
+\end{itemize}
+Because $\noise I_n$ is diagonal, $(\noise I_n)^{-1}$ is \emph{exact division by $\noise$}---no matrix factorization.
+\end{samebox}
+
+\begin{diffbox}
+\textbf{Common confusion:} ``Woodbury only uses $M$'' means \emph{the expensive matrix inverse / Cholesky
+is applied only to $M$} ($m\times m$), not that $(\noise I)^{-1}$ disappears from $\Sig^{-1}$.
+\end{diffbox}
+
+\subsection{Structural picture}
+
+\[
+  \Sig
+  = \underbrace{\noise I_n}_{\text{diagonal (noise)}}
+  + \underbrace{\Ph\Ph^{\top}}_{\text{rank $\le m$ (RFF features)}}.
+\]
+
+Woodbury inverts this sum by:
+\begin{enumerate}
+  \item inverting the diagonal piece analytically ($A^{-1}$);
+  \item pushing $\Ph\Ph^{\top}$ into the $m\times m$ matrix $M = I + \Ph^{\top}(\noise I)^{-1}\Ph$.
+\end{enumerate}
+
+%=============================================================================
+\section{Applying $\Sig^{-1}$ to a vector: \eqref{eq:solve}}
+\label{sec:solve}
+%=============================================================================
+
+For $b\in\mathbb{R}^n$, expanding \eqref{eq:split} acting on $b$ gives
+\begin{equation}
+  \label{eq:solve}
+  \Sig^{-1} b
+  = \underbrace{\frac{b}{\noise}}_{\text{(A) } (\noise I)^{-1}b}
+  - \underbrace{\frac{1}{\noise}\,\Ph\,M^{-1}\!\left(\frac{\Ph^{\top} b}{\noise}\right)}_{\text{(B)--(C)--(D) correction}}.
+\end{equation}
+
+Define the algorithm (matches \texttt{woodbury\_solve\_from\_chol}):
+\begin{align}
+  \texttt{inv\_noise\_b} &= (\noise I_n)^{-1} b &&= b/\noise, \label{step:a}\\
+  \texttt{middle\_rhs} &= \Ph^{\top}\,(\noise I_n)^{-1} b &&= \Ph^{\top}\,\texttt{inv\_noise\_b}, \label{step:bd}\\
+  \texttt{inner} &= M^{-1}\,\texttt{middle\_rhs} &&\text{Cholesky on $M$ only}, \label{step:c}\\
+  \texttt{correction} &= (\noise I_n)^{-1}\,\Ph\,\texttt{inner} &&= \Ph\,\texttt{inner}/\noise, \label{step:b2}\\
+  \Sig^{-1}b &= \texttt{inv\_noise\_b} - \texttt{correction}. \label{step:final}
+\end{align}
+
+\begin{samebox}
+\textbf{Only step \eqref{step:c} uses the Cholesky factor} \texttt{chol} from \texttt{woodbury\_factor}
+($LL^{\top}=M$). Steps \eqref{step:a}--\eqref{step:bd} and \eqref{step:b2} implement the
+$(\noise I)^{-1}$ and $\Ph,\Ph^{\top}$ factors explicitly.
+\end{samebox}
+
+\texttt{woodbury\_factor}: \texttt{cholesky(}$M$\texttt{)} --- not \texttt{cholesky(}$\Sig$\texttt{)}.
+
+\begin{diffbox}
+Avoid: ``Cholesky Woodbury on $\Sig$'' (sounds $n\times n$).
+\end{diffbox}
+\begin{samebox}
+Use: ``Woodbury for $\Sig^{-1}$: divide by $\noise$ for $(\noise I)^{-1}$, Cholesky $M$ for the low-rank correction''.
+\end{samebox}
+
+%=============================================================================
+\section{Marginal likelihood: why MLL also splits noise vs.\ $M$}
+\label{sec:logdet}
+%=============================================================================
+
+Marginal log-density for centered $y$:
+\begin{equation}
+  \label{eq:mll}
+  \log p(y)
+  = -\tfrac{1}{2}\,\underbrace{y^{\top}\Sig^{-1}y}_{\text{quadratic --- Section~\ref{sec:solve}}}
+  -\tfrac{1}{2}\,\underbrace{\log|\Sig|}_{\text{log-det --- below}}
+  -\tfrac{n}{2}\log(2\pi).
+\end{equation}
+
+\subsection{Quadratic term $y^{\top}\Sig^{-1}y$}
+
+Compute $\alpha=\Sig^{-1}y$ with \eqref{eq:solve}--\eqref{step:final}: one Cholesky of $M$, plus
+$O(n)$ divides and $O(nm)$ matvecs for the $(\noise I)^{-1}$ and $\Ph$ factors.
+Then $y^{\top}\Sig^{-1}y = y^{\top}\alpha$ (\texttt{woodbury\_quadratic\_form}).
+
+\subsection{Log determinant $\log|\Sig|$}
+
+\begin{lemma}[Matrix determinant lemma]
+For $\Ph\in\mathbb{R}^{n\times m}$,
+\[
+  |\Sig|
+  = |\noise I_n + \Ph\Ph^{\top}|
+  = (\noise)^n \,\bigl|I_m + \Ph^{\top}\Ph/\noise\bigr|
+  = \noise^n\,|M|.
+\]
+\end{lemma}
+
+So $\log|\Sig|$ \textbf{splits the same way} as $\Sig^{-1}$:
+\begin{equation}
+  \label{eq:logdet-split}
+  \boxed{
+  \log|\Sig|
+  = \underbrace{n\log\noise}_{\text{diagonal / noise part --- scalar, no Cholesky}}
+  + \underbrace{\log|M|}_{\text{from Cholesky of $M$ only}}.
+  }
+\end{equation}
+
+In code (\texttt{woodbury\_log\_det\_from\_chol}):
+\begin{itemize}
+  \item \textbf{Noise part:} \texttt{n * noise.log()} implements $n\log\noise$.
+  \item \textbf{$M$ part:} \texttt{2 * sum(log diag(chol))} implements $\log|M|$ from $LL^{\top}=M$.
+\end{itemize}
+
+\texttt{woodbury\_marginal\_log\_likelihood} uses \emph{one} Cholesky of $M$ for both
+$y^{\top}\Sig^{-1}y$ and $\log|M|$; the $(\noise I)^{-1}$ contribution to the MLL is
+\textbf{division} (in the solve) and \textbf{$n\log\noise$} (in the log-det), not an $n\times n$ factorization.
+
+\begin{samebox}
+\textbf{Summary for MLL}
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{MLL ingredient} & \textbf{Uses $(\noise I)^{-1}$?} & \textbf{Cholesky?} \\
+\midrule
+$y^{\top}\Sig^{-1}y$ & yes (divide by $\noise$ in \eqref{step:a}--\eqref{step:b2}) & only $M$ ($m\times m$) \\
+$\log|\Sig|$ & yes ($n\log\noise$ term) & only $\log|M|$ from \texttt{chol} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{samebox}
+
+%=============================================================================
+\section{Orthogonal Random Features (ORF)}
+\label{sec:orf}
+%=============================================================================
+
+Woodbury (Sections~\ref{sec:split}--\ref{sec:logdet}) applies to \emph{any} feature matrix $\Ph\in\mathbb{R}^{n\times m}$
+with $m=2D$. This section describes how GPPlus \emph{draws} the underlying RFF frequencies when
+\texttt{orthogonal=True} on \texttt{RFFKernel} / \texttt{RFFGPR}.
+Implementation: \texttt{\_sample\_orf\_weights} and \texttt{init\_rbf\_weights} in
+\texttt{gpplus/utils/rff\_utils.py}.
+Reference: Yu, Suresh, Choromanski et al., ``Orthogonal Random Features'',
+\href{https://arxiv.org/abs/1610.09072}{arXiv:1610.09072}.
+
+\subsection{Standard RFF (i.i.d.\ frequencies)}
+
+For input dimension $d$ and $D$ frequencies, GPPlus stores a weight matrix
+$W\in\mathbb{R}^{d\times D}$ whose \textbf{columns} are $\mathbf w_j\in\mathbb{R}^d$.
+Standard RFF draws
+\begin{equation}
+  \label{eq:rff-iid}
+  \mathbf w_j \stackrel{\text{i.i.d.}}{\sim} \mathcal N(0, I_d),
+  \qquad j=1,\ldots,D.
+\end{equation}
+Scaled features (before outputscale in \texttt{RFFGPR}) are
+\begin{equation}
+  \label{eq:featurize}
+  \mathbf z(x)
+  = \frac{1}{\sqrt{D}}
+  \begin{bmatrix}
+    \cos(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \cos(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}) \\
+    \sin(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x})
+  \end{bmatrix}
+  \in \mathbb{R}^{2D},
+\end{equation}
+where $\tilde{\mathbf x}$ applies GPPlus lengthscale scaling ($10^{\ell/2}$ per dimension in
+\texttt{featurize\_rbf}) and $\tilde{\mathbf w}_j$ may include optional ARD scaling on $W$
+when \texttt{resample\_weights(spectral=True)}.
+One training row is $\Ph_i = \mathbf z(x_i)^{\top}$ (with outputscale applied in \texttt{RFFGPR}).
+
+\subsection{Full ORF (Yu et al., Eq.~(2))}
+
+Plain QR on a Gaussian matrix gives \emph{unit-norm} directions; Gaussian RFF rows have
+$\chi(d)$-distributed norms. Full ORF restores that distribution while keeping directions orthogonal
+within each block.
+
+\begin{equation}
+  \label{eq:orf-paper}
+  \boxed{
+  W_{\mathrm{ORF}} = \frac{1}{\sigma}\, S\, Q,
+  \qquad
+  \mathbf w_j = s_j\,\mathbf q_j,
+  }
+\end{equation}
+where:
+\begin{itemize}
+  \item $Q\in\mathbb{R}^{d\times d}$ is a random orthogonal matrix from the QR decomposition of a
+        $d\times d$ Gaussian matrix (uniform on the Stiefel manifold);
+  \item $S=\mathrm{diag}(s_1,\ldots,s_D)$ with $s_j \sim \chi(d)$ i.i.d.;
+  \item $\mathbf q_j$ is the $j$-th \textbf{column} of $Q$ (orthonormal directions in $\mathbb{R}^d$).
+\end{itemize}
+Each $\mathbf w_j$ is marginally $\mathcal N(0,I_d)$, so kernel approximation remains unbiased;
+the variance of $\hat K(x,y)$ is lower than i.i.d.\ RFF for the same $D$ (Theorem~1 in the paper).
+
+\begin{diffbox}
+\textbf{ORF$'$ (simplified, not implemented):}
+$W=\frac{\sqrt{d}}{\sigma}\,Q$ without $\chi(d)$ scaling uses unit-norm rows/columns only.
+GPPlus implements \textbf{full ORF} ($S$ included), not ORF$'$.
+\end{diffbox}
+
+\subsection{When $D > d$: independent blocks}
+
+When more than $d$ frequencies are needed, the paper repeats Eq.~\eqref{eq:orf-paper}
+\textbf{independently} for each block of size $d$ (Corollary~1).
+GPPlus concatenates columns:
+\begin{equation}
+  W = \big[\, W^{(1)} \;\|\; W^{(2)} \;\|\; \cdots \,\big],
+  \qquad W^{(b)} \in \mathbb{R}^{d\times d},
+\end{equation}
+each $W^{(b)}$ from a fresh Gaussian $\to$ QR $\to$ $\chi(d)$ scales.
+
+\subsection{GPPlus mapping (code convention)}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Concept} & \textbf{GPPlus} \\
+\midrule
+Input dimension & $d = \texttt{num\_dims}$ \\
+Number of frequencies & $D = \texttt{num\_samples} = \texttt{num\_rff}$ \\
+Feature dimension & $m = 2D$ (cos/sin pairs unchanged) \\
+Weight buffer & \texttt{randn\_weights} $\in \mathbb{R}^{d\times D}$, column $j$ is $\mathbf w_j$ \\
+ORF enabled & \texttt{RFFKernel(orthogonal=True)}, \texttt{RFFGPR(..., orthogonal=True)} \\
+Sampling & \texttt{\_sample\_orf\_weights} $\to$ \texttt{init\_rbf\_weights(..., orthogonal=True)} \\
+$\chi(d)$ draw & $\|\mathcal N(0,I_d)\|$ (norm of a $d$-dim.\ standard Gaussian) \\
+ARD on weights & Applied \textbf{after} ORF: $W \leftarrow W \odot (1/\boldsymbol{\ell})$ if \texttt{lengthscale} given \\
+Kernel bandwidth on $x$ & Still in \texttt{featurize\_rbf} via $10^{\ell/2}$; paper's $1/\sigma$ is not duplicated \\
+Multi-init draws & \texttt{RFFParameterInitializer} pre-draws one $W$ per init with the same ORF rule \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Algorithm (one block of size $b\le d$):
+\begin{align}
+  G &\sim \mathcal N(0,I)^{d\times d}, &
+  Q &\leftarrow \mathrm{qr}(G), \\
+  s_j &\sim \chi(d), &
+  \mathbf w_j &\leftarrow s_j\,\mathbf q_j, \quad j=1,\ldots,b.
+\end{align}
+
+\begin{samebox}
+\textbf{What ORF does \emph{not} change}
+\begin{itemize}
+  \item Featurization \eqref{eq:featurize}: still cos/sin with $1/\sqrt{D}$ scaling.
+  \item Woodbury MLL, $\Sig$, $M$, and all formulas in Sections~\ref{sec:split}--\ref{sec:logdet}.
+  \item Only the \textbf{random draw} of $W$ differs from \eqref{eq:rff-iid}.
+\end{itemize}
+\end{samebox}
+
+\begin{diffbox}
+\textbf{Not implemented (out of scope):} SORF (structured orthogonal features via Walsh--Hadamard
+matrices, Eq.~(5) in the paper) and explicit materialization-free $O(d\log d)$ transforms.
+GPPlus always stores explicit $W\in\mathbb{R}^{d\times D}$.
+\end{diffbox}
+
+%=============================================================================
+\section{Highlight map (one page)}
+%=============================================================================
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.44\textwidth}p{0.44\textwidth}@{}}
+\toprule
+\multicolumn{1}{c}{\cellcolor{orange!15}\textbf{Different look}} &
+\multicolumn{1}{c}{\cellcolor{green!12}\textbf{Same math}} \\
+\midrule
+Symbol $\Zmat$ vs $\Ph$ & $\Ph=\Zmat^{\top}$ \\
+Order: $\Zmat^{\top} M^{-1}\Zmat$ vs $\Ph M^{-1}\Ph^{\top}$ & same bilinear form \\
+$I^{-1}+\cdots$ vs $I+\cdots$ & both $= M$ \\
+\midrule
+\multicolumn{2}{@{}c@{}}{\textbf{Shared}} \\
+\midrule
+\multicolumn{2}{@{}l@{}}{$\Sig = \noise I_n + \text{rank-}\le m$ term} \\
+\multicolumn{2}{@{}l@{}}{$M$ is $m\times m$; factor $M$, not $\Sig$} \\
+\multicolumn{2}{@{}l@{}}{$\Sig^{-1}b$: $(\noise I)^{-1}$ by divide; $M^{-1}$ by Cholesky} \\
+\multicolumn{2}{@{}l@{}}{$\log|\Sig|$: $n\log\noise$ explicit $+$ $\log|M|$ from Cholesky} \\
+\midrule
+\multicolumn{2}{@{}l@{}}{ORF: $W=SQ$, $\chi(d)$ scales; same $\Ph$ Woodbury (Section~\ref{sec:orf})} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{1em}
+\noindent\texttt{gpplus/utils/rff\_utils.py}, \texttt{gpplus/training/rff\_mll.py}.
+
+\end{document}

@@ -34,6 +34,8 @@ class GPTrainerSingleProcess:
         stop_conditions: Optional[List[StopCondition]] = None,
         dtype: torch.dtype = torch.float64,
         min_epochs: int = 0,
+        run_index: Optional[int] = None,
+        num_inits: Optional[int] = None,
     ):
         """
         Initialize a single training run for one model initialization.
@@ -66,6 +68,8 @@ class GPTrainerSingleProcess:
         self.scheduler_kwargs = scheduler_kwargs or {}
         self.scheduler = None
         self.dtype = dtype
+        self.run_index = run_index
+        self.num_inits = num_inits
 
         if stop_conditions is None:
             self.stop_conditions = [
@@ -83,6 +87,7 @@ class GPTrainerSingleProcess:
         self.train_y = self.model.train_targets
 
     def _emit_callbacks(self, hook_name: str, ctx: dict) -> None:
+        ctx = {**ctx, "run_index": self.run_index, "num_inits": self.num_inits}
         for cb in self.callbacks:
             getattr(cb, hook_name)(ctx)
 

@@ -3910,3 +3910,177 @@ class JitterTrackingCallback(Callback):
     def get_stored_parameters(self):
         """Alias for get_stored_jitter for compatibility with GPTrainer."""
         return self.get_stored_jitter()
+
+
+class ValidationMetricsCallback(Callback):
+    """
+    Monitor validation NLL and RRMSE during training on held-out validation data.
+
+    Works with Adam (on_epoch_end) and LBFGSScipy (register_with_optimizer iteration hook).
+    """
+
+    def __init__(
+        self,
+        val_x: torch.Tensor,
+        val_y: torch.Tensor,
+        *,
+        verbose: bool = True,
+        log_every_n_epochs: int = 1,
+        log_every_n_iters: int = 10,
+        num_inits: Optional[int] = None,
+        cholesky_jitter: Optional[float] = None,
+        chunk_size: int = 512,
+    ):
+        self.val_x = val_x
+        self.val_y = val_y
+        self.verbose = verbose
+        self.log_every_n_epochs = max(1, int(log_every_n_epochs))
+        self.log_every_n_iters = max(1, int(log_every_n_iters))
+        self.num_inits = num_inits
+        self.cholesky_jitter = cholesky_jitter
+        self.chunk_size = chunk_size
+        self._run_index: Optional[int] = None
+        self._fold_index: Optional[int] = None
+        self._records: list[dict] = []
+        self._trainer = None
+        self._lbfgs_registered = False
+
+    def set_run_index(self, run_index: int) -> None:
+        self._run_index = run_index
+
+    def set_fold_index(self, fold_index: int) -> None:
+        self._fold_index = fold_index
+
+    def _init_label(self, context: dict) -> str:
+        run_index = context.get("run_index", self._run_index)
+        num_inits = context.get("num_inits", self.num_inits)
+        if run_index is not None and num_inits is not None:
+            return f"Init {run_index + 1}/{num_inits}"
+        if run_index is not None:
+            return f"Init {run_index}"
+        return "Init ?"
+
+    @staticmethod
+    def _to_float(x) -> float:
+        if x is None:
+            return float("nan")
+        if hasattr(x, "item"):
+            return float(x.item())
+        return float(x)
+
+    def _compute_and_record(
+        self,
+        context: dict,
+        *,
+        epoch: Optional[int] = None,
+        lbfgs_iter: Optional[int] = None,
+    ) -> dict:
+        from .training_metrics import compute_validation_metrics
+
+        model = context["model"]
+        trainer = context.get("trainer", self._trainer)
+        train_loss = context.get("loss")
+        jitter = self.cholesky_jitter
+        if jitter is None and trainer is not None and hasattr(trainer, "cholesky_jitter"):
+            jitter = trainer.cholesky_jitter
+
+        metrics = compute_validation_metrics(
+            model,
+            self.val_x,
+            self.val_y,
+            cholesky_jitter=jitter,
+            chunk_size=self.chunk_size,
+        )
+        record = {
+            "run_index": context.get("run_index", self._run_index),
+            "fold_index": context.get("fold_index", self._fold_index),
+            "train_loss": self._to_float(train_loss),
+            "val_NLL": metrics["val_NLL"],
+            "val_RRMSE": metrics["val_RRMSE"],
+        }
+        if epoch is not None:
+            record["epoch"] = int(epoch)
+        if lbfgs_iter is not None:
+            record["lbfgs_iter"] = int(lbfgs_iter)
+        self._records.append(record)
+        context["val_metrics"] = metrics
+        return metrics
+
+    def _print_metrics(
+        self,
+        context: dict,
+        metrics: dict,
+        *,
+        epoch: Optional[int] = None,
+        lbfgs_iter: Optional[int] = None,
+    ) -> None:
+        if not self.verbose:
+            return
+        label = self._init_label(context)
+        train_loss = context.get("loss")
+        parts = [f"[{label}]"]
+        if lbfgs_iter is not None:
+            parts.append(f"LBFGS iter {lbfgs_iter}")
+        elif epoch is not None:
+            parts.append(f"Epoch {epoch}")
+        if train_loss is not None:
+            parts.append(f"train_loss={train_loss:.4f}")
+        parts.append(f"val_NLL={metrics['val_NLL']:.4f}")
+        parts.append(f"val_RRMSE={metrics['val_RRMSE']:.4f}")
+        print(" | ".join(parts))
+
+    def on_train_start(self, context: dict) -> None:
+        self._trainer = context.get("trainer")
+        self._run_index = context.get("run_index", self._run_index)
+        self._fold_index = context.get("fold_index", self._fold_index)
+        self._records = []
+
+    def on_epoch_end(self, context: dict) -> None:
+        if self._lbfgs_registered:
+            return
+        epoch = context.get("epoch", 0)
+        if epoch != 0 and (epoch % self.log_every_n_epochs) != 0:
+            return
+        metrics = self._compute_and_record(context, epoch=epoch)
+        self._print_metrics(context, metrics, epoch=epoch)
+
+    def register_with_optimizer(self, optimizer, model=None, trainer=None) -> None:
+        from .optimizers import LBFGSScipy
+
+        if trainer is not None:
+            self._trainer = trainer
+
+        if not isinstance(optimizer, LBFGSScipy):
+            return
+
+        self._lbfgs_registered = True
+        callback_self = self
+
+        def on_lbfgs_iteration(iter_idx: int, loss: float) -> None:
+            if iter_idx != 1 and (iter_idx % callback_self.log_every_n_iters) != 0:
+                return
+            ctx = {
+                "model": model,
+                "trainer": trainer,
+                "loss": loss,
+                "run_index": callback_self._run_index,
+                "num_inits": callback_self.num_inits,
+            }
+            metrics = callback_self._compute_and_record(ctx, lbfgs_iter=iter_idx)
+            callback_self._print_metrics(ctx, metrics, lbfgs_iter=iter_idx)
+
+        if hasattr(optimizer, "iteration_callback"):
+            previous_callback = optimizer.iteration_callback
+
+            def chained_iteration_callback(iter_idx, loss):
+                if previous_callback is not None:
+                    previous_callback(iter_idx, loss)
+                on_lbfgs_iteration(iter_idx, loss)
+
+            optimizer.iteration_callback = chained_iteration_callback
+
+    def on_train_end(self, context: dict) -> None:
+        self._run_index = context.get("run_index", self._run_index)
+
+    def get_stored_parameters(self):
+        return {"records": self._records.copy()}

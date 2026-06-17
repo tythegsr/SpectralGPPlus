@@ -395,26 +395,87 @@ class DefaultParameterInitializer(ParameterInitializer):
 
 class RFFParameterInitializer(DefaultParameterInitializer):
     """
-    Hyperparameter initialization via Sobol samples, plus a fresh RFF frequency
-    draw per run (independent ``randn_weights`` buffer for each init).
+    Hyperparameter initialization via Sobol samples, plus a distinct RFF frequency
+    draw per init.
+
+    All ``num_inits`` weight matrices are pre-drawn in :meth:`setup` from one RNG
+    stream seeded with ``seed`` (trainer seed). Init ``i`` uses draw ``i``; draws
+    are not re-seeded with ``seed + i``.
     """
 
+    def __init__(self, num_inits: int, seed: int = None, parameter_configs: Optional[Dict[str, Dict[str, Any]]] = None):
+        super().__init__(num_inits=num_inits, seed=seed, parameter_configs=parameter_configs)
+        self._rff_weight_draws: list[torch.Tensor] | None = None
+
+    def setup(self, model: torch.nn.Module) -> None:
+        super().setup(model)
+        from ..models.rff_gpr import RFFGPR
+        from ..utils.rff_utils import init_rbf_weights
+
+        self._rff_weight_draws = None
+        if not isinstance(model, RFFGPR):
+            return
+
+        train_x = model.train_inputs[0]
+        num_dims = train_x.shape[-1]
+        num_samples = model.num_rff
+        rff_kernel = model._rff_kernel
+        device = rff_kernel.raw_lengthscale.device
+        dtype = rff_kernel.raw_lengthscale.dtype
+        orthogonal = rff_kernel.orthogonal
+
+        if self.seed is not None:
+            torch.manual_seed(self.seed)
+
+        self._rff_weight_draws = [
+            init_rbf_weights(num_dims, num_samples, device=device, dtype=dtype, orthogonal=orthogonal)
+            for _ in range(self.num_inits)
+        ]
+        feature_kind = "ORF" if orthogonal else "RFF"
+        logger.info(
+            "Precomputed %s %s weight draws from master seed %s (sequential RNG, not seed+run_index)",
+            self.num_inits,
+            feature_kind,
+            self.seed,
+        )
+
     def initialize(self, model: torch.nn.Module, run_index: int) -> None:
-        self._resample_rff_weights(model, run_index)
+        self._assign_rff_weights(model, run_index)
         super().initialize(model, run_index)
 
-    def _resample_rff_weights(self, model: torch.nn.Module, run_index: int) -> None:
+    def _assign_rff_weights(self, model: torch.nn.Module, run_index: int) -> None:
         from ..models.rff_gpr import RFFGPR
 
         if not isinstance(model, RFFGPR):
             return
 
-        gen_seed = (self.seed + run_index) if self.seed is not None else run_index
-        torch.manual_seed(gen_seed)
-        model._rff_kernel.resample_weights(spectral=False)
+        rff_kernel = model._rff_kernel
+        num_dims = model.train_inputs[0].shape[-1]
+        num_samples = model.num_rff
+        orthogonal = rff_kernel.orthogonal
+
+        if self._rff_weight_draws is not None and run_index < len(self._rff_weight_draws):
+            weights = self._rff_weight_draws[run_index].to(
+                device=rff_kernel.raw_lengthscale.device,
+                dtype=rff_kernel.raw_lengthscale.dtype,
+            )
+            rff_kernel._init_weights(
+                num_dims,
+                num_samples,
+                randn_weights=weights,
+                spectral=False,
+                orthogonal=orthogonal,
+            )
+        else:
+            if self.seed is not None:
+                torch.manual_seed(self.seed)
+            rff_kernel.resample_weights(spectral=False, orthogonal=orthogonal)
+
         model.invalidate_feature_cache()
+        feature_kind = "ORF" if orthogonal else "RFF"
         logger.info(
-            "Resampled RFF frequencies for run #%s (seed=%s)",
+            "Assigned %s frequencies for run #%s (master seed=%s, precomputed draw)",
+            feature_kind,
             run_index,
-            gen_seed,
+            self.seed,
         )

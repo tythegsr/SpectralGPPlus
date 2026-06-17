@@ -184,8 +184,18 @@ class GPTrainer:
             callbacks_copy = self.callbacks
             stop_conditions_copy = self.stop_conditions
         else:
-            callbacks_copy = [copy.deepcopy(cb) for cb in self.callbacks] if self.callbacks else []
+            callbacks_copy = []
+            for cb in self.callbacks:
+                cb_copy = copy.deepcopy(cb)
+                if hasattr(cb_copy, "set_run_index"):
+                    cb_copy.set_run_index(run_index)
+                callbacks_copy.append(cb_copy)
             stop_conditions_copy = [copy.deepcopy(sc) for sc in self.stop_conditions] if self.stop_conditions else None
+
+        if self.num_inits == 1:
+            for cb in callbacks_copy:
+                if hasattr(cb, "set_run_index"):
+                    cb.set_run_index(run_index)
 
         run = GPTrainerSingleProcess(
             model=base_model,
@@ -201,6 +211,8 @@ class GPTrainer:
             stop_conditions=stop_conditions_copy,
             min_epochs=self.min_epochs,
             dtype=self.dtype,
+            run_index=run_index,
+            num_inits=self.num_inits,
         )
         train_result = run.train()
         return {"run_index": run_index, **train_result}

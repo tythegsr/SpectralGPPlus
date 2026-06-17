@@ -1,8 +1,9 @@
 """
-Ackley XXD (XX=number of dimensions) benchmark with GPPlus RFF kernel (Woodbury inference).
+Multi-fidelity Wing benchmark with GPPlus RFF kernel (Woodbury inference).
 
-Uses RFFGPR + LogScaleKernel(RFFKernel) only — no SEEK or other composite kernels.
-Tuned defaults align with experiments_revisions_april/A4_ackley_GPvsPFN.py (Gaussian baseline).
+Uses RFFGPR + LogScaleKernel(RFFKernel) only — same training path as A4_ackley_RFF.py.
+Data from load_experimental_data.generate_mf_wing_data (10 continuous + source column).
+When only one fidelity has samples, the source column is dropped automatically (10D inputs).
 """
 
 from __future__ import annotations
@@ -30,38 +31,102 @@ from gpplus.training import (
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from load_experimental_data import generate_ackley_data
+from load_experimental_data import generate_mf_wing_data
 from rff_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
-    VAL_SEED_OFFSET,
-    compute_n_val,
+    compute_val_samples_per_source,
     extract_learned_likelihood_noise,
     json_safe_optimizer_kwargs,
     make_validation_callback,
     save_metrics_json,
-    plot_validation_curves_after_save,
     scale_validation_tensors,
     summarize_validation_from_runs,
     unpack_train_val_test,
 )
 
+WING_CONT_DIM = 10
+WING_INPUT_DIM_MF = 11
+WING_NUM_SOURCES = 4
+WING_SOURCE_NAMES = ("s0", "s1", "s2", "s3")
 
-def run_ackley_40d_rff(
-    dimensions: int = 40,
-    train_size: int = 40,
+
+def _expand_per_source(values: int | float | list, length: int = WING_NUM_SOURCES) -> list:
+    if isinstance(values, (int, float)):
+        return [float(values)] * length
+    if len(values) != length:
+        raise ValueError(f"Expected length-{length} per-source list, got {len(values)}")
+    return [float(v) for v in values]
+
+
+def _active_source_indices(
+    train_samples_per_source: list[int],
+    test_samples_per_source: list[int],
+) -> list[int]:
+    """Source indices with at least one train or test sample."""
+    active = []
+    for idx, (n_train, n_test) in enumerate(zip(train_samples_per_source, test_samples_per_source)):
+        if n_train > 0 or n_test > 0:
+            active.append(idx)
+    return active
+
+
+def _prepare_wing_inputs(
+    x_train: torch.Tensor,
+    x_test: torch.Tensor,
+    train_samples_per_source: list[int],
+    test_samples_per_source: list[int],
+    *,
+    drop_source_column: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, int, int | None, bool]:
+    """
+    Drop the source-id column when exactly one fidelity is used.
+
+    Returns (x_train, x_test, input_dim, source_index, dropped_source_column).
+    """
+    active = _active_source_indices(train_samples_per_source, test_samples_per_source)
+    if len(active) == 0:
+        raise ValueError("At least one source must have train or test samples.")
+    if len(active) > 1 and drop_source_column:
+        raise ValueError(
+            "drop_source_column=True requires a single active source; "
+            f"active sources: {[WING_SOURCE_NAMES[i] for i in active]}"
+        )
+
+    single_fidelity = len(active) == 1
+    should_drop = drop_source_column if drop_source_column is not None else single_fidelity
+
+    if not should_drop:
+        return x_train, x_test, WING_INPUT_DIM_MF, active[0] if single_fidelity else None, False
+
+    if not single_fidelity:
+        raise ValueError(
+            "Cannot drop source column for multi-fidelity Wing; "
+            f"active sources: {[WING_SOURCE_NAMES[i] for i in active]}"
+        )
+
+    return (
+        x_train[:, :WING_CONT_DIM].contiguous(),
+        x_test[:, :WING_CONT_DIM].contiguous(),
+        WING_CONT_DIM,
+        active[0],
+        True,
+    )
+
+
+def run_wing_rff(
+    train_samples_per_source: list[int] | None = None,
+    test_samples_per_source: list[int] | None = None,
     num_rff: int | None = None,
-    num_test: int = 5000,
-    x_bounds: tuple[float, float] = (-5.0, 10.0),
-    noise_train: float = 0.0,
-    noise_test: float = 0.0,
+    noise_train: float | list[float] = 0.0,
+    noise_test: float | list[float] = 0.0,
     noise_type: str = "gaussian",
     seed: int = 42,
     num_inits: int = 8,
     num_epochs: int = 1,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
-    save_path: str | None = "experiments_RFF/results/ackley_40D_rff",
+    save_path: str | None = "experiments_RFF/results/wing_rff",
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
@@ -69,24 +134,41 @@ def run_ackley_40d_rff(
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
-    monitor_validation: bool = True,
+    drop_source_column: bool | None = None,
+    monitor_validation: bool = False,
     val_fraction: float = 0.2,
     validation_verbose: bool = True,
-    plot_validation: bool = True,
 ) -> dict:
     """
-    Train RFF-GP on Ackley and evaluate on held-out Sobol test points.
+    Train RFF-GP on multi-fidelity Wing and evaluate on held-out test points.
 
     Parameters
     ----------
-    train_size : training points per input dimension (total train n = train_size * dimensions).
-    num_rff : D in RFF (feature dimension m = 2*D). Default: min(512, n_train // 3).
-    num_epochs : Training epochs per init. Use 1 with LBFGSScipy; increase for Adam.
+    train_samples_per_source : samples per fidelity source (s0–s3); default 25 each.
+    test_samples_per_source : test samples per source; default 500 each.
+    num_rff : D in RFF (m = 2*D). Default: min(512, n_train // 3).
+    num_epochs : 1 uses LBFGSScipy; >1 uses torch.optim.Adam.
+    drop_source_column : If True, use 10 continuous inputs only (single fidelity).
+        If None (default), drop automatically when exactly one source has samples.
     """
+    if train_samples_per_source is None:
+        train_samples_per_source = [25, 25, 25, 25]
+    if test_samples_per_source is None:
+        test_samples_per_source = [500, 500, 500, 500]
+    if len(train_samples_per_source) != WING_NUM_SOURCES or len(test_samples_per_source) != WING_NUM_SOURCES:
+        raise ValueError(
+            f"train/test samples per source must have length {WING_NUM_SOURCES}; "
+            f"got train={train_samples_per_source}, test={test_samples_per_source}"
+        )
+
     set_seed(seed)
-    n_train = train_size * dimensions
+    n_train = sum(train_samples_per_source)
+    n_test = sum(test_samples_per_source)
     if num_rff is None:
         num_rff = min(512, max(64, n_train // 3))
+
+    train_noise = _expand_per_source(noise_train)
+    test_noise = _expand_per_source(noise_test)
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -97,20 +179,37 @@ def run_ackley_40d_rff(
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
+    active_sources = _active_source_indices(train_samples_per_source, test_samples_per_source)
+    single_fidelity = len(active_sources) == 1
+    fidelity_source = active_sources[0] if single_fidelity else None
+    will_drop_source = (
+        drop_source_column if drop_source_column is not None else single_fidelity
+    )
+
     title = (
-        f"Ackley_{dimensions}Dx_{train_size}Dn_{list(x_bounds)}_"
+        f"Wing_tr{train_samples_per_source}_te{test_samples_per_source}_"
         f"rffD{num_rff}_noiseTest{noise_test}_noiseTrain{noise_train}"
     )
+    if will_drop_source and fidelity_source is not None:
+        title = title.replace("Wing_", f"Wing_{WING_SOURCE_NAMES[fidelity_source]}_", 1)
     print("=" * 60)
     print(title)
     feature_dim = 2 * num_rff
+    input_dim_planned = WING_CONT_DIM if will_drop_source else WING_INPUT_DIM_MF
     print(
         f"RFF kernel (Woodbury), D={num_rff}, m={feature_dim}, ARD={ard}, "
-        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
+        f"input_dim={input_dim_planned}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
     )
+    if single_fidelity:
+        print(
+            f"Single fidelity: {WING_SOURCE_NAMES[fidelity_source]} "
+            f"(source column {'dropped' if will_drop_source else 'kept'})"
+        )
+    else:
+        print(f"Multi-fidelity: active sources {[WING_SOURCE_NAMES[i] for i in active_sources]}")
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
-    print(f"Woodbury: n_train={n_train}, m/n={feature_dim / n_train:.4f}")
+    print(f"Woodbury: n_train={n_train}, n_test={n_test}, m/n={feature_dim / n_train:.4f}")
     if feature_dim >= n_train:
         print(
             f"WARNING: m={feature_dim} >= n_train={n_train}; Woodbury may not beat dense GP. "
@@ -118,27 +217,44 @@ def run_ackley_40d_rff(
         )
     print("=" * 60)
 
-    n_val = compute_n_val(n_train, val_fraction) if monitor_validation else 0
+    val_samples_per_source = (
+        compute_val_samples_per_source(train_samples_per_source, val_fraction)
+        if monitor_validation
+        else [0, 0, 0, 0]
+    )
+    n_val = sum(val_samples_per_source)
     if monitor_validation and validation_verbose:
         print(f"Validation monitoring: n_val={n_val} ({val_fraction:.0%} of n_train={n_train})")
 
-    data = generate_ackley_data(
-        n_train=n_train,
-        n_test=num_test,
-        n_val=n_val,
-        dimensions=dimensions,
-        x_bounds=list(x_bounds),
-        train_noise=noise_train,
-        test_noise=noise_test,
-        noise_type=noise_type,
+    data = generate_mf_wing_data(
+        train_samples_per_source=train_samples_per_source,
+        test_samples_per_source=test_samples_per_source,
+        val_samples_per_source=val_samples_per_source,
         seed=seed,
+        train_noise=train_noise,
+        test_noise=test_noise,
+        noise_type=noise_type,
     )
     x_train, y_train, x_val, y_val, x_test, y_test = unpack_train_val_test(data)
 
     x_train = x_train.to(dtype=dtype)
+    x_val = x_val.to(dtype=dtype)
     x_test = x_test.to(dtype=dtype)
     y_train = y_train.to(dtype=dtype)
+    y_val = y_val.to(dtype=dtype)
     y_test = y_test.to(dtype=dtype)
+
+    x_train, x_test, input_dim, fidelity_source, dropped_source_column = _prepare_wing_inputs(
+        x_train,
+        x_test,
+        train_samples_per_source,
+        test_samples_per_source,
+        drop_source_column=drop_source_column,
+    )
+    if dropped_source_column and x_val.numel() > 0:
+        x_val = x_val[:, :WING_CONT_DIM].contiguous()
+    if dropped_source_column:
+        print(f"Using {input_dim} continuous inputs (dropped source-id column).")
 
     x_scaling_type = "None"
     x_scaler = None
@@ -258,9 +374,17 @@ def run_ackley_40d_rff(
 
     metrics = {
         "title": title,
-        "dimensions": dimensions,
+        "input_dim": input_dim,
+        "single_fidelity": single_fidelity,
+        "fidelity_source": WING_SOURCE_NAMES[fidelity_source] if fidelity_source is not None else None,
+        "fidelity_source_index": fidelity_source,
+        "drop_source_column": dropped_source_column,
+        "active_sources": [WING_SOURCE_NAMES[i] for i in active_sources],
+        "n_sources": WING_NUM_SOURCES,
+        "train_samples_per_source": train_samples_per_source,
+        "test_samples_per_source": test_samples_per_source,
         "n_train": n_train,
-        "n_test": num_test,
+        "n_test": n_test,
         "num_rff": num_rff,
         "feature_dim": 2 * num_rff,
         "ard": ard,
@@ -268,8 +392,8 @@ def run_ackley_40d_rff(
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
         "best_train_loss": best_loss,
-        "noise_train": noise_train,
-        "noise_test": noise_test,
+        "noise_train": train_noise,
+        "noise_test": test_noise,
         "noise_type": noise_type,
         **learned_noise,
         "standardize_x": standardize_x,
@@ -281,6 +405,7 @@ def run_ackley_40d_rff(
         metrics["monitor_validation"] = True
         metrics["val_fraction"] = val_fraction
         metrics["n_val"] = n_val
+        metrics["val_samples_per_source"] = val_samples_per_source
         metrics.update(summarize_validation_from_runs(runs, best_run))
 
     print(
@@ -294,9 +419,6 @@ def run_ackley_40d_rff(
     if save_path:
         out_json = save_metrics_json(metrics, save_path, title)
         print(f"Saved metrics to {out_json}")
-        if plot_validation and monitor_validation and n_val > 0:
-            for plot_path in plot_validation_curves_after_save(metrics, save_path, out_json):
-                print(f"Saved validation plot to {plot_path}")
 
     return metrics
 
@@ -304,13 +426,26 @@ def run_ackley_40d_rff(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus RFF (no SEEK)")
-    parser.add_argument("--dimensions", type=int, default=10)
-    parser.add_argument("--train-size", type=int, default=10, help="train points per dimension")
+    parser = argparse.ArgumentParser(description="Multi-fidelity Wing with GPPlus RFF")
+    parser.add_argument(
+        "--train-per-source",
+        type=int,
+        nargs=4,
+        default=[400, 0, 0, 0],
+        metavar=("S0", "S1", "S2", "S3"),
+        help="Training samples per fidelity source",
+    )
+    parser.add_argument(
+        "--test-per-source",
+        type=int,
+        nargs=4,
+        default=[5000, 0, 0, 0],
+        metavar=("S0", "S1", "S2", "S3"),
+        help="Test samples per fidelity source",
+    )
     parser.add_argument("--num-rff", type=int, default=100, help="D (RFF frequencies); default min(512, n_train//3)")
-    parser.add_argument("--num-test", type=int, default=5000)
-    parser.add_argument("--noise-train", type=float, default=0.005)
-    parser.add_argument("--noise-test", type=float, default=0.005)
+    parser.add_argument("--noise-train", type=float, default=0.005, help="Train noise scale (all sources)")
+    parser.add_argument("--noise-test", type=float, default=0.005, help="Test noise scale (all sources)")
     parser.add_argument("--noise-type", type=str, default="gaussian", choices=("gaussian", "uniform"))
     parser.add_argument("--num-inits", type=int, default=16)
     parser.add_argument(
@@ -332,7 +467,6 @@ if __name__ == "__main__":
         type=str,
         default="float64",
         choices=("float32", "float64"),
-        help="float32 is faster on CPU with similar quality for RFF",
     )
     parser.add_argument(
         "--predict-chunk-size",
@@ -341,23 +475,18 @@ if __name__ == "__main__":
         help="Test points per Woodbury predict chunk (0 = single batch)",
     )
     parser.add_argument(
+        "--ard",
+       type=bool,
+       default=True,
+       help="Automatic relevance determination",
+    )
+    parser.add_argument(
         "--n-jobs",
         type=int,
         default=-1,
         help="Parallel hyperparameter inits (-1 = all cores)",
     )
-    parser.add_argument(
-        "--ard",
-       type=bool,
-       default=False,
-       help="Automatic relevance determination",
-    )
-    parser.add_argument("--save-path", type=str, default="experiments_RFF/results/ackley_test_val")
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip validation curve plots after saving JSON",
-    )
+    parser.add_argument("--save-path", type=str, default="experiments_RFF/results/wing_rff")
     args = parser.parse_args()
 
     gpplus.config.configure_logger()
@@ -369,11 +498,10 @@ if __name__ == "__main__":
     if args.num_epochs > 1 and args.lr is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
 
-    run_ackley_40d_rff(
-        dimensions=args.dimensions,
-        train_size=args.train_size,
+    run_wing_rff(
+        train_samples_per_source=list(args.train_per_source),
+        test_samples_per_source=list(args.test_per_source),
         num_rff=args.num_rff,
-        num_test=args.num_test,
         noise_train=args.noise_train,
         noise_test=args.noise_test,
         noise_type=args.noise_type,
@@ -383,9 +511,8 @@ if __name__ == "__main__":
         seed=args.seed,
         device=args.device,
         dtype=dtype,
-        ard=args.ard,
         save_path=args.save_path,
+        ard=args.ard,
         n_jobs=n_jobs,
         predict_chunk_size=args.predict_chunk_size,
-        plot_validation=not args.no_plot,
     )
