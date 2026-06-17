@@ -178,3 +178,7 @@ init_*/
 kernel_tables/
 gpplus_N*/
 gpvspfnDecResults/
+GPvs*/
+matrix_debug_results/
+paper_tables*/
+power_exponential_*/
