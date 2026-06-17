@@ -1,5 +1,5 @@
 """
-Ackley XXD (XX=number of dimensions) benchmark with GPPlus RFF kernel (Woodbury inference).
+Ackley XXD (XX=number of dimensions) benchmark with GPPlus ORF kernel (Woodbury inference).
 
 Uses RFFGPR + LogScaleKernel(RFFKernel) only — no SEEK or other composite kernels.
 Tuned defaults align with experiments_revisions_april/A4_ackley_GPvsPFN.py (Gaussian baseline).
@@ -15,8 +15,8 @@ import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_RFF_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _RFF_DIR):
+_ORF_DIR = Path(__file__).resolve().parent
+for p in (_ROOT, _ORF_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -31,7 +31,7 @@ from gpplus.training import (
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
 from load_experimental_data import generate_ackley_data
-from rff_experiment_utils import (
+from orf_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
     VAL_SEED_OFFSET,
@@ -47,10 +47,10 @@ from rff_experiment_utils import (
 )
 
 
-def run_ackley_40d_rff(
+def run_ackley_40d_orf(
     dimensions: int = 40,
     train_size: int = 40,
-    num_rff: int | None = None,
+    num_orf: int | None = None,
     num_test: int = 5000,
     x_bounds: tuple[float, float] = (-5.0, 10.0),
     noise_train: float = 0.0,
@@ -61,7 +61,7 @@ def run_ackley_40d_rff(
     num_epochs: int = 1,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
-    save_path: str | None = "experiments_RFF/results/ackley_40D_rff",
+    save_path: str | None = "experiments_ORF/results/ackley_40D_orf",
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
@@ -75,18 +75,18 @@ def run_ackley_40d_rff(
     plot_validation: bool = True,
 ) -> dict:
     """
-    Train RFF-GP on Ackley and evaluate on held-out Sobol test points.
+    Train ORF-GP on Ackley and evaluate on held-out Sobol test points.
 
     Parameters
     ----------
     train_size : training points per input dimension (total train n = train_size * dimensions).
-    num_rff : D in RFF (feature dimension m = 2*D). Default: min(512, n_train // 3).
+    num_orf : D in RFF (feature dimension m = 2*D). Default: min(512, n_train // 3).
     num_epochs : Training epochs per init. Use 1 with LBFGSScipy; increase for Adam.
     """
     set_seed(seed)
     n_train = train_size * dimensions
-    if num_rff is None:
-        num_rff = min(512, max(64, n_train // 3))
+    if num_orf is None:
+        num_orf = min(512, max(64, n_train // 3))
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -99,13 +99,13 @@ def run_ackley_40d_rff(
 
     title = (
         f"Ackley_{dimensions}Dx_{train_size}Dn_{list(x_bounds)}_"
-        f"rffD{num_rff}_noiseTest{noise_test}_noiseTrain{noise_train}"
+        f"orfD{num_orf}_noiseTest{noise_test}_noiseTrain{noise_train}"
     )
     print("=" * 60)
     print(title)
-    feature_dim = 2 * num_rff
+    feature_dim = 2 * num_orf
     print(
-        f"RFF kernel (Woodbury), D={num_rff}, m={feature_dim}, ARD={ard}, "
+        f"ORF kernel (Woodbury), D={num_orf}, m={feature_dim}, ARD={ard}, "
         f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
@@ -114,7 +114,7 @@ def run_ackley_40d_rff(
     if feature_dim >= n_train:
         print(
             f"WARNING: m={feature_dim} >= n_train={n_train}; Woodbury may not beat dense GP. "
-            f"Consider num_rff <= {max(1, n_train // 2 - 1)}."
+            f"Consider num_orf <= {max(1, n_train // 2 - 1)}."
         )
     print("=" * 60)
 
@@ -191,7 +191,7 @@ def run_ackley_40d_rff(
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_rff, ard=ard)
+    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, orthogonal=True)
 
     trainer = GPTrainer(
         model,
@@ -261,8 +261,9 @@ def run_ackley_40d_rff(
         "dimensions": dimensions,
         "n_train": n_train,
         "n_test": num_test,
-        "num_rff": num_rff,
-        "feature_dim": 2 * num_rff,
+        "num_orf": num_orf,
+        "orthogonal_orf": True,
+        "feature_dim": 2 * num_orf,
         "ard": ard,
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
@@ -304,10 +305,10 @@ def run_ackley_40d_rff(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus RFF (no SEEK)")
+    parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus ORF (no SEEK)")
     parser.add_argument("--dimensions", type=int, default=10)
     parser.add_argument("--train-size", type=int, default=10, help="train points per dimension")
-    parser.add_argument("--num-rff", type=int, default=100, help="D (RFF frequencies); default min(512, n_train//3)")
+    parser.add_argument("--num-orf", type=int, default=200, help="D (ORF frequencies); default min(512, n_train//3)")
     parser.add_argument("--num-test", type=int, default=5000)
     parser.add_argument("--noise-train", type=float, default=0.005)
     parser.add_argument("--noise-test", type=float, default=0.005)
@@ -352,7 +353,7 @@ if __name__ == "__main__":
        default=False,
        help="Automatic relevance determination",
     )
-    parser.add_argument("--save-path", type=str, default="experiments_RFF/results/ackley_test_val")
+    parser.add_argument("--save-path", type=str, default="experiments_ORF/results/ackley_test_val")
     parser.add_argument(
         "--no-plot",
         action="store_true",
@@ -369,10 +370,10 @@ if __name__ == "__main__":
     if args.num_epochs > 1 and args.lr is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
 
-    run_ackley_40d_rff(
+    run_ackley_40d_orf(
         dimensions=args.dimensions,
         train_size=args.train_size,
-        num_rff=args.num_rff,
+        num_orf=args.num_orf,
         num_test=args.num_test,
         noise_train=args.noise_train,
         noise_test=args.noise_test,

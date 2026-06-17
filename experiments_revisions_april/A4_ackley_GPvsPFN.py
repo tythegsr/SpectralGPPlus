@@ -472,12 +472,12 @@ def ackley_GPvsPFN(
 if __name__ == "__main__":
     # Gaussian GP baseline (match experiments_RFF/A4_ackley_40D_RFF.py: 40D, 40 pts/dim, noise 0.005, seed 42)
     ackley_GPvsPFN(
-        num_runs=1,
+        num_runs=10,
         train_size=10,
         dimensions=10,
         num_inits=16,
         num_epochs=1,
-        save_path="experiments_revisions_april/results/ackley_40D_gaussian",
+        save_path="experiments_revisions_april/results_test_val/ackley_10D_gaussian",
         run_models="gp",
         single_dataset=True,
         noise_test=0.005,

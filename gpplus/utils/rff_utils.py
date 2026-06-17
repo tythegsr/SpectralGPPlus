@@ -34,6 +34,33 @@ from torch import Tensor
 logger = logging.getLogger(__name__)
 
 
+def _sample_orf_weights(
+    num_dims: int,
+    num_samples: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """
+    Yu et al. full ORF (arXiv:1610.09072 Eq. 2): W = S @ Q with chi(d) column scales.
+
+    Returns W of shape (num_dims, num_samples); column j is w_j = s_j * q_j.
+    When num_samples > num_dims, draws independent ORF blocks of size num_dims.
+    """
+    d = num_dims
+    cols: list[Tensor] = []
+    remaining = num_samples
+    while remaining > 0:
+        block = min(d, remaining)
+        g = torch.randn(d, d, device=device, dtype=dtype)
+        q, _ = torch.linalg.qr(g)
+        # chi(d): norm of a d-dimensional standard Gaussian vector
+        s = torch.randn(block, d, device=device, dtype=dtype).norm(dim=1)
+        cols.append(q[:, :block] * s.unsqueeze(0))
+        remaining -= block
+    return torch.cat(cols, dim=1)[:, :num_samples]
+
+
 def init_rbf_weights(
     num_dims: int,
     num_samples: int,
@@ -45,33 +72,21 @@ def init_rbf_weights(
     """
     Draw RBF random frequencies W with shape (num_dims, num_samples).
 
+    When ``orthogonal=True``, uses full ORF (Yu et al. 1610.09072): random
+    orthogonal Q from QR plus per-frequency chi(d) scaling (S @ Q).
+
     When ``lengthscale`` is provided (GPPlus 10^(raw/2) per dimension), scales
-    draws as ω_d ~ N(0, 1/lengthscale_d²) so features match the learned ARD
-    bandwidth (Rahimi & Recht / Bochner).
+    draws as omega_d ~ N(0, 1/lengthscale_d^2) after the base draw (i.i.d. or ORF).
     """
     dev = device or torch.device("cpu")
     dt = dtype or torch.float32
-    w = torch.randn(num_dims, num_samples, device=dev, dtype=dt)
+    if orthogonal:
+        w = _sample_orf_weights(num_dims, num_samples, device=dev, dtype=dt)
+    else:
+        w = torch.randn(num_dims, num_samples, device=dev, dtype=dt)
     if lengthscale is not None:
         inv_ls = 1.0 / lengthscale.clamp_min(1e-12)
         w = w * inv_ls.unsqueeze(-1)
-    if orthogonal and num_dims >= num_samples:
-        # Orthogonal random features (ORF): lower variance for same D.
-        q, _ = torch.linalg.qr(w, mode="reduced")
-        w = q[:, :num_samples]
-    elif orthogonal and num_samples > num_dims:
-        blocks = []
-        remaining = num_samples
-        while remaining > 0:
-            block_cols = min(num_dims, remaining)
-            block = torch.randn(num_dims, block_cols, device=dev, dtype=dt)
-            q, _ = torch.linalg.qr(block, mode="reduced")
-            blocks.append(q[:, :block_cols])
-            remaining -= block_cols
-        w = torch.cat(blocks, dim=1)[:, :num_samples]
-        if lengthscale is not None:
-            inv_ls = 1.0 / lengthscale.clamp_min(1e-12)
-            w = w * inv_ls.unsqueeze(-1)
     return w
 
 

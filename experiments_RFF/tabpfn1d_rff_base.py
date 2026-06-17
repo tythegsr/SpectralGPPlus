@@ -1,15 +1,15 @@
 """
-Ackley XXD (XX=number of dimensions) benchmark with GPPlus RFF kernel (Woodbury inference).
-
-Uses RFFGPR + LogScaleKernel(RFFKernel) only — no SEEK or other composite kernels.
-Tuned defaults align with experiments_revisions_april/A4_ackley_GPvsPFN.py (Gaussian baseline).
+Shared 1D TabPFN-style toy benchmark runner using RFF-GP (Woodbury inference).
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -20,7 +20,6 @@ for p in (_ROOT, _RFF_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-import gpplus
 from gpplus.models import RFFGPR
 from gpplus.training import (
     GPTrainer,
@@ -30,38 +29,45 @@ from gpplus.training import (
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from load_experimental_data import generate_ackley_data
+from plot_rff1d_predictions import save_rff1d_prediction_plot
+from tabpfn1d_eval import eval_tabpfn_1d
 from rff_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
     VAL_SEED_OFFSET,
+    build_1d_run_file_tag,
     compute_n_val,
     extract_learned_likelihood_noise,
     json_safe_optimizer_kwargs,
     make_validation_callback,
     save_metrics_json,
-    plot_validation_curves_after_save,
     scale_validation_tensors,
     summarize_validation_from_runs,
     unpack_train_val_test,
 )
 
 
-def run_ackley_40d_rff(
-    dimensions: int = 40,
-    train_size: int = 40,
+def run_tabpfn1d_rff(
+    *,
+    problem_name: str,
+    generate_data_fn: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
+    true_fn: Callable[[torch.Tensor], torch.Tensor],
+    train_size: int = 10,
     num_rff: int | None = None,
     num_test: int = 5000,
-    x_bounds: tuple[float, float] = (-5.0, 10.0),
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    test_outside_margin: float = 0.0,
+    generate_data_kwargs: dict[str, Any] | None = None,
     noise_train: float = 0.0,
     noise_test: float = 0.0,
     noise_type: str = "gaussian",
     seed: int = 42,
-    num_inits: int = 8,
+    num_inits: int = 16,
     num_epochs: int = 1,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
-    save_path: str | None = "experiments_RFF/results/ackley_40D_rff",
+    save_path: str | None = None,
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
@@ -69,22 +75,23 @@ def run_ackley_40d_rff(
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
-    monitor_validation: bool = True,
+    plot_1d: bool = True,
+    monitor_validation: bool = False,
     val_fraction: float = 0.2,
-    validation_verbose: bool = True,
-    plot_validation: bool = True,
+    validation_verbose: bool = False,
+    run_tabpfn: bool = True,
+    pfn_device: str = "cpu",
+    run_models: str | None = None,
 ) -> dict:
-    """
-    Train RFF-GP on Ackley and evaluate on held-out Sobol test points.
+    """Train RFF-GP on a 1D toy function and evaluate on a (possibly extended) test grid."""
+    if x_bounds is None:
+        x_bounds = [-0.5, 0.5]
+    if test_x_bounds is None:
+        test_x_bounds = [x_bounds[0] - test_outside_margin, x_bounds[1] + test_outside_margin]
 
-    Parameters
-    ----------
-    train_size : training points per input dimension (total train n = train_size * dimensions).
-    num_rff : D in RFF (feature dimension m = 2*D). Default: min(512, n_train // 3).
-    num_epochs : Training epochs per init. Use 1 with LBFGSScipy; increase for Adam.
-    """
     set_seed(seed)
-    n_train = train_size * dimensions
+    dimensions = 1
+    n_train = train_size
     if num_rff is None:
         num_rff = min(512, max(64, n_train // 3))
 
@@ -97,9 +104,13 @@ def run_ackley_40d_rff(
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
+    gen_kwargs = dict(generate_data_kwargs or {})
+    frequency = gen_kwargs.get("frequency")
+
     title = (
-        f"Ackley_{dimensions}Dx_{train_size}Dn_{list(x_bounds)}_"
-        f"rffD{num_rff}_noiseTest{noise_test}_noiseTrain{noise_train}"
+        f"TabPFN1D_{problem_name}_{train_size}Dn_{x_bounds}_"
+        f"rffD{num_rff}_ood{test_outside_margin}_"
+        f"noiseTest{noise_test}_noiseTrain{noise_train}"
     )
     print("=" * 60)
     print(title)
@@ -108,32 +119,34 @@ def run_ackley_40d_rff(
         f"RFF kernel (Woodbury), D={num_rff}, m={feature_dim}, ARD={ard}, "
         f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
     )
-    opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
-    print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
-    print(f"Woodbury: n_train={n_train}, m/n={feature_dim / n_train:.4f}")
-    if feature_dim >= n_train:
-        print(
-            f"WARNING: m={feature_dim} >= n_train={n_train}; Woodbury may not beat dense GP. "
-            f"Consider num_rff <= {max(1, n_train // 2 - 1)}."
-        )
-    print("=" * 60)
-
+    print(f"Train x in {x_bounds}, test x in {test_x_bounds}")
+    if frequency is not None:
+        print(f"Frequency: {float(frequency):g}  (f(x) = sin({float(frequency):g} * pi * x))")
     n_val = compute_n_val(n_train, val_fraction) if monitor_validation else 0
     if monitor_validation and validation_verbose:
         print(f"Validation monitoring: n_val={n_val} ({val_fraction:.0%} of n_train={n_train})")
-
-    data = generate_ackley_data(
+    print("=" * 60)
+    data = generate_data_fn(
         n_train=n_train,
         n_test=num_test,
-        n_val=n_val,
         dimensions=dimensions,
-        x_bounds=list(x_bounds),
+        x_bounds=x_bounds,
+        test_x_bounds=test_x_bounds,
         train_noise=noise_train,
         test_noise=noise_test,
         noise_type=noise_type,
         seed=seed,
+        n_val=n_val,
+        val_seed=seed + VAL_SEED_OFFSET if n_val > 0 else None,
+        **gen_kwargs,
     )
     x_train, y_train, x_val, y_val, x_test, y_test = unpack_train_val_test(data)
+
+    x_train_raw = x_train[:, 0].detach().cpu().to(dtype=torch.float64).numpy().ravel()
+    y_train_raw = y_train.detach().cpu().to(dtype=torch.float64).numpy().ravel()
+    x_test_raw = x_test[:, 0].detach().cpu().to(dtype=torch.float64).numpy().ravel()
+    y_test_raw = y_test.detach().cpu().to(dtype=torch.float64).numpy().ravel()
+    y_true_test = true_fn(x_test.to(dtype=torch.float64)).detach().cpu().numpy().ravel()
 
     x_train = x_train.to(dtype=dtype)
     x_test = x_test.to(dtype=dtype)
@@ -256,10 +269,30 @@ def run_ackley_40d_rff(
         prediction_time=prediction_time,
     )
 
+    tabpfn_metrics: dict | None = None
+    pred_tabpfn_np: np.ndarray | None = None
+    std_tabpfn_np: np.ndarray | None = None
+    if run_tabpfn and run_models in (None, "pfn"):
+        print("\n--- TabPFN training/eval (raw x/y, no GP preprocessing) ---")
+        tabpfn_metrics, pred_tabpfn_np, std_tabpfn_np = eval_tabpfn_1d(
+            x_train_raw=x_train_raw,
+            x_test_raw=x_test_raw,
+            y_train_raw=y_train_raw,
+            y_test=y_test_raw,
+            seed=seed,
+            pfn_device=pfn_device,
+        )
+        print(
+            f"TabPFN test RMSE: {tabpfn_metrics.get('RMSE', float('nan')):.6f}  "
+            f"RRMSE: {tabpfn_metrics.get('RRMSE', float('nan')):.6f}"
+        )
+
     metrics = {
         "title": title,
+        "problem_name": problem_name,
         "dimensions": dimensions,
         "n_train": n_train,
+        "train_size": train_size,
         "n_test": num_test,
         "num_rff": num_rff,
         "feature_dim": 2 * num_rff,
@@ -272,9 +305,13 @@ def run_ackley_40d_rff(
         "noise_test": noise_test,
         "noise_type": noise_type,
         **learned_noise,
+        "x_bounds": list(x_bounds),
+        "test_x_bounds": list(test_x_bounds),
+        "test_outside_margin": test_outside_margin,
         "standardize_x": standardize_x,
         "x_standardize_method": x_standardize_method,
         "x_scaling_type": x_scaling_type,
+        **gen_kwargs,
         **computed,
     }
     if monitor_validation and n_val > 0:
@@ -282,6 +319,8 @@ def run_ackley_40d_rff(
         metrics["val_fraction"] = val_fraction
         metrics["n_val"] = n_val
         metrics.update(summarize_validation_from_runs(runs, best_run))
+    if tabpfn_metrics is not None:
+        metrics["tabpfn_metrics"] = tabpfn_metrics
 
     print(
         f"\nTest RMSE: {computed['RMSE']:.6f}  RRMSE: {computed['RRMSE']:.6f}  "
@@ -289,103 +328,76 @@ def run_ackley_40d_rff(
     )
     if "NIS" in computed:
         print(f"NIS: {computed['NIS']:.4f}")
+    print(
+        f"Learned noise_std: {learned_noise.get('noise_std', float('nan')):.6f}  "
+        f"(injected noise_test: {noise_test})"
+    )
     print(f"Best training loss: {best_loss:.4f}  Time: {train_time:.1f}s")
 
+    pred_np = pred_mean.numpy().ravel()
+    std_np = pred_std.numpy().ravel()
+    lower_np = lower.numpy().ravel()
+    upper_np = upper.numpy().ravel()
+
     if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        file_tag = build_1d_run_file_tag(
+            train_size=train_size,
+            noise_train=noise_train,
+            noise_test=noise_test,
+            seed=seed,
+            test_outside_margin=test_outside_margin,
+            frequency=float(frequency) if frequency is not None else None,
+        )
+        npz_path = os.path.join(save_path, f"predictions_1d_{file_tag}.npz")
+        npz_kwargs: dict[str, Any] = dict(
+            x_train=x_train_raw,
+            y_train=y_train_raw,
+            x_test=x_test_raw,
+            y_true=y_true_test,
+            y_pred=pred_np,
+            y_std=std_np,
+            lower_95=lower_np,
+            upper_95=upper_np,
+            x_bounds=np.array(x_bounds, dtype=np.float64),
+            test_x_bounds=np.array(test_x_bounds, dtype=np.float64),
+            title=title,
+            seed=seed,
+            train_size=train_size,
+            noise_train=noise_train,
+            noise_test=noise_test,
+            test_outside_margin=test_outside_margin,
+            file_tag=file_tag,
+            frequency=float(frequency) if frequency is not None else np.nan,
+        )
+        if pred_tabpfn_np is not None:
+            npz_kwargs["y_pred_tabpfn"] = pred_tabpfn_np
+            npz_kwargs["y_std_tabpfn"] = std_tabpfn_np
+            npz_kwargs["run_tabpfn"] = True
+        np.savez(npz_path, **npz_kwargs)
+        print(f"Saved 1D predictions to {npz_path}")
+
         out_json = save_metrics_json(metrics, save_path, title)
         print(f"Saved metrics to {out_json}")
-        if plot_validation and monitor_validation and n_val > 0:
-            for plot_path in plot_validation_curves_after_save(metrics, save_path, out_json):
-                print(f"Saved validation plot to {plot_path}")
+
+        if plot_1d:
+            plot_dir = os.path.join(save_path, "plots", "prediction_runs")
+            fp = save_rff1d_prediction_plot(
+                x_train_raw,
+                y_train_raw,
+                x_test_raw,
+                pred_np,
+                std_np,
+                plot_dir,
+                title=title,
+                run_index=seed,
+                y_true_test=y_true_test,
+                x_bounds=x_bounds,
+                test_x_bounds=test_x_bounds,
+                file_tag=file_tag,
+                y_pred_tabpfn=pred_tabpfn_np,
+                y_std_tabpfn=std_tabpfn_np,
+            )
+            print(f"Saved 1D plot to {fp}")
 
     return metrics
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus RFF (no SEEK)")
-    parser.add_argument("--dimensions", type=int, default=10)
-    parser.add_argument("--train-size", type=int, default=10, help="train points per dimension")
-    parser.add_argument("--num-rff", type=int, default=100, help="D (RFF frequencies); default min(512, n_train//3)")
-    parser.add_argument("--num-test", type=int, default=5000)
-    parser.add_argument("--noise-train", type=float, default=0.005)
-    parser.add_argument("--noise-test", type=float, default=0.005)
-    parser.add_argument("--noise-type", type=str, default="gaussian", choices=("gaussian", "uniform"))
-    parser.add_argument("--num-inits", type=int, default=16)
-    parser.add_argument(
-        "--num-epochs",
-        type=int,
-        default=1,
-        help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=0.1,
-        help="Adam learning rate (only when --num-epochs > 1; default 0.1)",
-    )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="float64",
-        choices=("float32", "float64"),
-        help="float32 is faster on CPU with similar quality for RFF",
-    )
-    parser.add_argument(
-        "--predict-chunk-size",
-        type=int,
-        default=512,
-        help="Test points per Woodbury predict chunk (0 = single batch)",
-    )
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=-1,
-        help="Parallel hyperparameter inits (-1 = all cores)",
-    )
-    parser.add_argument(
-        "--ard",
-       type=bool,
-       default=False,
-       help="Automatic relevance determination",
-    )
-    parser.add_argument("--save-path", type=str, default="experiments_RFF/results/ackley_test_val")
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip validation curve plots after saving JSON",
-    )
-    args = parser.parse_args()
-
-    gpplus.config.configure_logger()
-
-    dtype = torch.float32 if args.dtype == "float32" else torch.float64
-    n_jobs = None if args.n_jobs < 0 else args.n_jobs
-
-    optimizer_kwargs = None
-    if args.num_epochs > 1 and args.lr is not None:
-        optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
-
-    run_ackley_40d_rff(
-        dimensions=args.dimensions,
-        train_size=args.train_size,
-        num_rff=args.num_rff,
-        num_test=args.num_test,
-        noise_train=args.noise_train,
-        noise_test=args.noise_test,
-        noise_type=args.noise_type,
-        num_inits=args.num_inits,
-        num_epochs=args.num_epochs,
-        optimizer_kwargs=optimizer_kwargs,
-        seed=args.seed,
-        device=args.device,
-        dtype=dtype,
-        ard=args.ard,
-        save_path=args.save_path,
-        n_jobs=n_jobs,
-        predict_chunk_size=args.predict_chunk_size,
-        plot_validation=not args.no_plot,
-    )

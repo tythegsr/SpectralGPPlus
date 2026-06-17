@@ -802,3 +802,85 @@ def compute_training_metrics_batch(
         model.train()
 
     return out
+
+
+def _gaussian_predictive_nll(
+    y_true: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+) -> float:
+    """Mean negative log predictive density under a Gaussian (observation noise included in pred_std)."""
+    y_flat = y_true.view(-1).to(dtype=pred_mean.dtype)
+    mean = pred_mean.view(-1)
+    var = (pred_std.view(-1) ** 2).clamp_min(eps)
+    resid = y_flat - mean
+    nll = 0.5 * (torch.log(2 * torch.pi * var) + (resid * resid) / var)
+    val = nll.mean()
+    return float(val.item()) if torch.isfinite(val) else float("nan")
+
+
+def _relative_rmse(y_true: torch.Tensor, pred_mean: torch.Tensor, *, eps: float = 1e-12) -> float:
+    """RRMSE = RMSE / std(y_true), matching compute_metrics."""
+    y_flat = y_true.view(-1).to(dtype=pred_mean.dtype)
+    mean = pred_mean.view(-1)
+    mse = ((y_flat - mean) ** 2).mean()
+    denom = y_flat.std(unbiased=False).clamp_min(eps)
+    rrmse = mse.sqrt() / denom
+    return float(rrmse.item()) if torch.isfinite(rrmse) else float("nan")
+
+
+def compute_validation_metrics(
+    model,
+    val_x: torch.Tensor,
+    val_y: torch.Tensor,
+    *,
+    cholesky_jitter: Optional[float] = None,
+    chunk_size: int = 512,
+) -> Dict[str, float]:
+    """
+    Compute validation metrics on held-out points (not used for training).
+
+    Returns val_NLL (mean negative log predictive density) and val_RRMSE.
+    """
+    if val_x.numel() == 0 or val_y.numel() == 0:
+        return {"val_NLL": float("nan"), "val_RRMSE": float("nan")}
+
+    jitter = _get_metric_jitter(model, cholesky_jitter)
+    val_x = val_x.to(device=next(model.parameters()).device, dtype=getattr(model, "dtype", torch.float64))
+    val_y = val_y.to(device=val_x.device, dtype=val_x.dtype)
+
+    was_training = model.training
+    try:
+        from ..models.rff_gpr import RFFGPR
+        is_rff = isinstance(model, RFFGPR)
+    except ImportError:
+        is_rff = False
+
+    try:
+        with torch.no_grad():
+            if is_rff:
+                from .eval import evaluate_rff_gp_model
+
+                if hasattr(model, "invalidate_feature_cache"):
+                    model.invalidate_feature_cache()
+                pred_mean, _, _, pred_std = evaluate_rff_gp_model(
+                    model, val_x, jitter=jitter, chunk_size=chunk_size
+                )
+            else:
+                from .eval import evaluate_gp_model
+
+                pred_mean, _, _, pred_std = evaluate_gp_model(model, val_x)
+
+            val_nll = _gaussian_predictive_nll(val_y, pred_mean, pred_std)
+            val_rrmse = _relative_rmse(val_y, pred_mean)
+    except Exception:
+        return {"val_NLL": float("nan"), "val_RRMSE": float("nan")}
+    finally:
+        if was_training:
+            model.train()
+        else:
+            model.eval()
+
+    return {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
