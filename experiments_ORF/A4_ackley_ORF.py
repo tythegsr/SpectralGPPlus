@@ -191,7 +191,7 @@ def run_ackley_40d_orf(
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, orthogonal=True)
+    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, rff_sampling="orf")
 
     trainer = GPTrainer(
         model,
@@ -262,7 +262,7 @@ def run_ackley_40d_orf(
         "n_train": n_train,
         "n_test": num_test,
         "num_orf": num_orf,
-        "orthogonal_orf": True,
+        "rff_sampling": "orf",
         "feature_dim": 2 * num_orf,
         "ard": ard,
         "num_epochs": num_epochs,
@@ -307,8 +307,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus ORF (no SEEK)")
     parser.add_argument("--dimensions", type=int, default=10)
-    parser.add_argument("--train-size", type=int, default=10, help="train points per dimension")
-    parser.add_argument("--num-orf", type=int, default=200, help="D (ORF frequencies); default min(512, n_train//3)")
+    parser.add_argument("--train-size", type=int, default=40, help="train points per dimension")
+    parser.add_argument("--num-orf", type=int, default=500, help="D (ORF frequencies); default min(512, n_train//3)")
     parser.add_argument("--num-test", type=int, default=5000)
     parser.add_argument("--noise-train", type=float, default=0.005)
     parser.add_argument("--noise-test", type=float, default=0.005)

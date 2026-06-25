@@ -1,5 +1,5 @@
 """
-Single-fidelity Wing (s0): train ORF-GP and TabPFN, then plot marginal slice UQ comparisons.
+Single-fidelity Wing (s0): train exact GP and TabPFN, then plot marginal slice UQ comparisons.
 
 Fixes all inputs except one dimension x_i (default: other dims at train median),
 sweeps x_i over physical bounds, and overlays true wing function vs both models.
@@ -15,36 +15,26 @@ from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ORF_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _ORF_DIR):
+_GP_DIR = Path(__file__).resolve().parent
+for p in (_ROOT, _GP_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 import gpplus
-from A1_wing_ORF import (
+from A1_wing_GP import (
     WING_CONT_DIM,
     WING_SOURCE_NAMES,
     _expand_per_source,
     _prepare_wing_inputs,
 )
-from gpplus.models import RFFGPR
-from gpplus.training import (
-    GPTrainer,
-    RFFParameterInitializer,
-    RFFWoodburyMarginalLogLikelihood,
-    evaluate_rff_gp_model,
-)
+from gpplus.training import GPTrainer, evaluate_gp_model
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, set_seed
 from gpplus.utils.train_eval import train_eval_PFN
-from load_experimental_data import generate_mf_wing_data, wing_mixed_variables
-from plot_multid_slice_predictions import (
-    sanitize_plot_subdir,
-    save_gp_tabpfn_marginal_slices,
-)
-from orf_experiment_utils import (
+from gp_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
+    build_gpr_model,
     compute_val_samples_per_source,
     extract_learned_likelihood_noise,
     json_default,
@@ -54,13 +44,17 @@ from orf_experiment_utils import (
     summarize_validation_from_runs,
     unpack_train_val_test,
 )
+from load_experimental_data import generate_mf_wing_data, wing_mixed_variables
+from plot_multid_slice_predictions import (
+    sanitize_plot_subdir,
+    save_gp_tabpfn_marginal_slices,
+)
 from tabpfn import TabPFNRegressor
 
 
-def run_wing_orf_vs_tabpfn(
+def run_wing_gp_vs_tabpfn(
     train_samples_per_source: list[int] | None = None,
     test_samples_per_source: list[int] | None = None,
-    num_orf: int | None = None,
     noise_train: float | list[float] = 0.005,
     noise_test: float | list[float] = 0.005,
     noise_type: str = "gaussian",
@@ -70,7 +64,7 @@ def run_wing_orf_vs_tabpfn(
     device: str = "cpu",
     pfn_device: str = "cpu",
     dtype: torch.dtype = torch.float64,
-    save_path: str | None = "experiments_ORF/results/wing_s0_ORF_vs_TabPFN",
+    save_path: str | None = "experiments_GP/results/wing_s0_GP_vs_TabPFN",
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
@@ -89,9 +83,9 @@ def run_wing_orf_vs_tabpfn(
     validation_verbose: bool = True,
 ) -> dict:
     """
-    Train ORF-GP and TabPFN on wing s0, evaluate on test set, and save slice UQ plots.
+    Train exact GP and TabPFN on wing s0, evaluate on test set, and save slice UQ plots.
 
-    run_models: None=both, 'orf'=ORF only, 'pfn'=TabPFN only (slice plots need both).
+    run_models: None=both, 'gp'=GP only, 'pfn'=TabPFN only (slice plots need both).
     """
     if train_samples_per_source is None:
         train_samples_per_source = [100, 0, 0, 0]
@@ -101,8 +95,6 @@ def run_wing_orf_vs_tabpfn(
     set_seed(seed)
     n_train = sum(train_samples_per_source)
     n_test = sum(test_samples_per_source)
-    if num_orf is None:
-        num_orf = min(512, max(64, n_train // 3))
 
     train_noise = _expand_per_source(noise_train)
     test_noise = _expand_per_source(noise_test)
@@ -117,14 +109,14 @@ def run_wing_orf_vs_tabpfn(
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
     title = (
-        f"wing_s0_ORFvsTabPFN_tr{train_samples_per_source}_te{test_samples_per_source}_"
-        f"orfD{num_orf}_noiseTest{noise_test}_noiseTrain{noise_train}"
+        f"wing_s0_GPvsTabPFN_tr{train_samples_per_source}_te{test_samples_per_source}_"
+        f"exactGP_noiseTest{noise_test}_noiseTrain{noise_train}"
     )
 
     print("=" * 60)
     print(title)
     print(
-        f"ORF-GP D={num_orf}, ARD={ard}, inits={num_inits}, epochs={num_epochs}, "
+        f"Exact GP, ARD={ard}, inits={num_inits}, epochs={num_epochs}, "
         f"TabPFN device={pfn_device}"
     )
     print("=" * 60)
@@ -189,13 +181,13 @@ def run_wing_orf_vs_tabpfn(
 
     y_mean, y_std = None, None
     y_scaler = None
-    y_train_orf = y_train.clone()
+    y_train_gp = y_train.clone()
     y_test_eval = y_test.clone()
     if standardize_y:
         y_scaler = StandardScaler()
         y_scaler.fit(y_train.unsqueeze(-1))
         y_mean, y_std = y_scaler.mean.squeeze(), y_scaler.std.squeeze()
-        y_train_orf = y_scaler.transform(y_train.unsqueeze(-1)).squeeze(-1)
+        y_train_gp = y_scaler.transform(y_train.unsqueeze(-1)).squeeze(-1)
 
     results: dict = {
         "title": title,
@@ -206,8 +198,7 @@ def run_wing_orf_vs_tabpfn(
         "test_samples_per_source": test_samples_per_source,
         "n_train": n_train,
         "n_test": n_test,
-        "num_orf": num_orf,
-        "rff_sampling": "orf",
+        "model": "exact_gp",
         "noise_train": train_noise,
         "noise_test": test_noise,
         "seed": seed,
@@ -218,10 +209,10 @@ def run_wing_orf_vs_tabpfn(
         "n_grid": n_grid,
     }
 
-    orf_model = None
-    orf_metrics: dict | None = None
-    if run_models in (None, "orf"):
-        print("\n--- ORF-GP training ---")
+    gp_model = None
+    gp_metrics: dict | None = None
+    if run_models in (None, "gp"):
+        print("\n--- Exact GP training ---")
         x_val_scaled, y_val_scaled = scale_validation_tensors(
             x_val,
             y_val,
@@ -242,10 +233,9 @@ def run_wing_orf_vs_tabpfn(
                     verbose=validation_verbose,
                 )
             )
-        model = RFFGPR(x_train, y_train_orf, num_rff=num_orf, ard=ard, rff_sampling="orf")
+        model = build_gpr_model(x_train, y_train_gp, ard=ard)
         trainer = GPTrainer(
             model,
-            mll_class=RFFWoodburyMarginalLogLikelihood,
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -253,7 +243,6 @@ def run_wing_orf_vs_tabpfn(
             dtype=dtype,
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
-            initializer_class=RFFParameterInitializer,
             n_jobs=n_jobs,
             inner_max_num_threads=1,
             cholesky_jitter=1e-6,
@@ -261,27 +250,24 @@ def run_wing_orf_vs_tabpfn(
         )
         t0 = time.time()
         runs = trainer.train()
-        orf_train_time = time.time() - t0
+        gp_train_time = time.time() - t0
 
         successful = [r for r in runs if r.get("loss") is not None and r.get("state_dict") is not None]
         if not successful:
             errors = [r.get("error", "unknown") for r in runs if r.get("error")]
             raise RuntimeError(
-                "All ORF training runs failed. "
+                "All GP training runs failed. "
                 + (f"First error: {errors[0]}" if errors else "")
             )
         best_run = min(successful, key=lambda r: r["loss"])
         model.load_state_dict(best_run["state_dict"])
-        orf_model = model
+        gp_model = model
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std)
 
         t1 = time.time()
         model.eval()
-        model.invalidate_feature_cache()
-        pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-            model, x_test, chunk_size=predict_chunk_size
-        )
-        orf_pred_time = time.time() - t1
+        pred_mean, lower, upper, pred_std = evaluate_gp_model(model, x_test)
+        gp_pred_time = time.time() - t1
         pred_mean = pred_mean.detach().cpu()
         pred_std = pred_std.detach().cpu()
         lower = lower.detach().cpu()
@@ -294,33 +280,32 @@ def run_wing_orf_vs_tabpfn(
 
         from gpplus.utils import compute_metrics
 
-        orf_computed = compute_metrics(
+        gp_computed = compute_metrics(
             y_test_eval.cpu(),
             pred_mean,
             output_std=pred_std,
             lower_95=lower,
             upper_95=upper,
-            training_time=orf_train_time,
-            prediction_time=orf_pred_time,
+            training_time=gp_train_time,
+            prediction_time=gp_pred_time,
         )
-        orf_metrics = {
-            "num_orf": num_orf,
-            "rff_sampling": "orf",
+        gp_metrics = {
+            "model": "exact_gp",
             "best_train_loss": float(best_run["loss"]),
             "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
             "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
             **learned_noise,
-            **orf_computed,
+            **gp_computed,
         }
         if monitor_validation and n_val > 0:
-            orf_metrics["monitor_validation"] = True
-            orf_metrics["val_fraction"] = val_fraction
-            orf_metrics["n_val"] = n_val
-            orf_metrics.update(summarize_validation_from_runs(runs, best_run))
-        results["orf_metrics"] = orf_metrics
+            gp_metrics["monitor_validation"] = True
+            gp_metrics["val_fraction"] = val_fraction
+            gp_metrics["n_val"] = n_val
+            gp_metrics.update(summarize_validation_from_runs(runs, best_run))
+        results["gp_metrics"] = gp_metrics
         print(
-            f"ORF test RMSE: {orf_computed['RMSE']:.6f}  "
-            f"RRMSE: {orf_computed['RRMSE']:.6f}"
+            f"GP test RMSE: {gp_computed['RMSE']:.6f}  "
+            f"RRMSE: {gp_computed['RRMSE']:.6f}"
         )
 
     tabpfn_regressor = None
@@ -347,8 +332,8 @@ def run_wing_orf_vs_tabpfn(
 
     slice_paths: list[str] = []
     if plot_slices:
-        if orf_model is None or tabpfn_regressor is None:
-            print("Slice plots skipped: need both ORF-GP and TabPFN models.")
+        if gp_model is None or tabpfn_regressor is None:
+            print("Slice plots skipped: need both exact GP and TabPFN models.")
         else:
             if not hasattr(tabpfn_regressor, "feature_names_in_"):
                 tabpfn_regressor.fit(
@@ -369,7 +354,7 @@ def run_wing_orf_vs_tabpfn(
                 else Path("plots/slice_predictions") / sanitize_plot_subdir(title)
             )
             saved = save_gp_tabpfn_marginal_slices(
-                orf_model=orf_model,
+                sorf_model=gp_model,
                 tabpfn_regressor=tabpfn_regressor,
                 X_train_orig=x_train_raw,
                 x_scaler=x_scaler,
@@ -401,7 +386,7 @@ def run_wing_orf_vs_tabpfn(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Wing s0 ORF-GP vs TabPFN with slice UQ plots")
+    parser = argparse.ArgumentParser(description="Wing s0 exact GP vs TabPFN with slice UQ plots")
     parser.add_argument(
         "--train-per-source",
         type=int,
@@ -416,7 +401,6 @@ if __name__ == "__main__":
         default=[5000, 0, 0, 0],
         metavar=("S0", "S1", "S2", "S3"),
     )
-    parser.add_argument("--num-orf", type=int, default=None)
     parser.add_argument("--noise-train", type=float, default=0.005)
     parser.add_argument("--noise-test", type=float, default=0.005)
     parser.add_argument("--num-inits", type=int, default=16)
@@ -426,7 +410,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path",
         type=str,
-        default="experiments_ORF/results/wing_s0_ORF_vs_TabPFN",
+        default="experiments_GP/results/wing_s0_GP_vs_TabPFN",
     )
     parser.add_argument("--max-slice-dims", type=int, default=None, help="Plot first K dims only")
     parser.add_argument(
@@ -439,14 +423,13 @@ if __name__ == "__main__":
     parser.add_argument("--fixed-point", type=str, default="median", choices=("median", "mean"))
     parser.add_argument("--n-grid", type=int, default=200)
     parser.add_argument("--no-plot-slices", action="store_true")
-    parser.add_argument("--run-models", type=str, default=None, choices=("orf", "pfn"))
+    parser.add_argument("--run-models", type=str, default=None, choices=("gp", "pfn"))
     args = parser.parse_args()
 
     gpplus.config.configure_logger()
-    run_wing_orf_vs_tabpfn(
+    run_wing_gp_vs_tabpfn(
         train_samples_per_source=list(args.train_per_source),
         test_samples_per_source=list(args.test_per_source),
-        num_orf=args.num_orf,
         noise_train=args.noise_train,
         noise_test=args.noise_test,
         num_inits=args.num_inits,

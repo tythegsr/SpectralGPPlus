@@ -4,7 +4,7 @@ import gpytorch
 import torch
 
 from ..config import logger
-from ..kernels import GaussianKernel
+from ..kernels import GaussianKernel, LogScaleKernel
 
 
 class MTGPR(gpytorch.models.ExactGP):
@@ -40,7 +40,9 @@ class MTGPR(gpytorch.models.ExactGP):
                 MultitaskGaussianLikelihood if None.
             mean_module (gpytorch.means.MultitaskMean, optional): Mean function. Defaults to ConstantMean if None.
             kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
-                Defaults to a ScaleKernel * MultitaskGaussian combo if None.
+                If not a :class:`gpytorch.kernels.MultitaskKernel`, it is wrapped automatically
+                as the shared base kernel inside ``MultitaskKernel``.
+                Defaults to ``LogScaleKernel(GaussianKernel())`` inside ``MultitaskKernel`` if None.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
@@ -62,11 +64,19 @@ class MTGPR(gpytorch.models.ExactGP):
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            base_kernel = gpytorch.kernels.ScaleKernel(GaussianKernel())
+            base_kernel = LogScaleKernel(GaussianKernel())
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel
             )
             logger.warning("No kernel_module provided. Using Gaussian Kernel as default.")
+        elif not isinstance(kernel_module, gpytorch.kernels.MultitaskKernel):
+            kernel_module = gpytorch.kernels.MultitaskKernel(
+                kernel_module, num_tasks=self.num_tasks, rank=self.rank_kernel
+            )
+            logger.warning(
+                "kernel_module was not a MultitaskKernel; wrapped it automatically "
+                f"(num_tasks={self.num_tasks}, rank={self.rank_kernel})."
+            )
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             logger.error("train_x and train_y must be torch.Tensor instances.")

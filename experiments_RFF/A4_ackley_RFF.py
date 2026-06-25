@@ -306,8 +306,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Ackley 40D with GPPlus RFF (no SEEK)")
     parser.add_argument("--dimensions", type=int, default=10)
-    parser.add_argument("--train-size", type=int, default=10, help="train points per dimension")
-    parser.add_argument("--num-rff", type=int, default=100, help="D (RFF frequencies); default min(512, n_train//3)")
+    parser.add_argument("--train-size", type=int, default=0, help="train points per dimension")
+    parser.add_argument("--num-rff", type=int, default=500, help="D (RFF frequencies); default min(512, n_train//3)")
     parser.add_argument("--num-test", type=int, default=5000)
     parser.add_argument("--noise-train", type=float, default=0.005)
     parser.add_argument("--noise-test", type=float, default=0.005)

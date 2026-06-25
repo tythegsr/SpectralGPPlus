@@ -1,7 +1,7 @@
 """
-Multi-fidelity Wing benchmark with GPPlus ORF kernel (Woodbury inference).
+Multi-fidelity Wing benchmark with GPPlus exact GP (dense inference).
 
-Uses RFFGPR + LogScaleKernel(RFFKernel) only — same training path as A4_ackley_ORF.py.
+Uses GPR with default kernel — same training path as A4_ackley_GP.py.
 Data from load_experimental_data.generate_mf_wing_data (10 continuous + source column).
 When only one fidelity has samples, the source column is dropped automatically (10D inputs).
 """
@@ -16,25 +16,20 @@ import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ORF_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _ORF_DIR):
+_GP_DIR = Path(__file__).resolve().parent
+for p in (_ROOT, _GP_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 import gpplus
-from gpplus.models import RFFGPR
-from gpplus.training import (
-    GPTrainer,
-    RFFParameterInitializer,
-    RFFWoodburyMarginalLogLikelihood,
-    evaluate_rff_gp_model,
-)
+from gpplus.training import GPTrainer, evaluate_gp_model
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
 from load_experimental_data import generate_mf_wing_data
-from orf_experiment_utils import (
+from gp_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
+    build_gpr_model,
     compute_val_samples_per_source,
     extract_learned_likelihood_noise,
     json_safe_optimizer_kwargs,
@@ -114,10 +109,9 @@ def _prepare_wing_inputs(
     )
 
 
-def run_wing_orf(
+def run_wing_gp(
     train_samples_per_source: list[int] | None = None,
     test_samples_per_source: list[int] | None = None,
-    num_orf: int | None = None,
     noise_train: float | list[float] = 0.0,
     noise_test: float | list[float] = 0.0,
     noise_type: str = "gaussian",
@@ -126,7 +120,7 @@ def run_wing_orf(
     num_epochs: int = 1,
     device: str = "cpu",
     dtype: torch.dtype = torch.float64,
-    save_path: str | None = "experiments_ORF/results/wing_orf",
+    save_path: str | None = "experiments_GP/results/wing_gp",
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
@@ -140,13 +134,12 @@ def run_wing_orf(
     validation_verbose: bool = True,
 ) -> dict:
     """
-    Train ORF-GP on multi-fidelity Wing and evaluate on held-out test points.
+    Train exact GP on multi-fidelity Wing and evaluate on held-out test points.
 
     Parameters
     ----------
     train_samples_per_source : samples per fidelity source (s0–s3); default 25 each.
     test_samples_per_source : test samples per source; default 500 each.
-    num_orf : D in RFF (m = 2*D). Default: min(512, n_train // 3).
     num_epochs : 1 uses LBFGSScipy; >1 uses torch.optim.Adam.
     drop_source_column : If True, use 10 continuous inputs only (single fidelity).
         If None (default), drop automatically when exactly one source has samples.
@@ -164,8 +157,6 @@ def run_wing_orf(
     set_seed(seed)
     n_train = sum(train_samples_per_source)
     n_test = sum(test_samples_per_source)
-    if num_orf is None:
-        num_orf = min(512, max(64, n_train // 3))
 
     train_noise = _expand_per_source(noise_train)
     test_noise = _expand_per_source(noise_test)
@@ -188,17 +179,16 @@ def run_wing_orf(
 
     title = (
         f"Wing_tr{train_samples_per_source}_te{test_samples_per_source}_"
-        f"orfD{num_orf}_noiseTest{noise_test}_noiseTrain{noise_train}"
+        f"exactGP_noiseTest{noise_test}_noiseTrain{noise_train}"
     )
     if will_drop_source and fidelity_source is not None:
         title = title.replace("Wing_", f"Wing_{WING_SOURCE_NAMES[fidelity_source]}_", 1)
     print("=" * 60)
     print(title)
-    feature_dim = 2 * num_orf
     input_dim_planned = WING_CONT_DIM if will_drop_source else WING_INPUT_DIM_MF
     print(
-        f"ORF kernel (Woodbury), D={num_orf}, m={feature_dim}, ARD={ard}, "
-        f"input_dim={input_dim_planned}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
+        f"Exact GP (dense), ARD={ard}, input_dim={input_dim_planned}, "
+        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
     )
     if single_fidelity:
         print(
@@ -209,12 +199,7 @@ def run_wing_orf(
         print(f"Multi-fidelity: active sources {[WING_SOURCE_NAMES[i] for i in active_sources]}")
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
-    print(f"Woodbury: n_train={n_train}, n_test={n_test}, m/n={feature_dim / n_train:.4f}")
-    if feature_dim >= n_train:
-        print(
-            f"WARNING: m={feature_dim} >= n_train={n_train}; Woodbury may not beat dense GP. "
-            f"Consider num_orf <= {max(1, n_train // 2 - 1)}."
-        )
+    print(f"n_train={n_train}, n_test={n_test}")
     print("=" * 60)
 
     val_samples_per_source = (
@@ -307,11 +292,10 @@ def run_wing_orf(
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, rff_sampling="orf")
+    model = build_gpr_model(x_train, y_train, ard=ard)
 
     trainer = GPTrainer(
         model,
-        mll_class=RFFWoodburyMarginalLogLikelihood,
         num_epochs=num_epochs,
         num_inits=num_inits,
         seed=seed,
@@ -319,7 +303,6 @@ def run_wing_orf(
         dtype=dtype,
         optimizer_class=optimizer_class,
         optimizer_kwargs=optimizer_kwargs,
-        initializer_class=RFFParameterInitializer,
         n_jobs=n_jobs,
         inner_max_num_threads=1,
         cholesky_jitter=1e-6,
@@ -342,11 +325,8 @@ def run_wing_orf(
     learned_noise = extract_learned_likelihood_noise(model, y_std=y_std)
 
     model.eval()
-    model.invalidate_feature_cache()
     t_pred = time.time()
-    pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-        model, x_test, chunk_size=predict_chunk_size
-    )
+    pred_mean, lower, upper, pred_std = evaluate_gp_model(model, x_test)
     prediction_time = time.time() - t_pred
     pred_mean = pred_mean.detach().cpu()
     pred_std = pred_std.detach().cpu()
@@ -374,6 +354,7 @@ def run_wing_orf(
 
     metrics = {
         "title": title,
+        "model": "exact_gp",
         "input_dim": input_dim,
         "single_fidelity": single_fidelity,
         "fidelity_source": WING_SOURCE_NAMES[fidelity_source] if fidelity_source is not None else None,
@@ -385,9 +366,6 @@ def run_wing_orf(
         "test_samples_per_source": test_samples_per_source,
         "n_train": n_train,
         "n_test": n_test,
-        "num_orf": num_orf,
-        "rff_sampling": "orf",
-        "feature_dim": 2 * num_orf,
         "ard": ard,
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
@@ -427,7 +405,7 @@ def run_wing_orf(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Multi-fidelity Wing with GPPlus ORF")
+    parser = argparse.ArgumentParser(description="Multi-fidelity Wing with GPPlus exact GP")
     parser.add_argument(
         "--train-per-source",
         type=int,
@@ -444,7 +422,6 @@ if __name__ == "__main__":
         metavar=("S0", "S1", "S2", "S3"),
         help="Test samples per fidelity source",
     )
-    parser.add_argument("--num-orf", type=int, default=100, help="D (ORF frequencies); default min(512, n_train//3)")
     parser.add_argument("--noise-train", type=float, default=0.005, help="Train noise scale (all sources)")
     parser.add_argument("--noise-test", type=float, default=0.005, help="Test noise scale (all sources)")
     parser.add_argument("--noise-type", type=str, default="gaussian", choices=("gaussian", "uniform"))
@@ -470,24 +447,18 @@ if __name__ == "__main__":
         choices=("float32", "float64"),
     )
     parser.add_argument(
-        "--predict-chunk-size",
-        type=int,
-        default=512,
-        help="Test points per Woodbury predict chunk (0 = single batch)",
-    )
-    parser.add_argument(
-        "--ard",
-       type=bool,
-       default=True,
-       help="Automatic relevance determination",
-    )
-    parser.add_argument(
         "--n-jobs",
         type=int,
         default=-1,
         help="Parallel hyperparameter inits (-1 = all cores)",
     )
-    parser.add_argument("--save-path", type=str, default="experiments_ORF/results/wing_orf")
+    parser.add_argument(
+        "--ard",
+        type=bool,
+        default=True,
+        help="Automatic relevance determination",
+    )
+    parser.add_argument("--save-path", type=str, default="experiments_GP/results/wing_gp")
     args = parser.parse_args()
 
     gpplus.config.configure_logger()
@@ -499,10 +470,9 @@ if __name__ == "__main__":
     if args.num_epochs > 1 and args.lr is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
 
-    run_wing_orf(
+    run_wing_gp(
         train_samples_per_source=list(args.train_per_source),
         test_samples_per_source=list(args.test_per_source),
-        num_orf=args.num_orf,
         noise_train=args.noise_train,
         noise_test=args.noise_test,
         noise_type=args.noise_type,
@@ -515,5 +485,4 @@ if __name__ == "__main__":
         save_path=args.save_path,
         ard=args.ard,
         n_jobs=n_jobs,
-        predict_chunk_size=args.predict_chunk_size,
     )

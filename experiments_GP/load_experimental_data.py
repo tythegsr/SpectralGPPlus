@@ -1,32 +1,10 @@
-import torch
+﻿import torch
 import os
 import pandas as pd
 import numpy as np
-from math import sqrt
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 import torch.nn.functional as F
-from sklearn.datasets import fetch_openml
-
-
-def _sample_noise_like(
-    reference: torch.Tensor,
-    noise_scale: torch.Tensor | float,
-    noise_type: str,
-    student_t_df: float = 4.0,
-) -> torch.Tensor:
-    """Sample zero-mean noise with target std set by ``noise_scale``."""
-    if noise_type == "gaussian":
-        return torch.randn_like(reference) * noise_scale
-    if noise_type == "uniform":
-        return (torch.rand_like(reference) - 0.5) * 2 * noise_scale * sqrt(3)
-    if noise_type in ("student_t", "student-t", "t"):
-        if student_t_df <= 2.0:
-            raise ValueError("student_t_df must be > 2.0 to have finite variance.")
-        raw = torch.distributions.StudentT(df=student_t_df).sample(reference.shape)
-        raw = raw.to(dtype=reference.dtype, device=reference.device)
-        return (raw / sqrt(student_t_df / (student_t_df - 2.0))) * noise_scale
-    raise ValueError(
-        f"Unknown noise_type: {noise_type}. Use 'gaussian', 'uniform', or 'student_t'"
-    )
 
 
 def load_m2ax_data(print_info=False):
@@ -74,9 +52,9 @@ def generate_hartmann_data(n_samples=10000, noise_level=0.0, noise_type='gaussia
     Generate data for the 6D Hartmann function using Sobol sequences.
     
     The 6D Hartmann function is defined as:
-    f(x) = -sum_{i=1}^{4} α_i * exp(-sum_{j=1}^{6} A_{ij} * (x_j - P_{ij})^2)
+    f(x) = -sum_{i=1}^{4} ╬▒_i * exp(-sum_{j=1}^{6} A_{ij} * (x_j - P_{ij})^2)
     
-    where x ∈ [0,1]^6
+    where x Γêê [0,1]^6
     
     Args:
         n_samples (int): Number of samples to generate
@@ -130,7 +108,12 @@ def generate_hartmann_data(n_samples=10000, noise_level=0.0, noise_type='gaussia
         y_std = y.std()
         noise_scale = noise_level * y_std
         
-        noise = _sample_noise_like(y, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         
         y = y + noise
     
@@ -240,7 +223,8 @@ def wing_mixed_variables(X: torch.Tensor, source: str = "s0") -> torch.Tensor:
 
 def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_source: list[int], 
                          seed: int = None, train_noise: list[float] = None, test_noise: list[float] = None, 
-                         noise_type: str = 'gaussian') -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                         noise_type: str = 'gaussian',
+                         val_samples_per_source: list[int] | None = None) -> tuple:
     """
     Generate multi-fidelity Wing data by drawing a single Sobol batch (no repeats),
     then splitting into test/train per source. Compute test std after the split
@@ -252,9 +236,9 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
     """
     if seed is not None:
         torch.manual_seed(seed)
-    else:
-        seed = 42
-        torch.manual_seed(seed)
+    # else:
+    #     seed = 42
+    #     torch.manual_seed(seed)
 
     # Defaults and validation for per-source noise (4 sources)
     if train_noise is None:
@@ -268,6 +252,13 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
     if len(train_noise) != 4 or len(test_noise) != 4:
         raise ValueError("train_noise and test_noise must be length-4 (one scalar per source)")
 
+    if val_samples_per_source is None:
+        val_samples_per_source = [0, 0, 0, 0]
+    if isinstance(val_samples_per_source, int):
+        val_samples_per_source = [val_samples_per_source] * 4
+    if len(val_samples_per_source) != 4:
+        raise ValueError("val_samples_per_source must be length-4 (one count per source)")
+
     sources = ["s0", "s1", "s2", "s3"]
 
     # Bounds for the 10 continuous features
@@ -275,7 +266,10 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
     u_bound = torch.tensor([200.0, 300.0, 10.0, 10.0, 45.0, 1.0, 0.18, 6.0, 2500.0, 0.08], dtype=torch.float64)
 
     # Total samples per source and overall
-    total_per_source = [tr + te for tr, te in zip(train_samples_per_source, test_samples_per_source)]
+    total_per_source = [
+        tr + val + te
+        for tr, val, te in zip(train_samples_per_source, val_samples_per_source, test_samples_per_source)
+    ]
     total_n = sum(total_per_source)
 
     # Draw all Sobol samples at once (scrambled => randomized QMC) and scale to bounds
@@ -304,23 +298,35 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
     # Split per source into test then train; get test std after split
     X_train_list: list[torch.Tensor] = []
     y_train_list: list[torch.Tensor] = []
+    X_val_list: list[torch.Tensor] = []
+    y_val_list: list[torch.Tensor] = []
     X_test_list: list[torch.Tensor] = []
     y_test_list: list[torch.Tensor] = []
 
     cursor = 0
-    for idx, (src, n_total, n_test, n_train) in enumerate(
-        zip(sources, total_per_source, test_samples_per_source, train_samples_per_source)
+    for idx, (src, n_total, n_test, n_train, n_val) in enumerate(
+        zip(sources, total_per_source, test_samples_per_source, train_samples_per_source, val_samples_per_source)
     ):
         if n_total == 0:
             continue
         x_block = X_raw_all[cursor:cursor + n_total]
         y_block = y_clean_all[cursor:cursor + n_total]
 
-        # Split: first n_test -> test, remaining -> train
+        # Split: test, then train, then val
         x_test_block = x_block[:n_test] if n_test > 0 else torch.empty((0, 10), dtype=torch.float64)
         y_test_block = y_block[:n_test] if n_test > 0 else torch.empty((0,), dtype=torch.float64)
-        x_train_block = x_block[n_test:] if n_train > 0 else torch.empty((0, 10), dtype=torch.float64)
-        y_train_block = y_block[n_test:] if n_train > 0 else torch.empty((0,), dtype=torch.float64)
+        x_train_block = x_block[n_test:n_test + n_train] if n_train > 0 else torch.empty((0, 10), dtype=torch.float64)
+        y_train_block = y_block[n_test:n_test + n_train] if n_train > 0 else torch.empty((0,), dtype=torch.float64)
+        x_val_block = (
+            x_block[n_test + n_train:n_test + n_train + n_val]
+            if n_val > 0
+            else torch.empty((0, 10), dtype=torch.float64)
+        )
+        y_val_block = (
+            y_block[n_test + n_train:n_test + n_train + n_val]
+            if n_val > 0
+            else torch.empty((0,), dtype=torch.float64)
+        )
 
         # Test std after split (per source) as a Python float
         test_std_value: float
@@ -331,15 +337,30 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
 
         # Apply noise scaled by test std
         if n_train > 0 and train_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_train_block, train_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_train_block) * (train_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_train_block) - 0.5) * 2 * (train_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_train_block = y_train_block + noise
 
+        if n_val > 0 and train_noise[idx] > 0 and test_std_value > 0.0:
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_val_block) * (train_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_val_block) - 0.5) * 2 * (train_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
+            y_val_block = y_val_block + noise
+
         if n_test > 0 and test_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_test_block, test_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_test_block) * (test_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_test_block) - 0.5) * 2 * (test_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_test_block = y_test_block + noise
 
         # Append source id as 11th feature
@@ -347,6 +368,11 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
             src_col_train = torch.full((n_train, 1), float(idx), dtype=torch.float64)
             X_train_list.append(torch.cat([x_train_block, src_col_train], dim=1))
             y_train_list.append(y_train_block)
+
+        if n_val > 0:
+            src_col_val = torch.full((n_val, 1), float(idx), dtype=torch.float64)
+            X_val_list.append(torch.cat([x_val_block, src_col_val], dim=1))
+            y_val_list.append(y_val_block)
 
         if n_test > 0:
             src_col_test = torch.full((n_test, 1), float(idx), dtype=torch.float64)
@@ -357,9 +383,14 @@ def generate_mf_wing_data(train_samples_per_source: list[int], test_samples_per_
 
     X_train = torch.cat(X_train_list, dim=0) if X_train_list else torch.empty((0, 11), dtype=torch.float64)
     y_train = torch.cat(y_train_list, dim=0) if y_train_list else torch.empty((0,), dtype=torch.float64)
+    X_val = torch.cat(X_val_list, dim=0) if X_val_list else torch.empty((0, 11), dtype=torch.float64)
+    y_val = torch.cat(y_val_list, dim=0) if y_val_list else torch.empty((0,), dtype=torch.float64)
     X_test = torch.cat(X_test_list, dim=0) if X_test_list else torch.empty((0, 11), dtype=torch.float64)
     y_test = torch.cat(y_test_list, dim=0) if y_test_list else torch.empty((0,), dtype=torch.float64)
 
+    n_val_total = sum(val_samples_per_source)
+    if n_val_total > 0:
+        return X_train, y_train, X_val, y_val, X_test, y_test
     return X_train, y_train, X_test, y_test
 
 
@@ -405,206 +436,6 @@ def load_2dplanes_data(print_info=False):
     return X, y
 
 
-def load_pumadyn32_data(print_info: bool = False):
-    """
-    Load DELVE/OpenML puma32H data.
-
-    Args:
-        print_info (bool): If True, print feature/target shapes.
-
-    Returns:
-        tuple: (X, y) as torch.float64 tensors.
-    """
-    dataset = fetch_openml(name="puma32H", version=1, as_frame=True)
-    X_df = dataset.data.copy()
-    y_series = dataset.target
-
-    X = torch.tensor(X_df.to_numpy(dtype=np.float64), dtype=torch.float64)
-    y = torch.tensor(y_series.to_numpy(dtype=np.float64), dtype=torch.float64)
-
-    if print_info:
-        print(f"[pumadyn32] X shape: {tuple(X.shape)}, y shape: {tuple(y.shape)}")
-        print("[pumadyn32] Using all 32 input columns")
-
-    return X, y
-
-
-def load_elevators_data(print_info: bool = False):
-    """
-    Load the elevators regression dataset from OpenML.
-
-    Args:
-        print_info (bool): If True, print feature/target shapes.
-
-    Returns:
-        tuple: (X, y) as torch.float64 tensors.
-    """
-    dataset = fetch_openml(name="elevators", version=1, as_frame=True)
-    X_df = dataset.data.copy()
-    y_series = dataset.target
-
-    X = torch.tensor(X_df.to_numpy(dtype=np.float64), dtype=torch.float64)
-    y = torch.tensor(y_series.to_numpy(dtype=np.float64), dtype=torch.float64)
-
-    if print_info:
-        print(f"[elevators] X shape: {tuple(X.shape)}, y shape: {tuple(y.shape)}")
-        print("[elevators] Using all input columns")
-
-    return X, y
-
-
-def generate_pumadyn32_train_test_data(
-    train_samples: int,
-    seed: int | None = None,
-    split_seed: int = 0,
-    train_pool_size: int = 5192,
-    test_pool_size: int = 3000,
-    print_info: bool = False,
-):
-    """
-    Load puma32H with a fixed pool split, then sample train points per run.
-
-    Args:
-        train_samples (int): Number of training samples to draw from the fixed train pool.
-        seed (int | None): Random seed for per-run training subset selection.
-        split_seed (int): Seed used once to create the fixed train/test pools.
-        train_pool_size (int): Size of the fixed training pool.
-        test_pool_size (int): Size of the fixed test pool.
-        print_info (bool): If True, print split information.
-
-    Returns:
-        tuple: (X_train, y_train, X_test, y_test) as torch.float64 tensors.
-    """
-    if train_samples < 0:
-        raise ValueError("train_samples must be non-negative.")
-    if train_pool_size < 0 or test_pool_size < 0:
-        raise ValueError("train_pool_size and test_pool_size must be non-negative.")
-
-    X, y = load_pumadyn32_data(print_info=False)
-    total_available = X.shape[0]
-    total_pool = train_pool_size + test_pool_size
-
-    if total_pool > total_available:
-        raise ValueError(
-            f"Requested pool size {total_pool} (train_pool+test_pool), but only "
-            f"{total_available} are available in puma32H."
-        )
-    if train_samples > train_pool_size:
-        raise ValueError(
-            f"train_samples ({train_samples}) cannot exceed train_pool_size ({train_pool_size})."
-        )
-
-    # Fixed split created once by split_seed: first test_pool_size as test, next as train pool.
-    split_generator = torch.Generator()
-    split_generator.manual_seed(split_seed)
-    split_perm = torch.randperm(total_available, generator=split_generator)
-    pool_idx = split_perm[:total_pool]
-    test_pool_idx = pool_idx[:test_pool_size]
-    train_pool_idx = pool_idx[test_pool_size:]
-
-    # Per-run training subset from the fixed train pool.
-    if seed is not None:
-        train_generator = torch.Generator()
-        train_generator.manual_seed(seed)
-        train_subperm = torch.randperm(train_pool_size, generator=train_generator)
-    else:
-        train_subperm = torch.randperm(train_pool_size)
-    train_idx = train_pool_idx[train_subperm[:train_samples]]
-
-    X_test = X[test_pool_idx]
-    y_test = y[test_pool_idx]
-    X_train = X[train_idx]
-    y_train = y[train_idx]
-
-    if print_info:
-        print(
-            f"[pumadyn32] Fixed pools -> train_pool: {train_pool_size}, "
-            f"test_pool: {test_pool_size}, features: {X.shape[1]}"
-        )
-        print(
-            f"[pumadyn32] Current run -> train subset: {X_train.shape[0]}, "
-            f"test: {X_test.shape[0]}, split_seed: {split_seed}, run_seed: {seed}"
-        )
-
-    return X_train, y_train, X_test, y_test
-
-
-def generate_elevators_train_test_data(
-    train_samples: int,
-    seed: int | None = None,
-    split_seed: int = 0,
-    train_pool_size: int = 13599,
-    test_pool_size: int = 3000,
-    print_info: bool = False,
-):
-    """
-    Load elevators with a fixed pool split, then sample train points per run.
-
-    Args:
-        train_samples (int): Number of training samples to draw from the fixed train pool.
-        seed (int | None): Random seed for per-run training subset selection.
-        split_seed (int): Seed used once to create the fixed train/test pools.
-        train_pool_size (int): Size of the fixed training pool.
-        test_pool_size (int): Size of the fixed test pool.
-        print_info (bool): If True, print split information.
-
-    Returns:
-        tuple: (X_train, y_train, X_test, y_test) as torch.float64 tensors.
-    """
-    if train_samples < 0:
-        raise ValueError("train_samples must be non-negative.")
-    if train_pool_size < 0 or test_pool_size < 0:
-        raise ValueError("train_pool_size and test_pool_size must be non-negative.")
-
-    X, y = load_elevators_data(print_info=False)
-    total_available = X.shape[0]
-    total_pool = train_pool_size + test_pool_size
-
-    if total_pool > total_available:
-        raise ValueError(
-            f"Requested pool size {total_pool} (train_pool+test_pool), but only "
-            f"{total_available} are available in elevators."
-        )
-    if train_samples > train_pool_size:
-        raise ValueError(
-            f"train_samples ({train_samples}) cannot exceed train_pool_size ({train_pool_size})."
-        )
-
-    # Fixed split created once by split_seed: first test_pool_size as test, next as train pool.
-    split_generator = torch.Generator()
-    split_generator.manual_seed(split_seed)
-    split_perm = torch.randperm(total_available, generator=split_generator)
-    pool_idx = split_perm[:total_pool]
-    test_pool_idx = pool_idx[:test_pool_size]
-    train_pool_idx = pool_idx[test_pool_size:]
-
-    # Per-run training subset from the fixed train pool.
-    if seed is not None:
-        train_generator = torch.Generator()
-        train_generator.manual_seed(seed)
-        train_subperm = torch.randperm(train_pool_size, generator=train_generator)
-    else:
-        train_subperm = torch.randperm(train_pool_size)
-    train_idx = train_pool_idx[train_subperm[:train_samples]]
-
-    X_test = X[test_pool_idx]
-    y_test = y[test_pool_idx]
-    X_train = X[train_idx]
-    y_train = y[train_idx]
-
-    if print_info:
-        print(
-            f"[elevators] Fixed pools -> train_pool: {train_pool_size}, "
-            f"test_pool: {test_pool_size}, features: {X.shape[1]}"
-        )
-        print(
-            f"[elevators] Current run -> train subset: {X_train.shape[0]}, "
-            f"test: {X_test.shape[0]}, split_seed: {split_seed}, run_seed: {seed}"
-        )
-
-    return X_train, y_train, X_test, y_test
-
-
 def buckling_mixed_variables(X: torch.Tensor, source: str = "s0") -> torch.Tensor:
     """
     Compute buckling load given input variables.
@@ -636,13 +467,13 @@ def buckling_mixed_variables(X: torch.Tensor, source: str = "s0") -> torch.Tenso
 
 
 def generate_mf_buckling_data_with_folds(train_samples_per_source: list[int], test_samples_per_source: list[int], 
-                                         num_runs: int = 4, seed: int = None, train_noise: list[float] = None, 
+                                         num_folds: int = 4, seed: int = None, train_noise: list[float] = None, 
                                          test_noise: list[float] = None, noise_type: str = 'gaussian', 
                                          return_categorical: bool = True) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor, torch.Tensor]:
     """
     Generate multi-fidelity Buckling data with pre-stratified folds:
       - Use Sobol sequences to produce EVEN amounts of E, I, and K categorical inputs
-      - Generate train data directly as num_runs with even categorical distributions
+      - Generate train data directly as num_folds with even categorical distributions
       - Generate test data with even categorical distributions
       - Each fold has perfectly balanced categorical distributions
     """
@@ -667,236 +498,253 @@ def generate_mf_buckling_data_with_folds(train_samples_per_source: list[int], te
         raise ValueError("test_noise must be length-2 (one scalar per source)")
     
     sources = ['s0', 's1']  # Two sources
+    total_n = sum(train_samples_per_source) + sum(test_samples_per_source)
     
-    # Categorical index values (0-based) and actual physical values
+    # Categorical index values (0-based) and positive physical mappings
     # Use strictly positive physical values to avoid 0/0 or division-by-zero in buckling formula
-    E_values = torch.tensor([0, 1], dtype=torch.long)  # category indices
-    K_values = torch.tensor([0, 1, 2, 3], dtype=torch.long)  # category indices
-    I_values = torch.tensor([0, 1, 2], dtype=torch.long)  # category indices
-    # Actual physical values for buckling problem
-    E_phys = torch.tensor([73.1, 200.0], dtype=torch.float64)  # Young's modulus values
-    K_phys = torch.tensor([0.5, 0.7, 1.0, 2.0], dtype=torch.float64)  # Shear modulus values
-    I_phys = torch.tensor([9.49, 12.1, 29.5], dtype=torch.float64)  # Moment of inertia values
+    E_values = torch.tensor([0.0, 1.0], dtype=torch.float64)  # indices
+    K_values = torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64)  # indices
+    I_values = torch.tensor([0.0, 1.0, 2.0], dtype=torch.float64)  # indices
+    E_phys = torch.tensor([1.0, 2.0], dtype=torch.float64)
+    K_phys = torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+    I_phys = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
     
-    # Generate all continuous L values per source at once (test + train) using single seed per source
-    # This matches the pattern used in other problems: draw all samples for a source at once, then split
-    # Use seed offset per source to ensure each source gets a unique sequence
-    L_vals_per_source = {}
-    for src_idx, (n_test, n_train) in enumerate(zip(test_samples_per_source, train_samples_per_source)):
-        total_n = n_test + n_train
-        if total_n == 0:
-            continue
-        # Use seed offset per source to get unique sequences (but consistent within source)
-        # This ensures test and train are contiguous within each source's sequence
-        sobol_seed = (seed + src_idx * 1000) if seed is not None else None
-        sobol = torch.quasirandom.SobolEngine(1, scramble=True, seed=sobol_seed)
-        # Draw all samples for this source at once (test + train together)
-        L_vals_all = sobol.draw(total_n).squeeze() + 0.5  # L in [0.5, 1.5]
-        L_vals_per_source[src_idx] = L_vals_all
-    
-    # Generate all data (test + train) per source, compute targets once, then split
+    # Generate test data first (one block per source)
     X_test_list = []
     y_test_list = []
-    X_train_folds = []
-    y_train_folds = []
     test_std_per_source = {}  # Store test std for each source
     
-    total_train_samples = sum(train_samples_per_source)
-    if total_train_samples > 0:
-        # Pre-allocate lists for all folds
-        for _ in range(num_runs):
-            X_train_folds.append([])
-            y_train_folds.append([])
-    
-    for src_idx, (src, n_test, n_train) in enumerate(zip(sources, test_samples_per_source, train_samples_per_source)):
-        total_n = n_test + n_train
-        if total_n == 0:
+    for src_idx, (src, n_test) in enumerate(zip(sources, test_samples_per_source)):
+        if n_test == 0:
             continue
-        
-        L_vals_all = L_vals_per_source[src_idx]
-        all_cat_assignments = []
-        
-        # Generate test categorical assignments (even distribution)
-        if n_test > 0:
-            # E values (2 options)
-            n_per_E_test = n_test // len(E_values)
-            remaining_E_test = n_test % len(E_values)
-            E_indices_test = []
-            for i in range(len(E_values)):
-                count = n_per_E_test + (1 if i < remaining_E_test else 0)
-                E_indices_test.append(torch.full((count,), i))
-            E_indices_test = torch.cat(E_indices_test)
-            E_indices_test = E_indices_test[torch.randperm(n_test)]
             
-            # K values (4 options)
-            n_per_K_test = n_test // len(K_values)
-            remaining_K_test = n_test % len(K_values)
-            K_indices_test = []
-            for i in range(len(K_values)):
-                count = n_per_K_test + (1 if i < remaining_K_test else 0)
-                K_indices_test.append(torch.full((count,), i))
-            K_indices_test = torch.cat(K_indices_test)
-            K_indices_test = K_indices_test[torch.randperm(n_test)]
-            
-            # I values (3 options)
-            n_per_I_test = n_test // len(I_values)
-            remaining_I_test = n_test % len(I_values)
-            I_indices_test = []
-            for i in range(len(I_values)):
-                count = n_per_I_test + (1 if i < remaining_I_test else 0)
-                I_indices_test.append(torch.full((count,), i))
-            I_indices_test = torch.cat(I_indices_test)
-            I_indices_test = I_indices_test[torch.randperm(n_test)]
-            
-            # Store test assignments
-            for i in range(n_test):
-                all_cat_assignments.append({
-                    'e': int(E_indices_test[i].item()),
-                    'k': int(K_indices_test[i].item()),
-                    'i': int(I_indices_test[i].item())
-                })
+        # Generate continuous variables using Sobol
+        sobol_seed = (seed + src_idx * 1000) if seed is not None else None
+        sobol = torch.quasirandom.SobolEngine(1, scramble=True, seed=sobol_seed)
+        L_vals = sobol.draw(n_test).squeeze() * 0.4 + 0.6  # L in [0.6, 1.0]
         
-        # Generate train categorical assignments (per fold with exact distributions)
-        if n_train > 0:
-            target_per_fold = n_train // num_runs
-            remainder = n_train % num_runs
-            num_E = len(E_values)
-            num_K = len(K_values)
-            num_I = len(I_values)
-            
-            for fold in range(num_runs):
-                fold_target = target_per_fold + (1 if fold < remainder else 0)
-                
-                # Calculate EXACT counts for each categorical value in this fold
-                E_base = fold_target // num_E
-                E_rem = fold_target % num_E
-                E_counts = [E_base + (1 if i < E_rem else 0) for i in range(num_E)]
-                
-                K_base = fold_target // num_K
-                K_rem = fold_target % num_K
-                K_counts = [K_base + (1 if i < K_rem else 0) for i in range(num_K)]
-                
-                I_base = fold_target // num_I
-                I_rem = fold_target % num_I
-                rotation_offset = (fold + src_idx * num_runs) % num_I
-                I_counts = [I_base + (1 if (i + rotation_offset) % num_I < I_rem else 0) for i in range(num_I)]
-                
-                # Build assignments for this fold
-                cat_assignments = []
-                for e_idx in range(num_E):
-                    for _ in range(E_counts[e_idx]):
-                        cat_assignments.append({'e': e_idx})
-                
-                k_list = []
-                for k_idx in range(num_K):
-                    for _ in range(K_counts[k_idx]):
-                        k_list.append(k_idx)
-                if seed is not None:
-                    torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 1)
-                k_perm = torch.randperm(len(k_list))
-                k_list = [k_list[i] for i in k_perm.tolist()]
-                
-                i_list = []
-                for i_idx in range(num_I):
-                    for _ in range(I_counts[i_idx]):
-                        i_list.append(i_idx)
-                if seed is not None:
-                    torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 2)
-                i_perm = torch.randperm(len(i_list))
-                i_list = [i_list[i] for i in i_perm.tolist()]
-                
-                for i in range(fold_target):
-                    cat_assignments[i]['k'] = k_list[i]
-                    cat_assignments[i]['i'] = i_list[i]
-                
-                if seed is not None:
-                    torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 3)
-                perm = torch.randperm(len(cat_assignments))
-                cat_assignments = [cat_assignments[i] for i in perm.tolist()]
-                
-                all_cat_assignments.extend(cat_assignments)
+        # Create test block
+        x_test_block = torch.zeros((n_test, 4), dtype=torch.float64)
+        x_test_block[:, 0] = L_vals
         
-        # Build all data (test + train) for this source at once
-        x_all = torch.zeros((total_n, 4), dtype=torch.float64)
-        for i, assignment in enumerate(all_cat_assignments):
-            x_all[i, 0] = L_vals_all[i]
-            x_all[i, 1] = E_phys[assignment['e']]
-            x_all[i, 2] = K_phys[assignment['k']]
-            x_all[i, 3] = I_phys[assignment['i']]
+        # Generate even categorical distributions for TEST
+        # E values (2 options)
+        n_per_E_test = n_test // len(E_values)
+        remaining_E_test = n_test % len(E_values)
+        E_indices_test = []
+        for i in range(len(E_values)):
+            count = n_per_E_test + (1 if i < remaining_E_test else 0)
+            E_indices_test.append(torch.full((count,), i))
+        E_indices_test = torch.cat(E_indices_test)
+        E_indices_test = E_indices_test[torch.randperm(n_test)]
+        x_test_block[:, 1] = E_phys[E_indices_test]
+
+        # K values (4 options)
+        n_per_K_test = n_test // len(K_values)
+        remaining_K_test = n_test % len(K_values)
+        K_indices_test = []
+        for i in range(len(K_values)):
+            count = n_per_K_test + (1 if i < remaining_K_test else 0)
+            K_indices_test.append(torch.full((count,), i))
+        K_indices_test = torch.cat(K_indices_test)
+        K_indices_test = K_indices_test[torch.randperm(n_test)]
+        x_test_block[:, 2] = K_phys[K_indices_test]
+
+        # I values (3 options)
+        n_per_I_test = n_test // len(I_values)
+        remaining_I_test = n_test % len(I_values)
+        I_indices_test = []
+        for i in range(len(I_values)):
+            count = n_per_I_test + (1 if i < remaining_I_test else 0)
+            I_indices_test.append(torch.full((count,), i))
+        I_indices_test = torch.cat(I_indices_test)
+        I_indices_test = I_indices_test[torch.randperm(n_test)]
+        x_test_block[:, 3] = I_phys[I_indices_test]
+
+        # Compute targets
+        y_test_clean = buckling_mixed_variables(x_test_block, source=src)
         
-        # Compute targets ONCE for all data (test + train)
-        y_all = buckling_mixed_variables(x_all, source=src)
+        # Compute test std for noise scaling
+        if y_test_clean.numel() > 1:
+            test_std_value = float(y_test_clean.std().item())
+        else:
+            test_std_value = 0.0
+        test_std_per_source[src_idx] = test_std_value
         
-        # Convert to categorical indices if requested (AFTER computing y)
-        if return_categorical:
-            for i, assignment in enumerate(all_cat_assignments):
-                x_all[i, 1] = float(assignment['e'])
-                x_all[i, 2] = float(assignment['k'])
-                x_all[i, 3] = float(assignment['i'])
-        
-        # Split into test and train
-        if n_test > 0:
-            x_test_block = x_all[:n_test]
-            y_test_clean = y_all[:n_test]
-            
-            # Compute test std for noise scaling
-            if y_test_clean.numel() > 1:
-                test_std_value = float(y_test_clean.std().item())
+        # Add noise to test data
+        y_test_block = y_test_clean.clone()
+        if n_test > 0 and test_noise[src_idx] > 0 and test_std_value > 0.0:
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_test_block) * (test_noise[src_idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_test_block) - 0.5) * 2 * (test_noise[src_idx] * test_std_value)
             else:
-                test_std_value = 0.0
-            test_std_per_source[src_idx] = test_std_value
-            
-            # Add noise to test data
-            y_test_block = y_test_clean.clone()
-            if test_noise[src_idx] > 0 and test_std_value > 0.0:
-                noise = _sample_noise_like(
-                    y_test_block, test_noise[src_idx] * test_std_value, noise_type
-                )
-                y_test_block = y_test_block + noise
-            
-            source_column = torch.full((x_test_block.shape[0], 1), src_idx, dtype=torch.float64)
-            X_test_list.append(torch.cat([x_test_block, source_column], dim=1))
-            y_test_list.append(y_test_block)
+                raise ValueError(f"Unknown noise_type: {noise_type}")
+            y_test_block = y_test_block + noise
         
-        if n_train > 0:
-            x_train_all = x_all[n_test:]
-            y_train_all = y_all[n_test:]
-            
-            # Add noise to train data
-            test_std_value = test_std_per_source.get(src_idx, 0.0)
-            if train_noise[src_idx] > 0 and test_std_value > 0.0:
-                noise = _sample_noise_like(
-                    y_train_all, train_noise[src_idx] * test_std_value, noise_type
-                )
-                y_train_all = y_train_all + noise
-            
-            # Split train into folds
-            target_per_fold = n_train // num_runs
-            remainder = n_train % num_runs
-            fold_start = 0
-            for fold in range(num_runs):
-                fold_target = target_per_fold + (1 if fold < remainder else 0)
-                fold_end = fold_start + fold_target
-                
-                x_fold = x_train_all[fold_start:fold_end]
-                y_fold = y_train_all[fold_start:fold_end]
-                
-                source_column = torch.full((x_fold.shape[0], 1), src_idx, dtype=torch.float64)
-                x_fold_with_source = torch.cat([x_fold, source_column], dim=1)
-                
-                X_train_folds[fold].append(x_fold_with_source)
-                y_train_folds[fold].append(y_fold)
-                
-                fold_start = fold_end
+        # Store categorical indices if requested
+        if return_categorical:
+            x_test_block[:, 1] = E_indices_test.to(torch.float64)
+            x_test_block[:, 2] = K_indices_test.to(torch.float64)
+            x_test_block[:, 3] = I_indices_test.to(torch.float64)
+        
+        source_column = torch.full((x_test_block.shape[0], 1), src_idx, dtype=torch.float64)
+        X_test_list.append(torch.cat([x_test_block, source_column], dim=1))
+        y_test_list.append(y_test_block)
     
     # Combine test data
     X_test_all = torch.cat(X_test_list, dim=0)
     y_test_all = torch.cat(y_test_list, dim=0)
     
+    # Generate train data as folds
+    X_train_folds = []
+    y_train_folds = []
+    
+    total_train_samples = sum(train_samples_per_source)
+    if total_train_samples == 0:
+        return X_train_folds, y_train_folds, X_test_all, y_test_all
+    
+    # Pre-allocate lists for all folds
+    for _ in range(num_folds):
+        X_train_folds.append([])
+        y_train_folds.append([])
+    
+    for src_idx, (src, n_train) in enumerate(zip(sources, train_samples_per_source)):
+        if n_train == 0:
+            continue
+        
+        # Calculate target samples per fold
+        target_per_fold = n_train // num_folds
+        remainder = n_train % num_folds
+        
+        # Calculate EXACT target counts per categorical value per fold using MATH
+        num_E = len(E_values)  # 2
+        num_K = len(K_values)  # 4
+        num_I = len(I_values)  # 3
+        
+        # Generate each fold separately with EXACT categorical distributions
+        for fold in range(num_folds):
+            fold_target = target_per_fold + (1 if fold < remainder else 0)
+            
+            # Calculate EXACT counts for each categorical value in this fold
+            # E: fold_target / 2
+            E_base = fold_target // num_E
+            E_rem = fold_target % num_E
+            E_counts = [E_base + (1 if i < E_rem else 0) for i in range(num_E)]
+            
+            # K: fold_target / 4
+            K_base = fold_target // num_K
+            K_rem = fold_target % num_K
+            K_counts = [K_base + (1 if i < K_rem else 0) for i in range(num_K)]
+            
+            # I: fold_target / 3 - ROTATE which I value gets extra across folds
+            I_base = fold_target // num_I
+            I_rem = fold_target % num_I
+            # Rotate which I value gets the remainder based on fold number
+            # This ensures different folds have different I distributions
+            # For example, if I_rem=2: fold 0 gets (7,7,6), fold 1 gets (7,6,7), fold 2 gets (6,7,7)
+            rotation_offset = (fold + src_idx * num_folds) % num_I
+            I_counts = [I_base + (1 if (i + rotation_offset) % num_I < I_rem else 0) for i in range(num_I)]
+            
+            # Generate samples for this fold with EXACT categorical distributions
+            # Build list of categorical assignments that satisfy exact counts
+            cat_assignments = []
+            
+            # Create assignments for E values (exact counts)
+            for e_idx in range(num_E):
+                for _ in range(E_counts[e_idx]):
+                    cat_assignments.append({'e': e_idx})
+            
+            # Create assignments for K values (exact counts) - distribute round-robin
+            k_list = []
+            for k_idx in range(num_K):
+                for _ in range(K_counts[k_idx]):
+                    k_list.append(k_idx)
+            # Shuffle K assignments
+            if seed is not None:
+                torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 1)
+            k_perm = torch.randperm(len(k_list))
+            k_list = [k_list[i] for i in k_perm.tolist()]
+            
+            # Create assignments for I values (exact counts) - distribute round-robin
+            i_list = []
+            for i_idx in range(num_I):
+                for _ in range(I_counts[i_idx]):
+                    i_list.append(i_idx)
+            # Shuffle I assignments
+            if seed is not None:
+                torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 2)
+            i_perm = torch.randperm(len(i_list))
+            i_list = [i_list[i] for i in i_perm.tolist()]
+            
+            # Combine assignments
+            for i in range(fold_target):
+                cat_assignments[i]['k'] = k_list[i]
+                cat_assignments[i]['i'] = i_list[i]
+            
+            # Shuffle final order to randomize (E, K, I) combinations
+            if seed is not None:
+                torch.manual_seed(seed + src_idx * 2000 + fold * 100 + 3)
+            perm = torch.randperm(len(cat_assignments))
+            cat_assignments = [cat_assignments[i] for i in perm.tolist()]
+            
+            # Generate Sobol samples for continuous L variable
+            sobol_seed = (seed + src_idx * 2000 + fold * 100) if seed is not None else None
+            sobol = torch.quasirandom.SobolEngine(1, scramble=True, seed=sobol_seed)
+            L_vals = sobol.draw(fold_target).squeeze() * 0.4 + 0.6
+            
+            # Create samples - ALWAYS use physical values for buckling computation
+            samples_X = []
+            for i, assignment in enumerate(cat_assignments):
+                x_sample = torch.zeros((1, 4), dtype=torch.float64)
+                x_sample[0, 0] = L_vals[i] if L_vals.dim() > 0 else L_vals
+                # Always use physical values for computation
+                x_sample[0, 1] = E_phys[assignment['e']]
+                x_sample[0, 2] = K_phys[assignment['k']]
+                x_sample[0, 3] = I_phys[assignment['i']]
+                
+                samples_X.append(x_sample)
+            
+            # Convert to tensors
+            if len(samples_X) > 0:
+                x_fold = torch.cat(samples_X, dim=0)
+                # Compute targets using physical values
+                y_fold = buckling_mixed_variables(x_fold, source=src)
+                
+                # Convert to categorical indices if requested (AFTER computing y)
+                if return_categorical:
+                    for i, assignment in enumerate(cat_assignments):
+                        x_fold[i, 1] = float(assignment['e'])
+                        x_fold[i, 2] = float(assignment['k'])
+                        x_fold[i, 3] = float(assignment['i'])
+                
+                # Add noise if needed
+                test_std_value = test_std_per_source.get(src_idx, 0.0)
+                if train_noise[src_idx] > 0 and test_std_value > 0.0:
+                    if noise_type == 'gaussian':
+                        noise = torch.randn_like(y_fold) * (train_noise[src_idx] * test_std_value)
+                    elif noise_type == 'uniform':
+                        noise = (torch.rand_like(y_fold) - 0.5) * 2 * (train_noise[src_idx] * test_std_value)
+                    else:
+                        raise ValueError(f"Unknown noise_type: {noise_type}")
+                    y_fold = y_fold + noise
+                
+                # Add source column
+                source_column = torch.full((x_fold.shape[0], 1), src_idx, dtype=torch.float64)
+                x_fold_with_source = torch.cat([x_fold, source_column], dim=1)
+                
+                X_train_folds[fold].append(x_fold_with_source)
+                y_train_folds[fold].append(y_fold)
+    
     # Concatenate folds from all sources
-    for fold in range(num_runs):
-        X_train_folds[fold] = torch.cat(X_train_folds[fold], dim=0)
-        y_train_folds[fold] = torch.cat(y_train_folds[fold], dim=0)
+    for fold in range(num_folds):
+        if len(X_train_folds[fold]) > 0:
+            X_train_folds[fold] = torch.cat(X_train_folds[fold], dim=0)
+            y_train_folds[fold] = torch.cat(y_train_folds[fold], dim=0)
+        else:
+            # If fold is empty, create empty tensor with correct shape
+            X_train_folds[fold] = torch.empty((0, 5), dtype=torch.float64)
+            y_train_folds[fold] = torch.empty((0,), dtype=torch.float64)
     
     return X_train_folds, y_train_folds, X_test_all, y_test_all
 
@@ -1102,15 +950,177 @@ def generate_mf_buckling_data(train_samples_per_source: list[int], test_samples_
 
         # Apply noise scaled by test std
         if n_train > 0 and train_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_train_block, train_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_train_block) * (train_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_train_block) - 0.5) * 2 * (train_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_train_block = y_train_block + noise
 
         if n_test > 0 and test_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_test_block, test_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_test_block) * (test_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_test_block) - 0.5) * 2 * (test_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
+            y_test_block = y_test_block + noise
+
+        # Append source column and collect
+        X_test_list.append(torch.cat([x_test_block, src_test_block], dim=1))
+        y_test_list.append(y_test_block)
+        X_train_list.append(torch.cat([x_train_block, src_train_block], dim=1))
+        y_train_list.append(y_train_block)
+
+        cursor += n_total
+
+    X_train = torch.cat(X_train_list, dim=0) if X_train_list else torch.empty((0, 5), dtype=torch.float64)
+    y_train = torch.cat(y_train_list, dim=0) if y_train_list else torch.empty((0,), dtype=torch.float64)
+    X_test = torch.cat(X_test_list, dim=0) if X_test_list else torch.empty((0, 5), dtype=torch.float64)
+    y_test = torch.cat(y_test_list, dim=0) if y_test_list else torch.empty((0,), dtype=torch.float64)
+
+    return X_train, y_train, X_test, y_test
+
+
+def generate_mf_buckling_data_v2(train_samples_per_source: list[int], test_samples_per_source: list[int], 
+                              seed: int = None, train_noise: list[float] = None, test_noise: list[float] = None, 
+                              noise_type: str = 'gaussian', return_categorical: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Generate multi-fidelity Buckling data in the same way as wing MF:
+      - Draw a single Sobol batch per source (no repeats globally)
+      - Split into test then train per source
+      - Compute per-source test std after the split
+      - Scale both train and test additive noise by that test std
+
+    Returns:
+      - X_train, y_train: Training data with 5 features (4 continuous + 1 source class column in {0,1})
+        Where columns are [L (cont), E, K, I (categorical or values per return_categorical), source]
+      - X_test, y_test: Test data with 5 features (same schema as X_train)
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+    # else:
+    #     seed = 42
+    #     torch.manual_seed(seed)
+
+    # Defaults and validation for per-source noise (2 sources)
+    if train_noise is None:
+        train_noise = [0.0, 0.0]
+    if test_noise is None:
+        test_noise = [0.0, 0.0]
+    if isinstance(train_noise, (int, float)):
+        train_noise = [float(train_noise)] * 2
+    if isinstance(test_noise, (int, float)):
+        test_noise = [float(test_noise)] * 2
+    if len(train_noise) != 2 or len(test_noise) != 2:
+        raise ValueError("train_noise and test_noise must be length-2 (one scalar per source)")
+
+    sources = ["s0", "s1"]
+
+    # Bounds for the 4 continuous features (L, E, K, I)
+    l_bound = torch.tensor([0.5, 73.1, 0.5, 9.49], dtype=torch.float64)
+    u_bound = torch.tensor([1.5, 200.0, 2.0, 29.5], dtype=torch.float64)
+
+    # Total samples per source and overall
+    total_per_source = [tr + te for tr, te in zip(train_samples_per_source, test_samples_per_source)]
+    total_n = sum(total_per_source)
+
+    # Draw all Sobol samples at once and scale to bounds
+    sobol = torch.quasirandom.SobolEngine(dimension=4, scramble=True, seed=seed)
+    X_raw_all = sobol.draw(total_n).to(dtype=torch.float64)
+    X_raw_all = X_raw_all * (u_bound - l_bound) + l_bound
+
+    # Discrete value sets for categorical variables: E (col 1), K (col 2), I (col 3)
+    E_values = torch.tensor([73.1, 200.0], dtype=torch.float64)
+    K_values = torch.tensor([0.5, 0.7, 1.0, 2.0], dtype=torch.float64)
+    I_values = torch.tensor([9.49, 12.1, 29.5], dtype=torch.float64)
+
+    # Compute clean targets once per source in contiguous blocks
+    y_clean_all = torch.empty(total_n, dtype=torch.float64)
+    X_src_col_all = torch.empty((total_n, 1), dtype=torch.float64)
+    cursor = 0
+    for idx, (src, n) in enumerate(zip(sources, total_per_source)):
+        if n == 0:
+            continue
+        x_block = X_raw_all[cursor:cursor + n]
+
+        # Find nearest categorical indices for E, K, I
+        diffs = (x_block[:, 1:2] - E_values.unsqueeze(0))**2
+        nearest_idx_E = diffs.argmin(dim=1)
+        diffs = (x_block[:, 2:3] - K_values.unsqueeze(0))**2
+        nearest_idx_K = diffs.argmin(dim=1)
+        diffs = (x_block[:, 3:4] - I_values.unsqueeze(0))**2
+        nearest_idx_I = diffs.argmin(dim=1)
+
+        # Build a values-based view for computing y
+        x_vals = x_block.clone()
+        x_vals[:, 1] = E_values[nearest_idx_E]
+        x_vals[:, 2] = K_values[nearest_idx_K]
+        x_vals[:, 3] = I_values[nearest_idx_I]
+
+        # Compute targets using physical values, not indices
+        y_clean_all[cursor:cursor + n] = buckling_mixed_variables(x_vals, source=src)
+
+        # Store either indices or values in the master block according to flag
+        if return_categorical:
+            x_block[:, 1] = nearest_idx_E.to(torch.float64)
+            x_block[:, 2] = nearest_idx_K.to(torch.float64)
+            x_block[:, 3] = nearest_idx_I.to(torch.float64)
+        else:
+            x_block[:, 1] = x_vals[:, 1]
+            x_block[:, 2] = x_vals[:, 2]
+            x_block[:, 3] = x_vals[:, 3]
+        X_src_col_all[cursor:cursor + n, 0] = float(idx)
+        cursor += n
+
+    # Split per source into test then train; get test std after split and add noise scaled by it
+    X_train_list: list[torch.Tensor] = []
+    y_train_list: list[torch.Tensor] = []
+    X_test_list: list[torch.Tensor] = []
+    y_test_list: list[torch.Tensor] = []
+
+    cursor = 0
+    for idx, (src, n_total, n_test, n_train) in enumerate(
+        zip(sources, total_per_source, test_samples_per_source, train_samples_per_source)
+    ):
+        if n_total == 0:
+            continue
+        x_block = X_raw_all[cursor:cursor + n_total]
+        y_block = y_clean_all[cursor:cursor + n_total]
+        src_block = X_src_col_all[cursor:cursor + n_total]
+
+        # Split: first n_test -> test, remaining -> train
+        x_test_block = x_block[:n_test] if n_test > 0 else torch.empty((0, 4), dtype=torch.float64)
+        y_test_block = y_block[:n_test] if n_test > 0 else torch.empty((0,), dtype=torch.float64)
+        src_test_block = src_block[:n_test] if n_test > 0 else torch.empty((0, 1), dtype=torch.float64)
+        x_train_block = x_block[n_test:] if n_train > 0 else torch.empty((0, 4), dtype=torch.float64)
+        y_train_block = y_block[n_test:] if n_train > 0 else torch.empty((0,), dtype=torch.float64)
+        src_train_block = src_block[n_test:] if n_train > 0 else torch.empty((0, 1), dtype=torch.float64)
+
+        # Test std after split (per source)
+        if y_test_block.numel() > 1:
+            test_std_value = float(y_test_block.std().item())
+        else:
+            test_std_value = 0.0
+
+        # Apply noise scaled by test std
+        if n_train > 0 and train_noise[idx] > 0 and test_std_value > 0.0:
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_train_block) * (train_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_train_block) - 0.5) * 2 * (train_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
+            y_train_block = y_train_block + noise
+
+        if n_test > 0 and test_noise[idx] > 0 and test_std_value > 0.0:
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_test_block) * (test_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_test_block) - 0.5) * 2 * (test_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_test_block = y_test_block + noise
 
         # Append source column and collect
@@ -1278,15 +1288,21 @@ def generate_mf_borehole_data(
 
         # Apply noise scaled by test std
         if n_train > 0 and train_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_train_block, train_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_train_block) * (train_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_train_block) - 0.5) * 2 * (train_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_train_block = y_train_block + noise
 
         if n_test > 0 and test_noise[idx] > 0 and test_std_value > 0.0:
-            noise = _sample_noise_like(
-                y_test_block, test_noise[idx] * test_std_value, noise_type
-            )
+            if noise_type == 'gaussian':
+                noise = torch.randn_like(y_test_block) * (test_noise[idx] * test_std_value)
+            elif noise_type == 'uniform':
+                noise = (torch.rand_like(y_test_block) - 0.5) * 2 * (test_noise[idx] * test_std_value)
+            else:
+                raise ValueError(f"Unknown noise_type: {noise_type}")
             y_test_block = y_test_block + noise
 
         # Append numeric source id as 9th feature
@@ -1314,7 +1330,7 @@ def ackley_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor:
     The Ackley function is defined as:
     f(x) = -20 * exp(-0.2 * sqrt(1/d * sum(x_i^2))) - exp(1/d * sum(cos(2*pi*x_i))) + 20 + e
     
-    where x ∈ [-32.768, 32.768]^d and d is the number of dimensions
+    where x Γêê [-32.768, 32.768]^d and d is the number of dimensions
     
     Args:
         X (torch.Tensor): Input array of shape [n_samples, d] where d is the number of dimensions
@@ -1344,7 +1360,8 @@ def ackley_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor:
 
 
 def generate_ackley_data(n_train: int, n_test: int, dimensions: int = 2, x_bounds: list[float] = [-5, 10], train_noise: float = 0.0, 
-                        test_noise: float = 0.0, noise_type: str = 'gaussian', seed: int = None, V2: bool = False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+                        test_noise: float = 0.0, noise_type: str = 'gaussian', seed: int = None, V2: bool = False,
+                        n_val: int = 0) -> tuple:
     """
     Generate train and test data for the Ackley function using Sobol sequences.
     
@@ -1367,7 +1384,7 @@ def generate_ackley_data(n_train: int, n_test: int, dimensions: int = 2, x_bound
     u_bound = x_bounds[1]
     
     # Generate ALL samples at once to avoid repeats
-    total_samples = n_train + n_test
+    total_samples = n_train + n_val + n_test
     sobol = torch.quasirandom.SobolEngine(dimension=dimensions, scramble=True)
     X_all = sobol.draw(total_samples).to(dtype=torch.float64)
     
@@ -1380,11 +1397,13 @@ def generate_ackley_data(n_train: int, n_test: int, dimensions: int = 2, x_bound
     if V2:
         y_all = torch.log(y_all+1)
     
-    # Split into train and test
+    # Split into train, val, and test
     X_train = X_all[:n_train]
     y_train = y_all[:n_train]
-    X_test = X_all[n_train:]
-    y_test = y_all[n_train:]
+    X_val = X_all[n_train:n_train + n_val]
+    y_val = y_all[n_train:n_train + n_val]
+    X_test = X_all[n_train + n_val:]
+    y_test = y_all[n_train + n_val:]
     
     # Add noise separately to train and test
     # Both train and test noise are based on TEST std
@@ -1392,472 +1411,37 @@ def generate_ackley_data(n_train: int, n_test: int, dimensions: int = 2, x_bound
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
-    
-    if test_noise > 0:
-        noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
-        y_test = y_test + noise
-    
-    return X_train, y_train, X_test, y_test
 
-
-def tabpfn_1d_sin_plus_x_function(X: torch.Tensor) -> torch.Tensor:
-    """f(x) = sin(x) + x for X of shape (n, 1). TabPFN-style 1D toy (Hollmann et al.)."""
-    x = X[:, 0]
-    return torch.sin(x) + x
-
-
-def tabpfn_1d_sin_2pi_x_plus_x_function(X: torch.Tensor) -> torch.Tensor:
-    """f(x) = sin(2*pi*x) + x for X of shape (n, 1)."""
-    x = X[:, 0]
-    return torch.sin(2 * torch.pi * x) + x
-
-
-def tabpfn_1d_sin_2pi_x_function(X: torch.Tensor) -> torch.Tensor:
-    """f(x) = sin(2*pi*x) for X of shape (n, 1)."""
-    x = X[:, 0]
-    return torch.sin(2 * torch.pi * x)
-
-
-def tabpfn_1d_sin_2pi_x_windowed_function(X: torch.Tensor) -> torch.Tensor:
-    """
-    f(x) = sin(2*pi*x) on [-1, 1], and 0 outside.
-    Useful for extended-domain tests on [-2, 2].
-    """
-    x = X[:, 0]
-    mask = (x >= -1.0) & (x <= 1.0)
-    y_mid = torch.sin(2 * torch.pi * x)
-    return torch.where(mask, y_mid, torch.zeros_like(x))
-
-
-def tabpfn_1d_sin_2pi_x_plus_x_windowed_function(X: torch.Tensor) -> torch.Tensor:
-    """
-    f(x) = sin(2*pi*x) + x on [-1, 1], and 0 outside.
-    Useful for extended-domain tests on [-2, 2].
-    """
-    x = X[:, 0]
-    mask = (x >= -1.0) & (x <= 1.0)
-    y_mid = torch.sin(2 * torch.pi * x) + x
-    return torch.where(mask, y_mid, torch.zeros_like(x))
-
-
-def tabpfn_1d_x_squared_function(X: torch.Tensor) -> torch.Tensor:
-    """f(x) = x^2 for X of shape (n, 1)."""
-    return X[:, 0] ** 2
-
-
-def mt_analytic_1d_function(X: torch.Tensor) -> torch.Tensor:
-    """Multi-task 1D analytic: task0=x^2, task1=sin(pi*x)+4x. Returns (n, 2)."""
-    x = X[:, 0]
-    y0 = x ** 2
-    y1 = torch.sin(torch.pi * x) + 4 * x
-    return torch.stack([y0, y1], dim=1)
-
-
-def tabpfn_1d_abs_x_function(X: torch.Tensor) -> torch.Tensor:
-    """f(x) = |x| for X of shape (n, 1)."""
-    return torch.abs(X[:, 0])
-
-
-def tabpfn_1d_linear_function(
-    X: torch.Tensor,
-    slope: float = 3.0,
-    intercept: float = 0.0,
-) -> torch.Tensor:
-    """f(x) = slope * x + intercept for X of shape (n, 1)."""
-    x = X[:, 0]
-    return slope * x + intercept
-
-
-def tabpfn_1d_step_function(
-    X: torch.Tensor,
-    x_bounds: tuple[float, float] = (-0.5, 0.5),
-    step_values: tuple[float, ...] = (-0.4, -0.2, 0.1, 0.4),
-) -> torch.Tensor:
-    """
-    Piecewise-constant step function on equal-width bins along x (TabPFN Figure 3 style).
-
-    Default: four steps on [-0.5, 0.5] with plateaus -0.4, -0.2, 0.1, 0.4.
-    """
-    l_bound, u_bound = x_bounds
-    x = X[:, 0]
-    n_steps = len(step_values)
-    width = (u_bound - l_bound) / n_steps
-    bin_idx = torch.floor((x - l_bound) / width).long().clamp(0, n_steps - 1)
-    levels = torch.tensor(step_values, dtype=x.dtype, device=x.device)
-    return levels[bin_idx]
-
-
-def _generate_tabpfn_1d_toy_data(
-    n_train: int,
-    n_test: int,
-    y_fn,
-    x_bounds: list[float],
-    test_x_bounds: list[float] | None,
-    train_noise: float,
-    test_noise: float,
-    noise_type: str,
-    seed: int | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Sobol samples in 1D, evaluate y_fn(X), add noise; train/test can use different domains."""
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    train_l_bound = x_bounds[0]
-    train_u_bound = x_bounds[1]
-    if test_x_bounds is None:
-        test_l_bound, test_u_bound = train_l_bound, train_u_bound
-    else:
-        test_l_bound, test_u_bound = test_x_bounds[0], test_x_bounds[1]
-
-    sobol = torch.quasirandom.SobolEngine(dimension=1, scramble=True)
-    X_train = sobol.draw(n_train).to(dtype=torch.float64)
-    X_test = sobol.draw(n_test).to(dtype=torch.float64)
-    X_train = X_train * (train_u_bound - train_l_bound) + train_l_bound
-    X_test = X_test * (test_u_bound - test_l_bound) + test_l_bound
-
-    y_train = y_fn(X_train)
-    y_test = y_fn(X_test)
-
-    y_test_std = y_test.std()
-
-    if train_noise > 0:
+    if n_val > 0 and train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
-        y_train = y_train + noise
-
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_val) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_val) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
+        y_val = y_val + noise
+    
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
-
+    
+    if n_val > 0:
+        return X_train, y_train, X_val, y_val, X_test, y_test
     return X_train, y_train, X_test, y_test
-
-
-def generate_mt_analytic_1d_data(
-    n_train: int,
-    n_test: int,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for multi-task 1D analytic (x^2, sin(pi*x)+4x); default x in [-1, 1]."""
-    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        mt_analytic_1d_function,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_sin_plus_x_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Train/test data for f(x) = sin(x) + x on an interval (default [-0.5, 0.5], as in TabPFN Fig. 3).
-    """
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train, n_test, tabpfn_1d_sin_plus_x_function, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed
-    )
-
-
-def generate_tabpfn_1d_x_squared_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for f(x) = x^2 (default x in [-0.5, 0.5])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train, n_test, tabpfn_1d_x_squared_function, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed
-    )
-
-
-def generate_tabpfn_1d_abs_x_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for f(x) = |x| (default x in [-0.5, 0.5])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train, n_test, tabpfn_1d_abs_x_function, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed
-    )
-
-
-def generate_tabpfn_1d_step_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    step_values: tuple[float, ...] = (-0.4, -0.2, 0.1, 0.4),
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Train/test data for a 4-step piecewise constant on equal bins (TabPFN Fig. 3 defaults).
-    Bins cover x_bounds; step_values must have one value per bin (default four plateaus).
-    """
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
-    tb = (bounds[0], bounds[1])
-
-    def y_fn(X):
-        return tabpfn_1d_step_function(X, x_bounds=tb, step_values=step_values)
-
-    return _generate_tabpfn_1d_toy_data(
-        n_train, n_test, y_fn, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed
-    )
-
-
-def generate_tabpfn_1d_sin_2pi_x_plus_x_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for f(x) = sin(2*pi*x) + x (default x in [-1, 1])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        tabpfn_1d_sin_2pi_x_plus_x_function,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_sin_2pi_x_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for f(x) = sin(2*pi*x) (default x in [-1, 1])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        tabpfn_1d_sin_2pi_x_function,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_sin_2pi_x_windowed_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for windowed f(x) = sin(2*pi*x), zero outside [-1, 1] (default x in [-2, 2])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-2.0, 2.0] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        tabpfn_1d_sin_2pi_x_windowed_function,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_sin_2pi_x_plus_x_windowed_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Train/test data for windowed f(x) = sin(2*pi*x)+x, zero outside [-1, 1] (default x in [-2, 2])."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-2.0, 2.0] if x_bounds is None else x_bounds
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        tabpfn_1d_sin_2pi_x_plus_x_windowed_function,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_linear_homoscedastic_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    slope: float = 1.0,
-    intercept: float = 0.0,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Linear 1D data with homoscedastic noise."""
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
-
-    def y_fn(X):
-        return tabpfn_1d_linear_function(X, slope=slope, intercept=intercept)
-
-    return _generate_tabpfn_1d_toy_data(
-        n_train,
-        n_test,
-        y_fn,
-        bounds,
-        test_x_bounds,
-        train_noise,
-        test_noise,
-        noise_type,
-        seed,
-    )
-
-
-def generate_tabpfn_1d_linear_heteroscedastic_data(
-    n_train: int,
-    n_test: int,
-    dimensions: int = 1,
-    x_bounds: list[float] | None = None,
-    test_x_bounds: list[float] | None = None,
-    slope: float = 1.0,
-    intercept: float = 0.0,
-    train_noise: float = 0.0,
-    test_noise: float = 0.0,
-    noise_type: str = "gaussian",
-    seed: int | None = None,
-    hetero_min_scale: float = 0.1,
-    hetero_max_scale: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Linear 1D data with heteroscedastic noise increasing left->right.
-    Noise std is scaled linearly from hetero_min_scale to hetero_max_scale across each split domain.
-    """
-    if dimensions != 1:
-        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
-    if seed is not None:
-        torch.manual_seed(seed)
-    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
-    train_l, train_u = bounds[0], bounds[1]
-    if test_x_bounds is None:
-        test_l, test_u = train_l, train_u
-    else:
-        test_l, test_u = test_x_bounds[0], test_x_bounds[1]
-
-    sobol = torch.quasirandom.SobolEngine(dimension=1, scramble=True)
-    X_train = sobol.draw(n_train).to(dtype=torch.float64)
-    X_test = sobol.draw(n_test).to(dtype=torch.float64)
-    X_train = X_train * (train_u - train_l) + train_l
-    X_test = X_test * (test_u - test_l) + test_l
-
-    y_train = tabpfn_1d_linear_function(X_train, slope=slope, intercept=intercept)
-    y_test = tabpfn_1d_linear_function(X_test, slope=slope, intercept=intercept)
-
-    y_test_std = y_test.std()
-
-    def _linear_scale(x, l_bound, u_bound):
-        denom = max(u_bound - l_bound, 1e-12)
-        w = ((x - l_bound) / denom).clamp(0.0, 1.0)
-        return hetero_min_scale + (hetero_max_scale - hetero_min_scale) * w
-
-    if train_noise > 0:
-        base = train_noise * y_test_std
-        scale = _linear_scale(X_train[:, 0], train_l, train_u)
-        noise = _sample_noise_like(y_train, base * scale, noise_type)
-        y_train = y_train + noise
-
-    if test_noise > 0:
-        base = test_noise * y_test_std
-        scale = _linear_scale(X_test[:, 0], test_l, test_u)
-        noise = _sample_noise_like(y_test, base * scale, noise_type)
-        y_test = y_test + noise
-
-    return X_train, y_train, X_test, y_test
-
 
 def rastrigin_function(X: torch.Tensor, dimensions: int = None, shift: torch.Tensor | float | None = None) -> torch.Tensor:
     """
@@ -1868,7 +1452,7 @@ def rastrigin_function(X: torch.Tensor, dimensions: int = None, shift: torch.Ten
     
     For shifted Rastrigin: f(x - shift)
     
-    where x ∈ [-5.12, 5.12]^d and d is the number of dimensions
+    where x Γêê [-5.12, 5.12]^d and d is the number of dimensions
     
     Args:
         X (torch.Tensor): Input array of shape [n_samples, d] where d is the number of dimensions
@@ -1970,12 +1554,22 @@ def generate_rastrigin_data(n_train: int, n_test: int, dimensions: int = 2, x_bo
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -1987,7 +1581,7 @@ def rosenbrock_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor
     The Rosenbrock function is defined as:
     f(x) = sum_{i=1}^{d-1} [100*(x_{i+1} - x_i^2)^2 + (1 - x_i)^2]
     
-    where x ∈ [-5, 10]^d and d is the number of dimensions
+    where x Γêê [-5, 10]^d and d is the number of dimensions
     
     Args:
         X (torch.Tensor): Input array of shape [n_samples, d] where d is the number of dimensions
@@ -2057,12 +1651,22 @@ def generate_rosenbrock_data(n_train: int, n_test: int, dimensions: int = 2, x_b
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2075,7 +1679,7 @@ def zakharov_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor:
     The Zakharov function is defined as:
     f(x) = sum_{i=1}^{d} x_i^2 + (sum_{i=1}^{d} 0.5*i*x_i)^2 + (sum_{i=1}^{d} 0.5*i*x_i)^4
     
-    where x ∈ [-5, 10]^d and d is the number of dimensions
+    where x Γêê [-5, 10]^d and d is the number of dimensions
     
     Args:
         X (torch.Tensor): Input array of shape [n_samples, d] where d is the number of dimensions
@@ -2153,12 +1757,22 @@ def generate_zakharov_data(n_train: int, n_test: int, dimensions: int = 2, x_bou
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2169,9 +1783,9 @@ def michalewicz_function(X: torch.Tensor, dimensions: int = None, m: float = 10.
     Compute the Michalewicz function for given input variables.
     
     The Michalewicz function is defined as:
-    f(x) = -sum_{i=1}^{d} sin(x_i) * sin^{2m}(i*x_i^2/π)
+    f(x) = -sum_{i=1}^{d} sin(x_i) * sin^{2m}(i*x_i^2/╧Ç)
     
-    where x ∈ [0, π]^d and d is the number of dimensions
+    where x Γêê [0, ╧Ç]^d and d is the number of dimensions
     m is typically 10
     
     Args:
@@ -2188,7 +1802,7 @@ def michalewicz_function(X: torch.Tensor, dimensions: int = None, m: float = 10.
     # Create indices [1, 2, 3, ..., d] for each sample
     i_values = torch.arange(1, dimensions + 1, dtype=X.dtype, device=X.device)
     
-    # Compute sin(x_i) * sin^{2m}(i*x_i^2/π) for each dimension
+    # Compute sin(x_i) * sin^{2m}(i*x_i^2/╧Ç) for each dimension
     sin_x = torch.sin(X)
     sin_power_arg = i_values.unsqueeze(0) * X**2 / torch.pi
     sin_power = torch.sin(sin_power_arg) ** (2 * m)
@@ -2209,7 +1823,7 @@ def generate_michalewicz_data(n_train: int, n_test: int, dimensions: int = 2, x_
         n_train (int): Number of training samples to generate
         n_test (int): Number of test samples to generate
         dimensions (int): Number of dimensions for the Michalewicz function
-        x_bounds (list[float]): Bounds for each dimension [lower, upper] (default: [0, π])
+        x_bounds (list[float]): Bounds for each dimension [lower, upper] (default: [0, ╧Ç])
         train_noise (float): Noise level for training data as a fraction of std
         test_noise (float): Noise level for test data as a fraction of std
         noise_type (str): Type of noise ('gaussian' or 'uniform')
@@ -2248,12 +1862,22 @@ def generate_michalewicz_data(n_train: int, n_test: int, dimensions: int = 2, x_
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2264,14 +1888,14 @@ def keane_bump_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor
     Compute the Keane Bump function for given input variables.
     
     The Keane Bump function is defined as:
-    f(x) = - | ( Σ_{i=1}^{d} cos⁴(x_i) - 2 Π_{i=1}^{d} cos²(x_i) ) / √( Σ_{i=1}^{d} i * x_i² ) |
+    f(x) = - | ( ╬ú_{i=1}^{d} cosΓü┤(x_i) - 2 ╬á_{i=1}^{d} cos┬▓(x_i) ) / ΓêÜ( ╬ú_{i=1}^{d} i * x_i┬▓ ) |
     
-    where x ∈ [0, 10]^d and d is the number of dimensions
+    where x Γêê [0, 10]^d and d is the number of dimensions
     
     Note: Constraints are ignored for prediction/regression tasks.
     The constraints are:
-    - c₁(x) = 0.75 - Π_{i=1}^{d} x_i ≤ 0
-    - c₂(x) = Σ_{i=1}^{d} x_i - 7.5d ≤ 0
+    - cΓéü(x) = 0.75 - ╬á_{i=1}^{d} x_i Γëñ 0
+    - cΓéé(x) = ╬ú_{i=1}^{d} x_i - 7.5d Γëñ 0
     
     Args:
         X (torch.Tensor): Input array of shape [n_samples, d] where d is the number of dimensions
@@ -2283,21 +1907,21 @@ def keane_bump_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor
     if dimensions is None:
         dimensions = X.shape[1]
     
-    # Compute numerator: Σ_{i=1}^{d} cos⁴(x_i) - 2 Π_{i=1}^{d} cos²(x_i)
+    # Compute numerator: ╬ú_{i=1}^{d} cosΓü┤(x_i) - 2 ╬á_{i=1}^{d} cos┬▓(x_i)
     cos_x = torch.cos(X)
     cos_squared = cos_x ** 2
     cos_fourth = cos_squared ** 2
     
-    # Sum of cos⁴ terms
+    # Sum of cosΓü┤ terms
     sum_cos_fourth = torch.sum(cos_fourth, dim=1)
     
-    # Product of cos² terms
+    # Product of cos┬▓ terms
     prod_cos_squared = torch.prod(cos_squared, dim=1)
     
     # Numerator
     numerator = sum_cos_fourth - 2 * prod_cos_squared
     
-    # Compute denominator: √( Σ_{i=1}^{d} i * x_i² )
+    # Compute denominator: ΓêÜ( ╬ú_{i=1}^{d} i * x_i┬▓ )
     # Create indices for each dimension: [1, 2, 3, ..., d]
     indices = torch.arange(1, dimensions + 1, dtype=X.dtype, device=X.device).unsqueeze(0)
     x_squared = X ** 2
@@ -2360,12 +1984,22 @@ def generate_keane_bump_data(n_train: int, n_test: int, dimensions: int = 30, x_
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2383,7 +2017,7 @@ def rover_trajectory_function(X: torch.Tensor, num_design_points: int = 30,
     collisions with obstacles by -20.
     
     Args:
-        X (torch.Tensor): Input array of shape [n_samples, 60] where 60 = 30 design points × 2D
+        X (torch.Tensor): Input array of shape [n_samples, 60] where 60 = 30 design points ├ù 2D
         num_design_points (int): Number of design points (default: 30)
         start_location (torch.Tensor): Start location [x, y] (default: [0.0, 0.0])
         end_location (torch.Tensor): End location [x, y] (default: [10.0, 10.0])
@@ -2495,12 +2129,12 @@ def generate_rover_trajectory_data(n_train: int, n_test: int, dimensions: int = 
     Generate train and test data for the 60D Rover Trajectory Planning problem using Sobol sequences.
     
     The problem involves optimizing a rover's trajectory defined by 30 design points in a 2D plane
-    (60 dimensions total: 30 points × 2 coordinates).
+    (60 dimensions total: 30 points ├ù 2 coordinates).
     
     Args:
         n_train (int): Number of training samples to generate
         n_test (int): Number of test samples to generate
-        dimensions (int): Number of dimensions (default: 60 for 30 design points × 2D)
+        dimensions (int): Number of dimensions (default: 60 for 30 design points ├ù 2D)
         train_noise (float): Noise level for training data as a fraction of std
         test_noise (float): Noise level for test data as a fraction of std
         noise_type (str): Type of noise ('gaussian' or 'uniform')
@@ -2548,12 +2182,22 @@ def generate_rover_trajectory_data(n_train: int, n_test: int, dimensions: int = 
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2564,9 +2208,9 @@ def powell_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor:
     Compute the Powell function for given input variables.
     
     The Powell function is defined as:
-    f(x) = Σ_{i=1}^{d/4} [ (x_{4i-3} + 10x_{4i-2})^2 + 5(x_{4i-1} - x_{4i})^2 + (x_{4i-2} - 2x_{4i-1})^4 + 10(x_{4i-3} - x_{4i})^4 ]
+    f(x) = ╬ú_{i=1}^{d/4} [ (x_{4i-3} + 10x_{4i-2})^2 + 5(x_{4i-1} - x_{4i})^2 + (x_{4i-2} - 2x_{4i-1})^4 + 10(x_{4i-3} - x_{4i})^4 ]
     
-    where x ∈ [-4, 5]^d and d is the number of dimensions (must be a multiple of 4)
+    where x Γêê [-4, 5]^d and d is the number of dimensions (must be a multiple of 4)
     
     Global minimum: f(x*) = 0, at x* = (0,..., 0)
     
@@ -2665,12 +2309,22 @@ def generate_powell_data(n_train: int, n_test: int, dimensions: int = 4, x_bound
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2683,7 +2337,7 @@ def griewank_function(X: torch.Tensor, dimensions: int = None) -> torch.Tensor:
     The Griewank function is defined as:
     f(x) = sum_{i=1}^{d} (x_i^2 / 4000) - product_{i=1}^{d} cos(x_i / sqrt(i)) + 1
     
-    where x ∈ [-600, 600]^d and d is the number of dimensions
+    where x Γêê [-600, 600]^d and d is the number of dimensions
     
     Global minimum: f(x*) = 0, at x* = (0,...,0)
     
@@ -2764,12 +2418,22 @@ def generate_griewank_data(n_train: int, n_test: int, dimensions: int = 2, x_bou
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2782,7 +2446,7 @@ def dixon_price_function(X: torch.Tensor, dimensions: int = None) -> torch.Tenso
     The Dixon-Price function is defined as:
     f(x) = (x_1 - 1)^2 + sum_{i=2}^{d} i * (2x_i^2 - x_{i-1})^2
     
-    where x ∈ [-10, 10]^d and d is the number of dimensions
+    where x Γêê [-10, 10]^d and d is the number of dimensions
     
     Global minimum: f(x*) = 0, at x_i = 2^((2^(i-1) - 1) / 2^(i-1)) for i = 1, ..., d
     
@@ -2869,12 +2533,22 @@ def generate_dixon_price_data(n_train: int, n_test: int, dimensions: int = 2, x_
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
@@ -2887,7 +2561,7 @@ def styblinski_tang_function(X: torch.Tensor, dimensions: int = None) -> torch.T
     The Styblinski-Tang function is defined as:
     f(x) = (1/2) * sum_{i=1}^{d} (x_i^4 - 16x_i^2 + 5x_i)
     
-    where x ∈ [-5, 5]^d and d is the number of dimensions
+    where x Γêê [-5, 5]^d and d is the number of dimensions
     
     Global minimum: f(x*) = -39.16599d, at x* = (-2.903534, ..., -2.903534)
     
@@ -2962,134 +2636,288 @@ def generate_styblinski_tang_data(n_train: int, n_test: int, dimensions: int = 2
     
     if train_noise > 0:
         noise_scale = train_noise * y_test_std
-        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_train) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_train) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_train = y_train + noise
     
     if test_noise > 0:
         noise_scale = test_noise * y_test_std
-        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        if noise_type == 'gaussian':
+            noise = torch.randn_like(y_test) * noise_scale
+        elif noise_type == 'uniform':
+            noise = (torch.rand_like(y_test) - 0.5) * 2 * noise_scale
+        else:
+            raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'")
         y_test = y_test + noise
     
     return X_train, y_train, X_test, y_test
 
 
-def load_dns_rom_data_all(print_info=False):
-    """
-    Load all DNS ROM multi-fidelity data from CSV files without splitting.
-    
-    CSV files are located in experiments_kian/data/DNS_ROM/:
-    - Data_high.csv (source 0)
-    - Data_LF1.csv (source 1)
-    - Data_LF2.csv (source 2)
-    - Data_LF3.csv (source 3)
-    
-    Each CSV has format: [6 input features, source_id, y]
-    
-    Args:
-        print_info (bool): If True, prints information about the loaded data
-        
-    Returns:
-        X, y: All data with 7 features (6 continuous + 1 source column in {0,1,2,3})
-    """
-    # Path to DNS ROM data directory
-    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'DNS_ROM')
-    data_dir = os.path.abspath(data_dir)
-    
-    # Load CSV files
-    csv_files = [
-        os.path.join(data_dir, 'Data_high.csv'),  # source 0
-        os.path.join(data_dir, 'Data_LF1.csv'),  # source 1
-        os.path.join(data_dir, 'Data_LF2.csv'),  # source 2
-        os.path.join(data_dir, 'Data_LF3.csv'),  # source 3
-    ]
-    
-    # Load and combine all data
-    all_data_list = []
-    for source_idx, csv_path in enumerate(csv_files):
-        if not os.path.isfile(csv_path):
-            raise FileNotFoundError(f"Could not find DNS ROM data file: {csv_path}")
-        
-        df = pd.read_csv(csv_path, header=None)
-        arr = df.values.astype(np.float64)
-        
-        # Verify format: should have 8 columns (6 features + source + y)
-        if arr.shape[1] != 8:
-            raise ValueError(f"Expected 8 columns in {csv_path}, got {arr.shape[1]}")
-        
-        # Verify source column matches expected source
-        source_col = arr[:, 6].astype(int)
-        if not np.all(source_col == source_idx):
-            # If source column doesn't match, set it to the expected source
-            arr[:, 6] = source_idx
-        
-        all_data_list.append(arr)
-    
-    # Combine all sources
-    all_data = np.vstack(all_data_list)
-    
-    # Extract features (first 6 columns), source (column 6), and y (column 7)
-    X_features = torch.tensor(all_data[:, :6], dtype=torch.float64)
-    source_ids = torch.tensor(all_data[:, 6], dtype=torch.float64)
-    y_all = torch.tensor(all_data[:, 7], dtype=torch.float64)
-    
-    # Append source id as 7th feature
-    source_col = source_ids.unsqueeze(1)
-    X = torch.cat([X_features, source_col], dim=1)
-    
-    if print_info:
-        print(f"Loaded DNS ROM data:")
-        print(f"  Total samples: {len(X)}")
-        print(f"  X shape: {X.shape}")
-        print(f"  y shape: {y_all.shape}")
-        for source_idx in range(4):
-            source_mask = source_ids == source_idx
-            n_samples = source_mask.sum().item()
-            print(f"  Source {source_idx}: {n_samples} samples")
-    
-    return X, y_all
+def _sample_noise_like(
+    reference: torch.Tensor,
+    noise_scale: torch.Tensor | float,
+    noise_type: str,
+) -> torch.Tensor:
+    """Sample zero-mean noise with target std set by noise_scale."""
+    if noise_type == "gaussian":
+        return torch.randn_like(reference) * noise_scale
+    if noise_type == "uniform":
+        return (torch.rand_like(reference) - 0.5) * 2 * noise_scale
+    raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'uniform'.")
 
 
-def load_dns_rom_hf_data(print_info=False):
-    """
-    Load only high-fidelity DNS ROM data from Data_high.csv (single-fidelity version).
-    
-    CSV file is located in experiments_kian/data/DNS_ROM/:
-    - Data_high.csv
-    
-    Each CSV has format: [6 input features, source_id, y]
-    
-    Args:
-        print_info (bool): If True, prints information about the loaded data
-        
-    Returns:
-        X, y: Data with 6 features (no source column)
-    """
-    # Path to DNS ROM data directory
-    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'DNS_ROM')
-    data_dir = os.path.abspath(data_dir)
-    
-    # Load only high-fidelity CSV file
-    csv_path = os.path.join(data_dir, 'Data_high.csv')
-    
-    if not os.path.isfile(csv_path):
-        raise FileNotFoundError(f"Could not find DNS ROM data file: {csv_path}")
-    
-    df = pd.read_csv(csv_path, header=None)
-    arr = df.values.astype(np.float64)
-    
-    # Verify format: should have 8 columns (6 features + source + y)
-    if arr.shape[1] != 8:
-        raise ValueError(f"Expected 8 columns in {csv_path}, got {arr.shape[1]}")
-    
-    # Extract features (first 6 columns) and y (column 7)
-    # Don't include source column for single-fidelity
-    X = torch.tensor(arr[:, :6], dtype=torch.float64)
-    y = torch.tensor(arr[:, 7], dtype=torch.float64)
-    
-    if print_info:
-        print(f"Loaded DNS ROM high-fidelity data:")
-        print(f"  Total samples: {len(X)}")
-        print(f"  X shape: {X.shape}")
-        print(f"  y shape: {y.shape}")
-    
-    return X, y
+def tabpfn_1d_sin_freq_x_function(X: torch.Tensor, frequency: float = 2.0) -> torch.Tensor:
+    """f(x) = sin(frequency * pi * x) for X of shape (n, 1); frequency=2 gives sin(2*pi*x)."""
+    x = X[:, 0]
+    return torch.sin(frequency * torch.pi * x)
+
+
+def tabpfn_1d_x_squared_function(X: torch.Tensor) -> torch.Tensor:
+    """f(x) = x^2 for X of shape (n, 1)."""
+    return X[:, 0] ** 2
+
+
+def tabpfn_1d_abs_x_function(X: torch.Tensor) -> torch.Tensor:
+    """f(x) = |x| for X of shape (n, 1)."""
+    return torch.abs(X[:, 0])
+
+
+def tabpfn_1d_linear_function(
+    X: torch.Tensor,
+    slope: float = 3.0,
+    intercept: float = 0.0,
+) -> torch.Tensor:
+    """f(x) = slope * x + intercept for X of shape (n, 1)."""
+    x = X[:, 0]
+    return slope * x + intercept
+
+
+def tabpfn_1d_step_function(
+    X: torch.Tensor,
+    x_bounds: tuple[float, float] = (-0.5, 0.5),
+    step_values: tuple[float, ...] = (-0.4, -0.2, 0.1, 0.4),
+) -> torch.Tensor:
+    """Piecewise-constant step function on equal-width bins along x."""
+    l_bound, u_bound = x_bounds
+    x = X[:, 0]
+    n_steps = len(step_values)
+    width = (u_bound - l_bound) / n_steps
+    bin_idx = torch.floor((x - l_bound) / width).long().clamp(0, n_steps - 1)
+    levels = torch.tensor(step_values, dtype=x.dtype, device=x.device)
+    return levels[bin_idx]
+
+
+def _generate_tabpfn_1d_toy_data(
+    n_train: int,
+    n_test: int,
+    y_fn,
+    x_bounds: list[float],
+    test_x_bounds: list[float] | None,
+    train_noise: float,
+    test_noise: float,
+    noise_type: str,
+    seed: int | None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Sobol samples in 1D, evaluate y_fn(X), add noise; train/val/test can use different domains."""
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    train_l_bound = x_bounds[0]
+    train_u_bound = x_bounds[1]
+    if test_x_bounds is None:
+        test_l_bound, test_u_bound = train_l_bound, train_u_bound
+    else:
+        test_l_bound, test_u_bound = test_x_bounds[0], test_x_bounds[1]
+
+    sobol = torch.quasirandom.SobolEngine(dimension=1, scramble=True)
+    X_train = sobol.draw(n_train).to(dtype=torch.float64)
+    X_test = sobol.draw(n_test).to(dtype=torch.float64)
+    X_train = X_train * (train_u_bound - train_l_bound) + train_l_bound
+    X_test = X_test * (test_u_bound - test_l_bound) + test_l_bound
+
+    y_train = y_fn(X_train)
+    y_test = y_fn(X_test)
+
+    X_val = torch.empty((0, 1), dtype=torch.float64)
+    y_val = torch.empty((0,), dtype=torch.float64)
+    if n_val > 0:
+        if val_seed is not None:
+            torch.manual_seed(val_seed)
+        val_sobol = torch.quasirandom.SobolEngine(dimension=1, scramble=True)
+        X_val = val_sobol.draw(n_val).to(dtype=torch.float64)
+        X_val = X_val * (train_u_bound - train_l_bound) + train_l_bound
+        y_val = y_fn(X_val)
+
+    y_test_std = y_test.std()
+
+    if train_noise > 0:
+        noise_scale = train_noise * y_test_std
+        noise = _sample_noise_like(y_train, noise_scale, noise_type)
+        y_train = y_train + noise
+
+    if n_val > 0 and train_noise > 0:
+        noise_scale = train_noise * y_test_std
+        noise = _sample_noise_like(y_val, noise_scale, noise_type)
+        y_val = y_val + noise
+
+    if test_noise > 0:
+        noise_scale = test_noise * y_test_std
+        noise = _sample_noise_like(y_test, noise_scale, noise_type)
+        y_test = y_test + noise
+
+    if n_val > 0:
+        return X_train, y_train, X_val, y_val, X_test, y_test
+    return X_train, y_train, X_test, y_test
+
+
+def generate_tabpfn_1d_x_squared_data(
+    n_train: int,
+    n_test: int,
+    dimensions: int = 1,
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    train_noise: float = 0.0,
+    test_noise: float = 0.0,
+    noise_type: str = "gaussian",
+    seed: int | None = None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Train/test data for f(x) = x^2 (default x in [-0.5, 0.5])."""
+    if dimensions != 1:
+        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
+    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
+    return _generate_tabpfn_1d_toy_data(
+        n_train, n_test, tabpfn_1d_x_squared_function, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed, n_val, val_seed
+    )
+
+
+def generate_tabpfn_1d_abs_x_data(
+    n_train: int,
+    n_test: int,
+    dimensions: int = 1,
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    train_noise: float = 0.0,
+    test_noise: float = 0.0,
+    noise_type: str = "gaussian",
+    seed: int | None = None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Train/test data for f(x) = |x| (default x in [-0.5, 0.5])."""
+    if dimensions != 1:
+        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
+    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
+    return _generate_tabpfn_1d_toy_data(
+        n_train, n_test, tabpfn_1d_abs_x_function, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed, n_val, val_seed
+    )
+
+
+def generate_tabpfn_1d_step_data(
+    n_train: int,
+    n_test: int,
+    dimensions: int = 1,
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    step_values: tuple[float, ...] = (-0.4, -0.2, 0.1, 0.4),
+    train_noise: float = 0.0,
+    test_noise: float = 0.0,
+    noise_type: str = "gaussian",
+    seed: int | None = None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Train/test data for a 4-step piecewise constant on equal bins."""
+    if dimensions != 1:
+        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
+    bounds = [-0.5, 0.5] if x_bounds is None else x_bounds
+    tb = (bounds[0], bounds[1])
+
+    def y_fn(X):
+        return tabpfn_1d_step_function(X, x_bounds=tb, step_values=step_values)
+
+    return _generate_tabpfn_1d_toy_data(
+        n_train, n_test, y_fn, bounds, test_x_bounds, train_noise, test_noise, noise_type, seed, n_val, val_seed
+    )
+
+
+def generate_tabpfn_1d_sin_freq_x_data(
+    n_train: int,
+    n_test: int,
+    dimensions: int = 1,
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    frequency: float = 2.0,
+    train_noise: float = 0.0,
+    test_noise: float = 0.0,
+    noise_type: str = "gaussian",
+    seed: int | None = None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Train/test data for f(x) = sin(frequency*pi*x) (default x in [-1, 1], frequency=2)."""
+    if dimensions != 1:
+        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
+    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
+
+    def y_fn(X):
+        return tabpfn_1d_sin_freq_x_function(X, frequency=frequency)
+
+    return _generate_tabpfn_1d_toy_data(
+        n_train,
+        n_test,
+        y_fn,
+        bounds,
+        test_x_bounds,
+        train_noise,
+        test_noise,
+        noise_type,
+        seed,
+        n_val,
+        val_seed,
+    )
+
+
+def generate_tabpfn_1d_linear_homoscedastic_data(
+    n_train: int,
+    n_test: int,
+    dimensions: int = 1,
+    x_bounds: list[float] | None = None,
+    test_x_bounds: list[float] | None = None,
+    slope: float = 1.0,
+    intercept: float = 0.0,
+    train_noise: float = 0.0,
+    test_noise: float = 0.0,
+    noise_type: str = "gaussian",
+    seed: int | None = None,
+    n_val: int = 0,
+    val_seed: int | None = None,
+) -> tuple:
+    """Linear 1D data with homoscedastic noise."""
+    if dimensions != 1:
+        raise ValueError(f"TabPFN 1D toys require dimensions=1, got {dimensions}")
+    bounds = [-1.0, 1.0] if x_bounds is None else x_bounds
+
+    def y_fn(X):
+        return tabpfn_1d_linear_function(X, slope=slope, intercept=intercept)
+
+    return _generate_tabpfn_1d_toy_data(
+        n_train,
+        n_test,
+        y_fn,
+        bounds,
+        test_x_bounds,
+        train_noise,
+        test_noise,
+        noise_type,
+        seed,
+        n_val,
+        val_seed,
+    )

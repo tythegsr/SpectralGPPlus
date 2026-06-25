@@ -12,7 +12,7 @@ from linear_operator.operators import LowRankRootLinearOperator
 from ..config import logger
 from ..kernels import LogScaleKernel, RFFKernel
 from ..likelihoods import LogGaussianLikelihood
-from ..utils.rff_utils import woodbury_predict
+from ..utils.rff_utils import RffSampling, woodbury_predict
 
 
 def _drop_singleton_batch(t: torch.Tensor) -> torch.Tensor:
@@ -39,7 +39,7 @@ class RFFGPR(gpytorch.models.ExactGP):
         kernel_module: gpytorch.kernels.Kernel | None = None,
         num_rff: int = 500,
         ard: bool = False,
-        orthogonal: bool = False,
+        rff_sampling: RffSampling = "rff",
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -57,11 +57,11 @@ class RFFGPR(gpytorch.models.ExactGP):
                 RFFKernel(
                     num_samples=num_rff,
                     num_dims=input_dim,
-                    orthogonal=orthogonal,
+                    rff_sampling=rff_sampling,
                     **kernel_kwargs,
                 )
             )
-            feature_kind = "ORF" if orthogonal else "RFF"
+            feature_kind = rff_sampling.upper()
             logger.warning(
                 "No kernel_module provided. Using LogScaleKernel(RFFKernel(...)) "
                 f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim})."
@@ -72,7 +72,7 @@ class RFFGPR(gpytorch.models.ExactGP):
 
         super().__init__(train_x, train_y, likelihood)
         self.num_rff = num_rff
-        self.orthogonal = orthogonal
+        self.rff_sampling = rff_sampling
         self.mean_module = mean_module.to(dtype=self.dtype)
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)

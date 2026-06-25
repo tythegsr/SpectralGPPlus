@@ -188,7 +188,8 @@ def ackley_GPvsPFN(
             model = gpplus.models.GPR(
                 X_train,
                 y_train_normal if standardize_y else y_train,
-                kernel_module=defaults.SF_kernel,
+                # kernel_module=defaults.SF_kernel, ard_num_dims=X_train.shape[1]
+                kernel_module=gpplus.kernels.LogScaleKernel(gpplus.kernels.GaussianKernel() + gpplus.kernels.PeriodicKernel()),
                 mean_module=defaults.SF_mean,
                 likelihood=defaults.SF_likelihood,
             )
@@ -472,14 +473,14 @@ def ackley_GPvsPFN(
 if __name__ == "__main__":
     # Gaussian GP baseline (match experiments_RFF/A4_ackley_40D_RFF.py: 40D, 40 pts/dim, noise 0.005, seed 42)
     ackley_GPvsPFN(
-        num_runs=10,
-        train_size=10,
+        num_runs=20,
+        train_size=40,
         dimensions=10,
         num_inits=16,
         num_epochs=1,
-        save_path="experiments_revisions_april/results_test_val/ackley_10D_gaussian",
+        save_path="results/test_Gaussian_Periodic_kernel/ackley_10D_gaussian",
         run_models="gp",
-        single_dataset=True,
+        single_dataset=False,
         noise_test=0.005,
         noise_train=0.005,
         x_standardize_method=defaults.X_STANDARDIZE_METHOD,

@@ -593,6 +593,12 @@ class FinalParameterStorageCallback(Callback):
             raw_source_lengthscales = flat.get("raw_source_lengthscales", [])
             if raw_source_lengthscales:
                 print(f"Raw source lengthscales: {raw_source_lengthscales} (count: {len(raw_source_lengthscales)})")
+            periods = flat.get("periods", [])
+            if periods:
+                print(f"Period (transformed): {periods} (count: {len(periods)})")
+            raw_periods = flat.get("raw_periods", [])
+            if raw_periods:
+                print(f"Raw period: {raw_periods} (count: {len(raw_periods)})")
 
     @staticmethod
     def _to_float(x: Any) -> float:
@@ -717,6 +723,19 @@ class FinalParameterStorageCallback(Callback):
                 raw_source_lengthscales = final_params.get("raw_source_lengthscales", [])
                 if raw_source_lengthscales:
                     print(f"Raw source lengthscales: {raw_source_lengthscales} (count: {len(raw_source_lengthscales)})")
+
+                periods = final_params.get("periods", [])
+                if periods:
+                    print(f"Period (transformed): {periods} (count: {len(periods)})")
+                else:
+                    print("Period (transformed): N/A (not found)")
+
+                raw_periods = final_params.get("raw_periods", [])
+                if raw_periods:
+                    print(f"Raw period: {raw_periods} (count: {len(raw_periods)})")
+                else:
+                    print("Raw period: N/A (not found)")
+
                 print(f"Best loss: {best_loss}")
                 # If we have initial, also print deltas
                 if self._initial_params is not None:
@@ -725,6 +744,7 @@ class FinalParameterStorageCallback(Callback):
                     print(f"Delta raw_noise: {deltas.get('raw_noise')}")
                     print(f"Delta raw_outputscale: {deltas.get('raw_outputscale')}")
                     print(f"Delta raw_lengthscales: {deltas.get('raw_lengthscales')}")
+                    print(f"Delta raw_period: {deltas.get('raw_periods')}")
 
             # Save to file
             if self.save_file is not None:
@@ -800,7 +820,22 @@ class FinalParameterStorageCallback(Callback):
                 ls_init_aligned = list(ls_init) + [0.0] * (max_len - len(ls_init))
                 ls_final_aligned = list(ls_final) + [0.0] * (max_len - len(ls_final))
                 ls_delta = [float(f - i) for f, i in zip(ls_final_aligned, ls_init_aligned)] if max_len > 0 else []
-                record["deltas"] = {"raw_noise": noise_delta, "raw_outputscale": outscale_delta, "raw_lengthscales": ls_delta}
+                period_init = initial_flat.get("raw_periods") or []
+                period_final = final_flat.get("raw_periods") or []
+                max_period_len = max(len(period_init), len(period_final))
+                period_init_aligned = list(period_init) + [0.0] * (max_period_len - len(period_init))
+                period_final_aligned = list(period_final) + [0.0] * (max_period_len - len(period_final))
+                period_delta = (
+                    [float(f - i) for f, i in zip(period_final_aligned, period_init_aligned)]
+                    if max_period_len > 0
+                    else None
+                )
+                record["deltas"] = {
+                    "raw_noise": noise_delta,
+                    "raw_outputscale": outscale_delta,
+                    "raw_lengthscales": ls_delta,
+                    "raw_periods": period_delta,
+                }
             except Exception:
                 record["deltas"] = None
 
@@ -817,6 +852,8 @@ class FinalParameterStorageCallback(Callback):
             "noise": final.get("noise"),
             "outputscale": final.get("outputscale"),
             "lengthscales": final.get("lengthscales"),
+            "periods": final.get("periods"),
+            "raw_periods": final.get("raw_periods"),
             "kernel_type": final.get("kernel_type"),
             "input_dim": final.get("input_dim"),
         }
@@ -854,6 +891,10 @@ class FinalParameterStorageCallback(Callback):
         if isinstance(initial.get("kernel_type"), str) and "PowerExponential" in initial.get("kernel_type", ""):
             out["raw_power"] = initial.get("raw_power")
             out["power"] = initial.get("power")
+        if initial.get("raw_periods") is not None:
+            out["raw_periods"] = initial.get("raw_periods")
+        if initial.get("periods") is not None:
+            out["periods"] = initial.get("periods")
         for k, v in initial.items():
             if k.startswith("encoder_embedding_") and v is not None:
                 out[k] = v
@@ -882,9 +923,11 @@ class FinalParameterStorageCallback(Callback):
             "raw_lengthscales": None,
             "raw_constant": None,  # mean_module (e.g. ConstantMean)
             "raw_power": None,  # PowerExponentialKernel exponent (raw)
+            "raw_periods": None,
             "noise": None,  # Transformed
             "outputscale": None,  # Transformed
             "lengthscales": [],  # Transformed
+            "periods": None,
             "constant": None,  # mean_module transformed
             "power": None,  # PowerExponentialKernel exponent (transformed)
             "kernel_type": None,
@@ -901,8 +944,11 @@ class FinalParameterStorageCallback(Callback):
         outputscale_params = []
         lengthscale_params = []
         power_params = []
+        period_params = []
 
-        self._recursive_parameter_search(model, noise_params, outputscale_params, lengthscale_params, power_params)
+        self._recursive_parameter_search(
+            model, noise_params, outputscale_params, lengthscale_params, power_params, period_params
+        )
 
         # Extract the first found parameter of each type (raw)
         if noise_params:
@@ -1051,6 +1097,9 @@ class FinalParameterStorageCallback(Callback):
         # Extract raw power (for PowerExponentialKernel) if found
         if power_params:
             params["raw_power"] = power_params[0]
+
+        if period_params:
+            params["raw_periods"] = period_params
 
         # Fallback to recursive search results if base_kernel didn't have raw_lengthscale
         if not params.get("raw_lengthscales") and lengthscale_params:
@@ -1533,6 +1582,18 @@ class FinalParameterStorageCallback(Callback):
                     # If extraction fails for this object, just skip
                     pass
 
+            # Extract transformed period (PeriodicKernel, CosineKernel)
+            if hasattr(obj, "period"):
+                try:
+                    p = obj.period
+                    if hasattr(p, "numel") and p.numel() > 0:
+                        period_list = p.detach().cpu().numpy().flatten().tolist()
+                        if period_list:
+                            existing = params.get("periods") or []
+                            params["periods"] = list(existing) + period_list
+                except Exception:
+                    pass
+
             # Extract transformed lengthscales
             # Skip lengthscale extraction here - we'll get it directly from base_kernel in the fallback
             # This avoids picking up lengthscales from the wrong kernel components
@@ -1591,7 +1652,7 @@ class FinalParameterStorageCallback(Callback):
             pass
 
     def _recursive_parameter_search(
-        self, obj, noise_params, outputscale_params, lengthscale_params, power_params, visited=None, depth=0
+        self, obj, noise_params, outputscale_params, lengthscale_params, power_params, period_params, visited=None, depth=0
     ):
         """Recursively search through model components for raw parameters."""
         if visited is None:
@@ -1639,6 +1700,14 @@ class FinalParameterStorageCallback(Callback):
                 except:
                     pass
 
+            if hasattr(obj, "raw_period"):
+                try:
+                    if hasattr(obj.raw_period, "data") and obj.raw_period.data is not None:
+                        period_val = obj.raw_period.data.flatten().tolist()
+                        period_params.extend(period_val)
+                except:
+                    pass
+
             # Recursively search through specific attributes that are likely to contain kernels/parameters
             search_attrs = [
                 "covar_module",
@@ -1665,6 +1734,7 @@ class FinalParameterStorageCallback(Callback):
                                 outputscale_params,
                                 lengthscale_params,
                                 power_params,
+                                period_params,
                                 visited,
                                 depth + 1,
                             )
@@ -1681,6 +1751,7 @@ class FinalParameterStorageCallback(Callback):
                             outputscale_params,
                             lengthscale_params,
                             power_params,
+                            period_params,
                             visited,
                             depth + 1,
                         )
