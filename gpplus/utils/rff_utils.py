@@ -27,11 +27,104 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Literal
 
 import torch
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
+
+RffSampling = Literal["rff", "orf", "sorf"]
+RFF_SAMPLING_MODES = frozenset({"rff", "orf", "sorf"})
+
+
+def _validate_rff_sampling(rff_sampling: str) -> RffSampling:
+    if rff_sampling not in RFF_SAMPLING_MODES:
+        raise ValueError(f"rff_sampling must be one of {sorted(RFF_SAMPLING_MODES)}, got {rff_sampling!r}.")
+    return rff_sampling  # type: ignore[return-value]
+
+
+def _next_pow2(n: int) -> int:
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
+
+
+def _fwht(x: Tensor) -> Tensor:
+    """Normalized fast Walsh-Hadamard transform on the last dimension (power-of-2 size)."""
+    n = x.shape[-1]
+    if n & (n - 1):
+        raise ValueError(f"FWHT last dimension must be a power of 2, got {n}.")
+    out = x.clone()
+    h = 1
+    while h < n:
+        for i in range(0, n, h * 2):
+            a = out[..., i : i + h].clone()
+            b = out[..., i + h : i + 2 * h].clone()
+            out[..., i : i + h] = a + b
+            out[..., i + h : i + 2 * h] = a - b
+        h *= 2
+    return out / math.sqrt(n)
+
+
+def _rademacher(length: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+    signs = torch.randint(0, 2, (length,), device=device, dtype=torch.int8)
+    return (2 * signs - 1).to(dtype)
+
+
+def _sorf_apply(v: Tensor, d1: Tensor, d2: Tensor, d3: Tensor, scale: float) -> Tensor:
+    """Apply sqrt(d) * H D1 H D2 H D3 to vector v (Yu et al. Eq. 5, padded dimension)."""
+    x = v * d3
+    x = _fwht(x)
+    x = x * d2
+    x = _fwht(x)
+    x = x * d1
+    x = _fwht(x)
+    return x * scale
+
+
+def _sorf_block(
+    num_dims: int,
+    num_cols: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """SORF block: columns of sqrt(d) * H D1 H D2 H D3, truncated to num_dims."""
+    d_pad = _next_pow2(num_dims)
+    d1 = _rademacher(d_pad, device, dtype)
+    d2 = _rademacher(d_pad, device, dtype)
+    d3 = _rademacher(d_pad, device, dtype)
+    scale = math.sqrt(num_dims)
+    columns: list[Tensor] = []
+    for j in range(num_cols):
+        v = torch.zeros(d_pad, device=device, dtype=dtype)
+        v[j] = 1.0
+        columns.append(_sorf_apply(v, d1, d2, d3, scale)[:num_dims])
+    return torch.stack(columns, dim=1)
+
+
+def _sample_sorf_weights(
+    num_dims: int,
+    num_samples: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    """
+    Yu et al. SORF (arXiv:1610.09072 Eq. 5): W = sqrt(d) * H D1 H D2 H D3.
+
+    Returns W of shape (num_dims, num_samples). When num_samples > num_dims,
+    draws independent SORF blocks of size num_dims (same convention as ORF).
+    """
+    d = num_dims
+    cols: list[Tensor] = []
+    remaining = num_samples
+    while remaining > 0:
+        block = min(d, remaining)
+        cols.append(_sorf_block(d, block, device=device, dtype=dtype))
+        remaining -= block
+    return torch.cat(cols, dim=1)[:, :num_samples]
 
 
 def _sample_orf_weights(
@@ -67,21 +160,26 @@ def init_rbf_weights(
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
     lengthscale: Tensor | None = None,
-    orthogonal: bool = False,
+    rff_sampling: RffSampling = "rff",
 ) -> Tensor:
     """
     Draw RBF random frequencies W with shape (num_dims, num_samples).
 
-    When ``orthogonal=True``, uses full ORF (Yu et al. 1610.09072): random
-    orthogonal Q from QR plus per-frequency chi(d) scaling (S @ Q).
+    ``rff_sampling``:
+      - ``"rff"``: i.i.d. Gaussian columns.
+      - ``"orf"``: full ORF (Yu et al. Eq. 2): QR orthogonal Q plus chi(d) scaling.
+      - ``"sorf"``: structured ORF (Yu et al. Eq. 5): Walsh-Hadamard with Rademacher signs.
 
     When ``lengthscale`` is provided (GPPlus 10^(raw/2) per dimension), scales
-    draws as omega_d ~ N(0, 1/lengthscale_d^2) after the base draw (i.i.d. or ORF).
+    draws as omega_d ~ N(0, 1/lengthscale_d^2) after the base draw.
     """
+    rff_sampling = _validate_rff_sampling(rff_sampling)
     dev = device or torch.device("cpu")
     dt = dtype or torch.float32
-    if orthogonal:
+    if rff_sampling == "orf":
         w = _sample_orf_weights(num_dims, num_samples, device=dev, dtype=dt)
+    elif rff_sampling == "sorf":
+        w = _sample_sorf_weights(num_dims, num_samples, device=dev, dtype=dt)
     else:
         w = torch.randn(num_dims, num_samples, device=dev, dtype=dt)
     if lengthscale is not None:

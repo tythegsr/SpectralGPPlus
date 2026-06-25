@@ -856,6 +856,7 @@ def train_eval_gp(
             lengthscales_extracted = extracted_params.get("lengthscales")
             cat_lengthscales_extracted = extracted_params.get("cat_lengthscales")
             source_lengthscales_extracted = extracted_params.get("source_lengthscales")
+            periods_extracted = extracted_params.get("periods")
             best_model_metrics = {
                 "num_epochs": num_epochs_actual
                 if num_epochs_actual is not None
@@ -871,6 +872,8 @@ def train_eval_gp(
                 "lengthscales": lengthscales_extracted,
                 "cat_lengthscales": cat_lengthscales_extracted,
                 "source_lengthscales": source_lengthscales_extracted,
+                "periods": periods_extracted,
+                "raw_periods": extracted_params.get("raw_periods"),
             }
 
     if best_model_metrics:
@@ -953,6 +956,24 @@ def train_eval_gp(
                         gp_metric[f"source_lengthscale_{i}"] = ls_val
             else:
                 gp_metric["source_lengthscale_0"] = source_lengthscales
+
+        periods = best_model_metrics.get("periods")
+        if periods is not None:
+            if isinstance(periods, (list, tuple)):
+                if len(periods) > 0:
+                    for i, period_val in enumerate(periods):
+                        gp_metric[f"cont_period_{i}"] = period_val
+            else:
+                gp_metric["cont_period_0"] = periods
+
+        raw_periods = best_model_metrics.get("raw_periods")
+        if raw_periods is not None:
+            if isinstance(raw_periods, (list, tuple)):
+                if len(raw_periods) > 0:
+                    for i, period_val in enumerate(raw_periods):
+                        gp_metric[f"raw_period_{i}"] = period_val
+            else:
+                gp_metric["raw_period_0"] = raw_periods
     else:
         pass
 
@@ -1006,23 +1027,21 @@ def train_eval_gp(
                 )
         else:
             if hasattr(y_train_mean, "item"):
-                mean_val = (
-                    y_train_mean.item()
-                    if y_train_mean.numel() == 1
-                    else y_train_mean.squeeze().item()
-                )
+                if y_train_mean.numel() == 1:
+                    mean_val = y_train_mean.item()
+                else:
+                    mean_val = y_train_mean.detach().cpu().tolist()
             else:
                 mean_val = y_train_mean
             if hasattr(y_train_std, "item"):
-                std_val = (
-                    y_train_std.item()
-                    if y_train_std.numel() == 1
-                    else y_train_std.squeeze().item()
-                )
+                if y_train_std.numel() == 1:
+                    std_val = y_train_std.item()
+                else:
+                    std_val = y_train_std.detach().cpu().tolist()
             else:
                 std_val = y_train_std
-            gp_metric["y_train_mean"] = float(mean_val)
-            gp_metric["y_train_std"] = float(std_val)
+            gp_metric["y_train_mean"] = mean_val
+            gp_metric["y_train_std"] = std_val
 
     # Trainer info structure (includes optional lbfgs_inner_metrics)
     gp_trainer_info = None

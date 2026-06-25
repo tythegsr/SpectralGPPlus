@@ -89,6 +89,8 @@ class DefaultParameterInitializer(ParameterInitializer):
             return "bias"
         elif "power" in name:
             return "power"
+        elif "period" in name:
+            return "period"
         elif "constant" in name:
             return "constant"
         else:
@@ -155,6 +157,14 @@ class DefaultParameterInitializer(ParameterInitializer):
                 "lower": 1.0,
                 "upper": 2.0,
                 "description": "Power kernel parameter (uniform)",
+            }
+        elif param_type == "period":
+            is_ard = param.dim() == 2 and param.shape[1] > 1
+            return {
+                "method": "normal",
+                "mean": 0.0,
+                "std": 1.0,
+                "description": f"Period parameter {'(ARD)' if is_ard else '(single)'} - log10 scale",
             }
         elif param_type == "projection_matrix":
             # Try to find the initialization type from the specific module
@@ -422,16 +432,16 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         rff_kernel = model._rff_kernel
         device = rff_kernel.raw_lengthscale.device
         dtype = rff_kernel.raw_lengthscale.dtype
-        orthogonal = rff_kernel.orthogonal
+        rff_sampling = rff_kernel.rff_sampling
 
         if self.seed is not None:
             torch.manual_seed(self.seed)
 
         self._rff_weight_draws = [
-            init_rbf_weights(num_dims, num_samples, device=device, dtype=dtype, orthogonal=orthogonal)
+            init_rbf_weights(num_dims, num_samples, device=device, dtype=dtype, rff_sampling=rff_sampling)
             for _ in range(self.num_inits)
         ]
-        feature_kind = "ORF" if orthogonal else "RFF"
+        feature_kind = rff_sampling.upper()
         logger.info(
             "Precomputed %s %s weight draws from master seed %s (sequential RNG, not seed+run_index)",
             self.num_inits,
@@ -452,7 +462,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         rff_kernel = model._rff_kernel
         num_dims = model.train_inputs[0].shape[-1]
         num_samples = model.num_rff
-        orthogonal = rff_kernel.orthogonal
+        rff_sampling = rff_kernel.rff_sampling
 
         if self._rff_weight_draws is not None and run_index < len(self._rff_weight_draws):
             weights = self._rff_weight_draws[run_index].to(
@@ -464,15 +474,15 @@ class RFFParameterInitializer(DefaultParameterInitializer):
                 num_samples,
                 randn_weights=weights,
                 spectral=False,
-                orthogonal=orthogonal,
+                rff_sampling=rff_sampling,
             )
         else:
             if self.seed is not None:
                 torch.manual_seed(self.seed)
-            rff_kernel.resample_weights(spectral=False, orthogonal=orthogonal)
+            rff_kernel.resample_weights(spectral=False, rff_sampling=rff_sampling)
 
         model.invalidate_feature_cache()
-        feature_kind = "ORF" if orthogonal else "RFF"
+        feature_kind = rff_sampling.upper()
         logger.info(
             "Assigned %s frequencies for run #%s (master seed=%s, precomputed draw)",
             feature_kind,

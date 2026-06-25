@@ -31,6 +31,8 @@ def get_parameter_type(name: str, param: torch.Tensor) -> str:
         return "bias"
     if "power" in name:
         return "power"
+    if "period" in name:
+        return "period"
     if "constant" in name:
         return "constant"
     return "unknown"
@@ -139,6 +141,14 @@ def get_initialization_config(
             "lower": 1.0,
             "upper": 2.0,
             "description": "Power kernel parameter (uniform)",
+        }
+    if param_type == "period":
+        is_ard = param.dim() == 2 and param.shape[1] > 1
+        return {
+            "method": "normal",
+            "mean": 0.0,
+            "std": 1.0,
+            "description": f"Period parameter {'(ARD)' if is_ard else '(single)'} - log10 scale",
         }
     if param_type == "projection_matrix":
         return _projection_matrix_config(name, model)

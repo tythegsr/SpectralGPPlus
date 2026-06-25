@@ -1,5 +1,5 @@
 """
-Shared 1D TabPFN-style toy benchmark runner using ORF-GP (Woodbury inference).
+Shared 1D TabPFN-style toy benchmark runner using SORF-GP (Woodbury inference).
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ORF_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _ORF_DIR):
+_SORF_DIR = Path(__file__).resolve().parent
+for p in (_ROOT, _SORF_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -29,9 +29,9 @@ from gpplus.training import (
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from plot_orf1d_predictions import save_orf1d_prediction_plot
+from plot_sorf1d_predictions import save_sorf1d_prediction_plot
 from tabpfn1d_eval import eval_tabpfn_1d
-from orf_experiment_utils import (
+from sorf_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
     VAL_SEED_OFFSET,
@@ -47,13 +47,13 @@ from orf_experiment_utils import (
 )
 
 
-def run_tabpfn1d_orf(
+def run_tabpfn1d_sorf(
     *,
     problem_name: str,
     generate_data_fn: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     true_fn: Callable[[torch.Tensor], torch.Tensor],
     train_size: int = 10,
-    num_orf: int | None = None,
+    num_sorf: int | None = None,
     num_test: int = 5000,
     x_bounds: list[float] | None = None,
     test_x_bounds: list[float] | None = None,
@@ -83,7 +83,7 @@ def run_tabpfn1d_orf(
     pfn_device: str = "cpu",
     run_models: str | None = None,
 ) -> dict:
-    """Train ORF-GP on a 1D toy function and evaluate on a (possibly extended) test grid."""
+    """Train SORF-GP on a 1D toy function and evaluate on a (possibly extended) test grid."""
     if x_bounds is None:
         x_bounds = [-0.5, 0.5]
     if test_x_bounds is None:
@@ -92,8 +92,8 @@ def run_tabpfn1d_orf(
     set_seed(seed)
     dimensions = 1
     n_train = train_size
-    if num_orf is None:
-        num_orf = min(512, max(64, n_train // 3))
+    if num_sorf is None:
+        num_sorf = min(512, max(64, n_train // 3))
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -109,14 +109,14 @@ def run_tabpfn1d_orf(
 
     title = (
         f"TabPFN1D_{problem_name}_{train_size}Dn_{x_bounds}_"
-        f"orfD{num_orf}_ood{test_outside_margin}_"
+        f"sorfD{num_sorf}_ood{test_outside_margin}_"
         f"noiseTest{noise_test}_noiseTrain{noise_train}"
     )
     print("=" * 60)
     print(title)
-    feature_dim = 2 * num_orf
+    feature_dim = 2 * num_sorf
     print(
-        f"ORF kernel (Woodbury), D={num_orf}, m={feature_dim}, ARD={ard}, "
+        f"SORF kernel (Woodbury), D={num_sorf}, m={feature_dim}, ARD={ard}, "
         f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
     )
     print(f"Train x in {x_bounds}, test x in {test_x_bounds}")
@@ -204,7 +204,7 @@ def run_tabpfn1d_orf(
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, rff_sampling="orf")
+    model = RFFGPR(x_train, y_train, num_rff=num_sorf, ard=ard, rff_sampling="sorf")
 
     trainer = GPTrainer(
         model,
@@ -294,9 +294,9 @@ def run_tabpfn1d_orf(
         "n_train": n_train,
         "train_size": train_size,
         "n_test": num_test,
-        "num_orf": num_orf,
-        "rff_sampling": "orf",
-        "feature_dim": 2 * num_orf,
+        "num_sorf": num_sorf,
+        "rff_sampling": "sorf",
+        "feature_dim": 2 * num_sorf,
         "ard": ard,
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
@@ -383,7 +383,7 @@ def run_tabpfn1d_orf(
 
         if plot_1d:
             plot_dir = os.path.join(save_path, "plots", "prediction_runs")
-            fp = save_orf1d_prediction_plot(
+            fp = save_sorf1d_prediction_plot(
                 x_train_raw,
                 y_train_raw,
                 x_test_raw,

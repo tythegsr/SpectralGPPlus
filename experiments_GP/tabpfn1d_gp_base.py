@@ -1,5 +1,5 @@
 """
-Shared 1D TabPFN-style toy benchmark runner using ORF-GP (Woodbury inference).
+Shared 1D TabPFN-style toy benchmark runner using exact GP (dense inference).
 """
 
 from __future__ import annotations
@@ -15,27 +15,20 @@ import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ORF_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _ORF_DIR):
+_GP_DIR = Path(__file__).resolve().parent
+for p in (_ROOT, _GP_DIR):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from gpplus.models import RFFGPR
-from gpplus.training import (
-    GPTrainer,
-    RFFParameterInitializer,
-    RFFWoodburyMarginalLogLikelihood,
-    evaluate_rff_gp_model,
-)
+from gpplus.training import GPTrainer, evaluate_gp_model
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from plot_orf1d_predictions import save_orf1d_prediction_plot
-from tabpfn1d_eval import eval_tabpfn_1d
-from orf_experiment_utils import (
+from gp_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
     VAL_SEED_OFFSET,
     build_1d_run_file_tag,
+    build_gpr_model,
     compute_n_val,
     extract_learned_likelihood_noise,
     json_safe_optimizer_kwargs,
@@ -45,15 +38,16 @@ from orf_experiment_utils import (
     summarize_validation_from_runs,
     unpack_train_val_test,
 )
+from plot_gp1d_predictions import save_gp1d_prediction_plot
+from tabpfn1d_eval import eval_tabpfn_1d
 
 
-def run_tabpfn1d_orf(
+def run_tabpfn1d_gp(
     *,
     problem_name: str,
     generate_data_fn: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]],
     true_fn: Callable[[torch.Tensor], torch.Tensor],
     train_size: int = 10,
-    num_orf: int | None = None,
     num_test: int = 5000,
     x_bounds: list[float] | None = None,
     test_x_bounds: list[float] | None = None,
@@ -83,7 +77,7 @@ def run_tabpfn1d_orf(
     pfn_device: str = "cpu",
     run_models: str | None = None,
 ) -> dict:
-    """Train ORF-GP on a 1D toy function and evaluate on a (possibly extended) test grid."""
+    """Train exact GP on a 1D toy function and evaluate on a (possibly extended) test grid."""
     if x_bounds is None:
         x_bounds = [-0.5, 0.5]
     if test_x_bounds is None:
@@ -92,8 +86,6 @@ def run_tabpfn1d_orf(
     set_seed(seed)
     dimensions = 1
     n_train = train_size
-    if num_orf is None:
-        num_orf = min(512, max(64, n_train // 3))
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -109,15 +101,14 @@ def run_tabpfn1d_orf(
 
     title = (
         f"TabPFN1D_{problem_name}_{train_size}Dn_{x_bounds}_"
-        f"orfD{num_orf}_ood{test_outside_margin}_"
+        f"exactGP_ood{test_outside_margin}_"
         f"noiseTest{noise_test}_noiseTrain{noise_train}"
     )
     print("=" * 60)
     print(title)
-    feature_dim = 2 * num_orf
     print(
-        f"ORF kernel (Woodbury), D={num_orf}, m={feature_dim}, ARD={ard}, "
-        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
+        f"Exact GP (dense), ARD={ard}, dtype={dtype}, "
+        f"inits={num_inits}, epochs={num_epochs}, n_train={n_train}"
     )
     print(f"Train x in {x_bounds}, test x in {test_x_bounds}")
     if frequency is not None:
@@ -204,11 +195,10 @@ def run_tabpfn1d_orf(
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_orf, ard=ard, rff_sampling="orf")
+    model = build_gpr_model(x_train, y_train, ard=ard)
 
     trainer = GPTrainer(
         model,
-        mll_class=RFFWoodburyMarginalLogLikelihood,
         num_epochs=num_epochs,
         num_inits=num_inits,
         seed=seed,
@@ -216,7 +206,6 @@ def run_tabpfn1d_orf(
         dtype=dtype,
         optimizer_class=optimizer_class,
         optimizer_kwargs=optimizer_kwargs,
-        initializer_class=RFFParameterInitializer,
         n_jobs=n_jobs,
         inner_max_num_threads=1,
         cholesky_jitter=1e-6,
@@ -239,11 +228,8 @@ def run_tabpfn1d_orf(
     learned_noise = extract_learned_likelihood_noise(model, y_std=y_std)
 
     model.eval()
-    model.invalidate_feature_cache()
     t_pred = time.time()
-    pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-        model, x_test, chunk_size=predict_chunk_size
-    )
+    pred_mean, lower, upper, pred_std = evaluate_gp_model(model, x_test)
     prediction_time = time.time() - t_pred
     pred_mean = pred_mean.detach().cpu()
     pred_std = pred_std.detach().cpu()
@@ -289,14 +275,12 @@ def run_tabpfn1d_orf(
 
     metrics = {
         "title": title,
+        "model": "exact_gp",
         "problem_name": problem_name,
         "dimensions": dimensions,
         "n_train": n_train,
         "train_size": train_size,
         "n_test": num_test,
-        "num_orf": num_orf,
-        "rff_sampling": "orf",
-        "feature_dim": 2 * num_orf,
         "ard": ard,
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
@@ -383,7 +367,7 @@ def run_tabpfn1d_orf(
 
         if plot_1d:
             plot_dir = os.path.join(save_path, "plots", "prediction_runs")
-            fp = save_orf1d_prediction_plot(
+            fp = save_gp1d_prediction_plot(
                 x_train_raw,
                 y_train_raw,
                 x_test_raw,
