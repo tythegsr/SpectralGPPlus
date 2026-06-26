@@ -854,13 +854,25 @@ def compute_validation_metrics(
     was_training = model.training
     try:
         from ..models.rff_gpr import RFFGPR
+        from ..models.rff_mtgpr import RFFMTGPR
+
         is_rff = isinstance(model, RFFGPR)
+        is_rff_mt = isinstance(model, RFFMTGPR)
     except ImportError:
         is_rff = False
+        is_rff_mt = False
 
     try:
         with torch.no_grad():
-            if is_rff:
+            if is_rff_mt:
+                from .eval import evaluate_rff_mt_gp_model
+
+                if hasattr(model, "invalidate_feature_cache"):
+                    model.invalidate_feature_cache()
+                pred_mean, _, _, pred_std = evaluate_rff_mt_gp_model(
+                    model, val_x, jitter=jitter, chunk_size=chunk_size
+                )
+            elif is_rff:
                 from .eval import evaluate_rff_gp_model
 
                 if hasattr(model, "invalidate_feature_cache"):

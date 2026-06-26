@@ -1,0 +1,812 @@
+% Upload this file (or the whole docs/overleaf/ folder) to Overleaf.
+% Compile with pdfLaTeX.
+% Companion to rff_woodbury_derivation.tex (scalar RFF Woodbury).
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{colortbl}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{hyperref}
+\usepackage{natbib}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black}
+
+\tcbset{enhanced, boxrule=0.6pt, arc=2pt, left=8pt, right=8pt, top=6pt, bottom=6pt}
+
+\newtcolorbox{samebox}{
+  colback=green!6,
+  colframe=green!50!black,
+  title={\textbf{Reuses scalar Woodbury} (see \texttt{rff\_woodbury\_derivation.tex})},
+}
+
+\newtcolorbox{diffbox}{
+  colback=orange!8,
+  colframe=orange!70!black,
+  title={\textbf{New for multitask}},
+}
+
+\newtcolorbox{planbox}{
+  colback=blue!5,
+  colframe=blue!50!black,
+  title={\textbf{Implementation action}},
+}
+
+\newcommand{\noise}{\sigma^2}
+\newcommand{\Sig}{\Sigma}
+\newcommand{\Ph}{\Phi}
+\newcommand{\Om}{\Omega}
+\newcommand{\LB}{L_B}
+\newcommand{\RB}{R_B}
+
+\title{Multitask RFF-GP Plan:\\[0.3em]
+Combining \texttt{MTGPR} with ORF/RFF/SORF Woodbury Inference}
+\author{GPPlus --- implementation plan}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document is an \textbf{implementation plan} for joint multitask Gaussian process regression
+with Random Fourier Features (RFF), including Orthogonal RFF (ORF) and Structured ORF (SORF),
+at Woodbury cost instead of dense $O(n^3 T^3)$ exact inference.
+Today GPPlus has two disconnected stacks: \texttt{MTGPR} (multitask targets, dense kernel) and
+\texttt{RFFGPR} (scalar targets, Woodbury). The plan generalizes scalar Woodbury
+($\Sig = \noise I_n + \Ph\Ph^\top$) to the intrinsic coregionalization model (ICM)
+Kronecker form $\Sig = K_x \otimes B + \Lambda$ via a joint feature matrix
+$\Om = \Ph \otimes \RB$ via a PSD factor of the full task matrix $B$.
+Green boxes mark mathematics that directly extends the scalar note;
+orange boxes mark new multitask-specific design; blue boxes mark concrete code tasks.
+Section~\ref{sec:mtgpr} documents \textbf{what \texttt{MTGPR} does} in GPPlus/GPyTorch---the dense
+reference whose multitask covariance the proposed Woodbury path must reproduce.
+Section~\ref{sec:related} situates the plan in the multitask-GP and RFF literature.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Goal and motivation}
+%=============================================================================
+
+\subsection{What we want}
+
+Train a \textbf{single} Gaussian process on multitask data
+$y \in \mathbb{R}^{n \times T}$ (e.g.\ TOA: $y_{\cos}$, $y_{\mathrm{grain}}$) with:
+\begin{itemize}[nosep]
+  \item shared spatial inputs $X \in \mathbb{R}^{n \times d}$;
+  \item \textbf{learned cross-task correlation} (ICM / \texttt{MultitaskKernel});
+  \item \textbf{RFF/ORF/SORF} feature approximation for scalability in $n$ and $d$;
+  \item \textbf{Woodbury} training and prediction ($O((mT)^3)$ when using a full $T\times T$ task factor; not $O(n^3 T^3)$).
+\end{itemize}
+
+\subsection{What exists today}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
+\toprule
+\textbf{Component} & \textbf{\texttt{MTGPR}} & \textbf{\texttt{RFFGPR}} \\
+\midrule
+Targets & $(n, T)$ multitask & scalar $(n,)$ \\
+Kernel & \texttt{MultitaskKernel(GaussianKernel)} & \texttt{LogScaleKernel(RFFKernel)} \\
+Likelihood & \texttt{MultitaskGaussianLikelihood} & \texttt{LogGaussianLikelihood} \\
+Inference & dense \texttt{ExactMarginalLogLikelihood} & \texttt{RFFWoodburyMarginalLogLikelihood} \\
+Cost (rough) & $O(n^3 T^3)$ & $O(n m^2)$, $m = 2D$ \\
+ORF/RFF/SORF & no & yes (\texttt{rff\_sampling}) \\
+Experiments & \texttt{MT1\_analytic\_1d\_GP.py} & \texttt{S1\_toa\_*}, 2$\times$ scalar loop \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{diffbox}
+\textbf{Cannot merge by wrapping \texttt{RFFKernel} inside existing \texttt{MTGPR} alone.}
+GPyTorch's exact MLL still materializes a dense multitask covariance.
+The current TOA workaround (two independent \texttt{RFFGPR} models) does \emph{not} learn task correlation.
+\end{diffbox}
+
+%=============================================================================
+\section{Related work}
+\label{sec:related}
+%=============================================================================
+
+This plan combines three well-studied ideas---multitask ICM GPs, random Fourier features, and
+Woodbury low-rank inference---into a single GPPlus implementation path.
+No one reference does exactly \texttt{RFFMTGPR} (GPyTorch \texttt{MultitaskKernel} + ORF/RFF/SORF +
+$\Om = \Ph \otimes \RB$ Woodbury), but each ingredient and the natural combination are grounded
+in prior work.
+
+\subsection{Multitask and coregionalized GPs}
+
+The probabilistic target is the intrinsic coregionalization model (ICM): a learnable task
+covariance $B$ multiplies a shared spatial kernel,
+$\mathrm{Cov}[f_t(x), f_{t'}(x')] = B_{t,t'}\, k(x,x')$,
+giving joint covariance $K_x \otimes B$ under the usual vec ordering
+(Section~\ref{sec:mtgpr}).
+\citet{bonilla2008mtgp} introduced this \emph{free-form} task matrix for multi-task GP prediction
+and noted that exact inference requires $O(n^3 T^3)$ linear algebra on the $nT \times nT$
+Gram matrix; their Section~3 uses Nystr\"om approximation of $K_x$ and a low-rank PCA of $B$
+rather than RFF features with Woodbury.
+\citet{alvarez2012kernels} review the linear model of coregionalization (LCM) and place ICM as
+a central special case for vector-valued GPs.
+GPyTorch's \texttt{MultitaskKernel}~\citep{gardner2018gpytorch} implements the same
+$K_{XX} \otimes K_{TT}$ structure and is the dense reference for \texttt{MTGPR}.
+
+\subsection{Scalable Kronecker inference (without RFF)}
+
+When inputs lie on grids or admit Kronecker structure, exact GPs can avoid dense $nT$ Cholesky:
+\citet{wilson2015kronecker} extend Kronecker methods to non-Gaussian likelihoods via conjugate
+gradients; \citet{lin2025latentkronecker} use latent Kronecker structure with iterative solvers
+for large $n$.
+\citet{leroy2023lmc} give decoupled exact inference for the full LMC without restrictive
+orthogonality assumptions on the mixing matrix.
+These methods exploit \emph{exact} $K_x$, whereas \texttt{RFFMTGPR} deliberately approximates
+$K_x \approx \Ph\Ph^\top$ and targets the same ICM prior at Woodbury cost when $mT \ll nT$.
+
+\subsection{Random Fourier features and Woodbury for GPs}
+
+\citet{rahimi2007rff} introduced RFF to scale kernel machines by replacing implicit kernel
+matrices with finite feature maps $\Ph$.
+For GP regression, a low-rank covariance $\Ph\Ph^\top + \noise I_n$ invites the Woodbury
+identity, reducing inference from $O(n^3)$ to $O(m^3)$ when $m \ll n$; GPPlus scalar
+\texttt{RFFGPR} follows this template (see \texttt{rff\_woodbury\_derivation.tex}).
+\citet{cutajar2017dgp} formulate scalable deep GPs via random feature expansions and Woodbury
+marginal likelihood (with stochastic variational inference); Bonilla is a co-author, linking
+this line to multi-task GP research, though the published focus is deep/single-task structure
+rather than ICM Kronecker features.
+\citet{potapczynski2021rfftrunc} discuss bias from truncating RFF in GP hyperparameter learning---a
+caveat that applies equally to multitask RFF.
+
+\subsection{Multitask learning with shared RFFs}
+
+\citet{sevilla2023rffblr} propose RFF-BLR: shared random Fourier features across tasks within a
+Bayesian linear regression framework, promoting sparsity and transfer without a full GP
+marginal likelihood or ICM Woodbury factorization.
+That work is closest in \emph{motivation} (multitask + RFF) but differs in model class and
+inference; \texttt{RFFMTGPR} aims for parity with dense \texttt{MTGPR} / \texttt{MultitaskKernel},
+not a sparse ELM-style regressor.
+
+\subsection{Positioning of the GPPlus plan}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.30\textwidth}p{0.62\textwidth}@{}}
+\toprule
+\textbf{Prior work} & \textbf{Relation to \texttt{RFFMTGPR}} \\
+\midrule
+Bonilla et al.\ ICM MTGP & Same generative model; they approximate $K_x$ and $B$ for speed \\
+Cutajar et al.\ RFF + Woodbury & Same inference trick as scalar \texttt{RFFGPR}; not multitask \\
+Kronecker / LMC fast inference & Exact $K_x$ structure; no RFF approximation \\
+RFF-BLR & Multitask + shared RFF; not ICM GP with exact Woodbury MLL \\
+\textbf{GPPlus plan} & ICM prior + $\Om=\Ph\otimes\RB$ + Woodbury + ORF/SORF \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The engineering contribution is to \textbf{unify} GPPlus's existing stacks---dense \texttt{MTGPR}
+(reference ICM) and Woodbury \texttt{RFFGPR} (reference scalable inference)---with
+implementation details (full $B$, vec order, per-task $\Lambda$) verified against GPyTorch.
+
+%=============================================================================
+\section{What \texttt{MTGPR} does (dense reference model)}
+\label{sec:mtgpr}
+%=============================================================================
+
+This section records the \textbf{exact multitask mathematics} implemented by
+\texttt{gpplus/models/mtgpr.py} and GPyTorch's exact-GP stack.
+The proposed \texttt{RFFMTGPR} must match this object (same prior/likelihood structure;
+only replace dense $k(x,x')$ by $\Ph\Ph^\top$ and use Woodbury instead of $O(n^3T^3)$ Cholesky).
+
+\subsection{Generative model}
+
+At each of $n$ input locations $x_i \in \mathbb{R}^d$, define a latent task vector
+$f(x_i) \in \mathbb{R}^T$. Stacked observations are
+\begin{equation}
+  Y \in \mathbb{R}^{n \times T}, \qquad Y_{i,t} = f_t(x_i) + \varepsilon_{i,t}.
+\end{equation}
+GPPlus stores $Y$ as \texttt{train\_y} with shape \texttt{(n, num\_tasks)}.
+Each \textbf{row} is one spatial location; each \textbf{column} is one task.
+
+\subsection{Three modules in \texttt{MTGPR}}
+
+\texttt{MTGPR} is a thin wrapper around \texttt{gpytorch.models.ExactGP} with three defaults
+(see \texttt{mtgpr.py}):
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.28\textwidth}p{0.62\textwidth}@{}}
+\toprule
+\textbf{Module} & \textbf{Role} \\
+\midrule
+\texttt{MultitaskMean} & Wraps a scalar mean (default \texttt{ConstantMean}) to produce
+$\mu \in \mathbb{R}^{n \times T}$ with one constant per task. \\
+\texttt{MultitaskKernel} & ICM kernel: shared spatial $k(x,x')$ times learnable task matrix $B$. \\
+\texttt{MultitaskGaussianLikelihood} & Gaussian noise on $Y$; per-task diagonal if
+\texttt{rank\_likelihood}$=0$, or low-rank task noise if $>0$. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Hyperparameters \texttt{rank\_kernel} ($r_k$) and \texttt{rank\_likelihood} ($r_\ell$)
+control the rank of $B$ and of the noise covariance, respectively.
+
+\subsection{Forward pass}
+
+For inputs $X \in \mathbb{R}^{n \times d}$:
+\begin{equation}
+  \texttt{model(X)} \;\Rightarrow\;
+  \mathcal{N}\bigl(\mu(X),\; \mathcal{K}_{\mathrm{MT}}(X)\bigr),
+\end{equation}
+a \texttt{MultitaskMultivariateNormal} with mean $\mu \in \mathbb{R}^{n \times T}$ and
+a lazy $(nT) \times (nT)$ covariance $\mathcal{K}_{\mathrm{MT}}$ built from
+\texttt{covar\_module} (the \texttt{MultitaskKernel}).
+
+Training uses \texttt{ExactMarginalLogLikelihood}, which materializes this covariance
+(or its Cholesky factor) and evaluates
+\begin{equation}
+  \log p(Y \mid X)
+  = -\tfrac{1}{2}\,\mathrm{vec}(\tilde{Y})^\top \Sig^{-1}\,\mathrm{vec}(\tilde{Y})
+  - \tfrac{1}{2}\log|\Sig| + \mathrm{const},
+\end{equation}
+with $\tilde{Y} = Y - \mu(X)$ and $\Sig$ the \textbf{joint} $(nT)\times(nT)$ training covariance
+(spatial kernel $\otimes$ task kernel, plus noise).
+
+\subsection{ICM kernel (what \texttt{MultitaskKernel} encodes)}
+
+For spatial base kernel $k(\cdot,\cdot)$ (default \texttt{LogScaleKernel(GaussianKernel)},
+or any wrapped base such as \texttt{GaussianKernel * PeriodicKernel} in \texttt{MT1\_analytic\_1d\_GP.py}):
+\begin{equation}
+  \label{eq:icm-element}
+  \mathrm{Cov}\bigl[f_t(x_i), f_{t'}(x_j)\bigr] = B_{t,t'}\, k(x_i, x_j),
+  \qquad
+  B \in \mathbb{R}^{T \times T}\ \text{PSD (full task covariance matrix)}.
+\end{equation}
+GPyTorch's \texttt{IndexKernel} (\texttt{task\_covar\_module}) parameterizes $B$ as a
+low-rank term plus a learned diagonal,
+$B = \LB\LB^\top + \mathrm{diag}(\mathbf{v})$ with $\LB \in \mathbb{R}^{T \times r_k}$,
+\textbf{not} simply $B = \LB\LB^\top$.
+For Woodbury, use the dense matrix
+\texttt{task\_covar\_module.covar\_matrix.to\_dense()} (or an equivalent PSD factor
+$\RB \in \mathbb{R}^{T \times T}$ with $B = \RB\RB^\top$).
+When \texttt{rank\_kernel}$=0$, $B$ is diagonal (independent tasks in the kernel).
+Let $K_x \in \mathbb{R}^{n \times n}$ with $(K_x)_{ij} = k(x_i, x_j)$.
+Then the \textbf{latent} covariance over all $nT$ entries of $Y$ is the Kronecker product
+\begin{equation}
+  \label{eq:kron-gpytorch}
+  \boxed{
+    \Sig_{\mathrm{latent}}
+    = K_x \otimes B
+    \;\in\; \mathbb{R}^{(nT)\times(nT)}.
+  }
+\end{equation}
+
+\begin{samebox}
+\textbf{GPyTorch convention (verified).}
+Index observations as $p = t + T(i-1)$ for row $i$ and task $t$ (tasks vary \textbf{fast} within
+each spatial point). With this ordering,
+$\Sig_{\mathrm{latent}} = K_x \otimes B$ matches \texttt{MultitaskKernel.evaluate()}.
+Equivalently, block $(i,j)$ of $\Sig_{\mathrm{latent}}$ is the $T\times T$ matrix $k(x_i,x_j)\,B$.
+\end{samebox}
+
+\begin{diffbox}
+\textbf{Common pitfall (Kronecker order).} $K_x \otimes B$ is \emph{not} the same as $B \otimes K_x$.
+The joint feature identity below uses $\Ph \otimes \RB$, not $\RB \otimes \Ph$.
+Always regression-test vector ordering against dense \texttt{MTGPR}.
+
+\textbf{Common pitfall (task factor).} \texttt{covar\_factor} alone does \emph{not} satisfy
+$\LB\LB^\top = B$ in GPyTorch; do not set $\Om = \Ph \otimes \LB$ unless you have verified
+$\LB\LB^\top = B$ numerically. Use a PSD factor of the full $B$ (Cholesky or symmetric
+eigendecomposition square root).
+\end{diffbox}
+
+\subsection{Likelihood (what \texttt{MultitaskGaussianLikelihood} adds)}
+
+Observations add noise on top of the latent:
+\begin{equation}
+  \Sig = \Sig_{\mathrm{latent}} + \Lambda,
+  \qquad
+  \Lambda = \text{noise from \texttt{MultitaskGaussianLikelihood}}.
+\end{equation}
+\textbf{Phase~1 (MVP):} \texttt{rank\_likelihood}$=0$ gives independent task noise variances
+$\Lambda = \mathrm{diag}(\noise_1,\ldots,\noise_T)$ repeated across spatial blocks
+(equivalently $\Lambda = I_n \otimes D_\noise$ with $D_\noise = \mathrm{diag}(\noise_t)$).
+\textbf{Phase~2:} $r_\ell > 0$ adds correlated task noise; Woodbury must whiten or extend $\Lambda$.
+
+\subsection{Prediction}
+
+At test inputs $X_\ast \in \mathbb{R}^{n_\ast \times d}$, \texttt{MTGPR} returns
+$\mathbb{E}[Y_\ast \mid X, Y] \in \mathbb{R}^{n_\ast \times T}$ and task correlations
+within each spatial block (and across space via the GP). This is the target behavior for
+\texttt{RFFMTGPR.predict}: same $(n_\ast, T)$ mean shape; per-task marginal std optional in MVP,
+full $T\times T$ predictive blocks in Phase~2.
+
+\subsection{Why \texttt{MTGPR} is the math reference}
+
+\begin{enumerate}[nosep]
+  \item It is the \textbf{only} GPPlus model today that trains on $(n,T)$ targets jointly.
+  \item Its $\Sig = K_x \otimes B + \Lambda$ is the object we approximate with
+        $K_x \approx \Ph\Ph^\top$ and Woodbury on $\Om\Om^\top + \Lambda$.
+  \item Swapping \texttt{GaussianKernel} for \texttt{RFFKernel} inside \texttt{MultitaskKernel}
+        without a custom MLL still triggers dense $(nT)^3$ algebra---hence a new model class.
+  \item Any \texttt{RFFMTGPR} implementation should pass:
+        \emph{``NLL and predictions match \texttt{MTGPR} at small $n,T$ when
+        $k \approx \Ph\Ph^\top$''} (same full $B$, same noise, same vec order).
+\end{enumerate}
+
+%=============================================================================
+\section{ICM multitask kernel and RFF substitution}
+%=============================================================================
+
+\subsection{Notation}
+
+\begin{itemize}[nosep]
+  \item $n$ training points, $T$ tasks, input dimension $d$.
+  \item $D$ RFF frequencies; feature dimension $m = 2D$ (cos/sin pairs).
+  \item $r_k$: rank of task kernel (\texttt{rank\_kernel} in \texttt{MultitaskKernel}).
+  \item $r_\ell$: rank of task noise (\texttt{rank\_likelihood} in \texttt{MultitaskGaussianLikelihood}).
+\end{itemize}
+
+\subsection{Spatial RFF features}
+
+For each input $x_i$, GPPlus builds scaled RFF features (same as scalar \texttt{RFFGPR}):
+\begin{equation}
+  \label{eq:phi}
+  \Ph \in \mathbb{R}^{n \times m},
+  \qquad
+  \Ph_{i,:} = \mathbf{z}(x_i)^\top,
+\end{equation}
+with $\mathbf{z}(x) \in \mathbb{R}^{m}$ from \texttt{featurize\_rbf} and output-scale applied in
+\texttt{RFFGPR.scaled\_features}.
+ORF and SORF only change \textbf{how} frequency weights are drawn (\texttt{rff\_sampling});
+Woodbury structure is unchanged (see \texttt{rff\_woodbury\_derivation.tex}, Section~ORF).
+
+\subsection{Task covariance (ICM, rank $r_k$)}
+
+GPyTorch's \texttt{MultitaskKernel} uses intrinsic coregionalization:
+\begin{equation}
+  \label{eq:icm}
+  K\bigl((x_i, t), (x_j, t')\bigr) = B_{t,t'}\, k(x_i, x_j),
+  \qquad
+  B \in \mathbb{R}^{T \times T}\ \text{PSD}
+  \quad\text{(from \texttt{covar\_matrix}; see Section~\ref{sec:mtgpr}).}
+\end{equation}
+With RFF approximation $K_x \approx \Ph\Ph^\top$,
+the \textbf{full} latent training covariance (before noise) is
+\begin{equation}
+  \label{eq:sigma-mt-latent}
+  \Sig_{\mathrm{latent}} = K_x \otimes B
+  \;\approx\; (\Ph\Ph^\top) \otimes B,
+\end{equation}
+and the \textbf{observation} covariance is
+\begin{equation}
+  \label{eq:sigma-mt}
+  \boxed{
+    \Sig = K_x \otimes B + \Lambda
+    \;\approx\; (\Ph\Ph^\top) \otimes B + \Lambda,
+  }
+\end{equation}
+where $\Lambda$ is from \texttt{MultitaskGaussianLikelihood}
+(diagonal per-task when $r_\ell = 0$). See Section~\ref{sec:mtgpr} for vec ordering.
+
+\subsection{Vectorization order}
+
+Let $Y \in \mathbb{R}^{n \times T}$ with entries $Y_{i,t}$ (\texttt{train\_y} layout).
+GPyTorch uses \textbf{row-wise} stacking into $\mathrm{vec}(Y) \in \mathbb{R}^{nT}$:
+\begin{equation}
+  \mathrm{vec}(Y)_{\,t + T(i-1)} = Y_{i,t},
+  \qquad
+  t = 1,\ldots,T,\;\; i = 1,\ldots,n,
+\end{equation}
+so task index $t$ varies \textbf{fastest} and spatial index $i$ varies slowest.
+Under this convention $\Sig_{\mathrm{latent}} = K_x \otimes B$ (Equation~\eqref{eq:kron-gpytorch}).
+\textbf{All Kronecker constructions must use this ordering} (regression test vs dense \texttt{MTGPR}).
+
+%=============================================================================
+\section{Kronecker Woodbury factorization}
+%=============================================================================
+
+\subsection{Key identity}
+
+Let $\RB \in \mathbb{R}^{T \times T}$ satisfy $B = \RB\RB^\top$ (any PSD square root of the
+\textbf{full} task matrix $B$).
+For $K_x = \Ph\Ph^\top$ and GPyTorch vec order (Section~\ref{sec:mtgpr}):
+\begin{equation}
+  \label{eq:kronecker-gram}
+  K_x \otimes B
+  = (\Ph \otimes \RB)\,(\Ph \otimes \RB)^\top.
+\end{equation}
+
+Define the \textbf{joint feature matrix} (note order: spatial $\otimes$ task)
+\begin{equation}
+  \label{eq:omega}
+  \boxed{
+    \Om = \Ph \otimes \RB
+    \;\in\; \mathbb{R}^{(nT) \times (mT)}.
+  }
+\end{equation}
+Then $\Om\Om^\top = K_x \otimes B = \Sig_{\mathrm{latent}}$ (before adding $\Lambda$).
+Columns are $mT$ in general (not $m r_k$), because $B$ is $T \times T$ even when
+\texttt{rank\_kernel} is small.
+
+\begin{diffbox}
+\textbf{Not} $\Om = \RB \otimes \Ph$. That factorization yields $B \otimes K_x$, which is the
+wrong Kronecker order for GPyTorch \texttt{MTGPR}. Implementation and unit tests must use
+\texttt{torch.kron(Phi, R\_B)} with $\Ph \in \mathbb{R}^{n \times m}$, $\RB \in \mathbb{R}^{T \times T}$
+(\texttt{.contiguous()} on both factors before \texttt{kron}).
+
+\textbf{Do not} use \texttt{covar\_factor} as $\RB$ unless $\LB\LB^\top = B$ has been verified;
+in standard GPyTorch \texttt{IndexKernel} it does not (diagonal task variance is separate).
+Build $\RB$ from \texttt{covar\_matrix} via Cholesky or symmetric eigendecomposition.
+\end{diffbox}
+
+\begin{samebox}
+This is the multitask analogue of $\Sig = \noise I_n + \Ph\Ph^\top$ in the scalar note:
+replace $\Ph \in \mathbb{R}^{n \times m}$ by $\Om \in \mathbb{R}^{(nT) \times (mT)}$
+and noise dimension $n$ by $nT$.
+\end{samebox}
+
+\subsection{Example: TOA ($T=2$, $n=10{,}000$, $D=256$)}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Quantity & Value \\
+\midrule
+Dense covariance size & $nT \times nT = 20{,}000 \times 20{,}000$ \\
+$mT$ (joint feature width) & $512 \times 2 = 1{,}024$ \\
+Woodbury middle matrix & $1{,}024 \times 1{,}024$ \\
+Benefit & $1{,}024^3 \ll 20{,}000^3$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{When Woodbury helps}
+
+Extend \texttt{\_check\_woodbury\_rank}: warn when $mT \ge nT$.
+Woodbury is advantageous when $mT \ll nT$.
+
+%=============================================================================
+\section{Extension of scalar Woodbury}
+%=============================================================================
+
+This section parallels \texttt{rff\_woodbury\_derivation.tex} Sections~4--6.
+Read that document for term-by-term decomposition of $(\noise I)^{-1}$ vs Cholesky of $M$.
+
+\subsection{MVP: per-task diagonal noise (\texttt{rank\_likelihood}$=0$)}
+
+\textbf{Phase~1} matches \texttt{MTGPR} with \texttt{rank\_likelihood}$=0$:
+independent Gaussian noise per task,
+\begin{equation}
+  \Lambda = I_n \otimes D_\noise,
+  \qquad
+  D_\noise = \mathrm{diag}(\noise_1,\ldots,\noise_T)
+  \quad\text{(GPyTorch \texttt{task\_noises}).}
+\end{equation}
+The joint covariance is
+\begin{equation}
+  \label{eq:sigma-mvp}
+  \Sig = \Lambda + \Om\Om^\top.
+\end{equation}
+
+Woodbury inverse (structured $\Lambda$, $\Om$ replaces $\Ph$, $nT$ replaces $n$):
+\begin{equation}
+  \label{eq:woodbury-mt}
+  \Sig^{-1}
+  = \Lambda^{-1}
+  - \Lambda^{-1}\,\Om\,
+    \underbrace{\Bigl(I_{mT} + \Om^\top \Lambda^{-1} \Om\Bigr)^{-1}}_{M^{-1}}
+    \Om^\top \Lambda^{-1}.
+\end{equation}
+Because $\Lambda = I_n \otimes D_\noise$, we have $\Lambda^{-1} = I_n \otimes D_\noise^{-1}$
+and $\Lambda^{-1}\Om$ is cheap (scale each block of $\Om$ by the matching $\noise_t^{-1}$).
+
+Middle matrix:
+\begin{equation}
+  M = I_{mT} + \Om^\top \Lambda^{-1} \Om
+  \;\in\; \mathbb{R}^{(mT) \times (mT)}.
+\end{equation}
+
+\begin{samebox}
+\textbf{Special case.} If all $\noise_t \equiv \noise$, then $\Lambda = \noise I_{nT}$ and
+$M = I_{mT} + \Om^\top\Om / \noise$, recovering the scalar Woodbury template in
+\texttt{rff\_woodbury\_derivation.tex}.
+\end{samebox}
+
+\begin{samebox}
+\textbf{Reuse existing helpers} in \texttt{gpplus/utils/rff\_utils.py}:
+\texttt{woodbury\_factor}, \texttt{woodbury\_solve}, \texttt{woodbury\_log\_det},
+\texttt{woodbury\_marginal\_log\_likelihood} --- call them with $\Om$, structured $\Lambda$,
+and vectorized $y \in \mathbb{R}^{nT}$ (row-wise \texttt{train\_y.reshape(-1)}).
+Only \textbf{building} $\Om = \Ph \otimes \RB$ from spatial features and the PSD task factor
+is new.
+\end{samebox}
+
+\subsection{Marginal log-likelihood}
+
+For centered $\tilde{y} = \mathrm{vec}(y) - \mathrm{vec}(\mu)$:
+\begin{equation}
+  \log p(y \mid X)
+  = -\tfrac{1}{2}\,\tilde{y}^\top \Sig^{-1} \tilde{y}
+  - \tfrac{1}{2}\log|\Sig|
+  - \tfrac{nT}{2}\log(2\pi),
+\end{equation}
+with
+\begin{equation}
+  \log|\Sig| = \log|\Lambda| + \log|M|,
+  \qquad
+  \log|\Lambda| = n \sum_{t=1}^{T} \log \noise_t.
+\end{equation}
+
+\subsection{Predictive mean at test points}
+
+For test inputs $X_\ast \in \mathbb{R}^{n_\ast \times d}$, build $\Ph_\ast$ and
+$\Om_\ast = \Ph_\ast \otimes \RB$.
+Let $\alpha = \Sig^{-1}\tilde{y}$ (from Woodbury).
+The latent cross-covariance between train and test is
+$K_{x,\ast} \otimes B \approx \Om_\ast \Om^\top$ (not $\Om_\ast \Om_\ast^\top$).
+Posterior mean for vectorized targets:
+\begin{equation}
+  \mathbb{E}[\mathrm{vec}(y_\ast)]
+  = \Om_\ast \Om^\top \alpha + \mathrm{vec}(\mu_\ast),
+\end{equation}
+then reshape to $(n_\ast, T)$.
+Per-task marginal variances use the diagonal of the predictive covariance
+(\texttt{woodbury\_predictive\_var\_diag} generalized, or full $(T\times T)$ blocks per point).
+
+\subsection{Phase~2: correlated task noise ($r_\ell > 0$)}
+
+When \texttt{MultitaskGaussianLikelihood} has $r_\ell > 0$, $\Lambda$ has off-diagonal
+task structure (low-rank task noise on top of per-task variances).
+Options (when $\Lambda$ is not diagonal):
+\begin{enumerate}[nosep]
+  \item Whitening: $\Sig = \Lambda^{1/2}\bigl(I + \Lambda^{-1/2}\Om\Om^\top\Lambda^{-1/2}\bigr)\Lambda^{1/2}$
+        and Woodbury on the whitened system;
+  \item Low-rank correction if $\Lambda = \Lambda_0 + U U^\top$ with diagonal $\Lambda_0$.
+\end{enumerate}
+Implement Phase~1 (diagonal $\Lambda$) first; defer full $r_\ell > 0$ parity to Phase~2.
+
+%=============================================================================
+\section{GPPlus code changes}
+%=============================================================================
+
+\subsection{New and modified files}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.42\textwidth}@{}}
+\toprule
+\textbf{File} & \textbf{Action} & \textbf{Role} \\
+\midrule
+\texttt{gpplus/models/rff\_mtgpr.py} & \textbf{new} & \texttt{RFFMTGPR} model \\
+\texttt{gpplus/training/rff\_mt\_mll.py} & \textbf{new} & \texttt{RFFMTWoodburyMarginalLogLikelihood} \\
+\texttt{gpplus/utils/rff\_utils.py} & extend & \texttt{build\_icm\_joint\_features}, MT predict/MLL wrappers \\
+\texttt{gpplus/training/eval.py} & extend & \texttt{evaluate\_rff\_mt\_gp\_model} \\
+\texttt{gpplus/training/parameter\_initializer.py} & extend & \texttt{RFFMTParameterInitializer} \\
+\texttt{gpplus/training/training\_single\_run.py} & modify & MLL bypass for MT Woodbury \\
+\texttt{gpplus/training/training\_metrics.py} & modify & validation metrics for $(n,T)$ targets \\
+\texttt{gpplus/models/\_\_init\_\_.py} & modify & export \texttt{RFFMTGPR} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Math $\to$ code mapping}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Math} & \textbf{GPPlus (new)} \\
+\midrule
+$\Ph(x)$ & \texttt{RFFMTGPR.scaled\_spatial\_features(x)} \\
+$\RB$ (PSD factor of $B$) & \texttt{task\_psd\_factor()} from \texttt{covar\_module.task\_covar.covar\_matrix} \\
+$\Om = \Ph \otimes \RB$ & \texttt{RFFMTGPR.joint\_features(x)} \\
+Woodbury MLL & \texttt{RFFMTWoodburyMarginalLogLikelihood} \\
+Predict $(n_\ast, T)$ & \texttt{evaluate\_rff\_mt\_gp\_model} \\
+ORF/RFF/SORF & \texttt{RFFKernel(rff\_sampling=...)} --- \textbf{unchanged} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{\texttt{RFFMTGPR} sketch}
+
+\begin{planbox}
+\begin{verbatim}
+class RFFMTGPR(gpytorch.models.ExactGP):
+    # train_y: (n, T)
+    # MultitaskMean, MultitaskGaussianLikelihood
+    # MultitaskKernel(LogScaleKernel(RFFKernel(...)))
+    # rff_sampling in {"rff", "orf", "sorf"}
+
+    def scaled_spatial_features(self, x) -> Phi  # (n, m)
+    def task_psd_factor(self) -> R_B             # (T, T); B = R_B @ R_B.T
+    def joint_features(self, x) -> Omega         # (n*T, m*T); torch.kron(Phi, R_B)
+    def predict(self, test_x) -> mean, lower, upper  # each (n_test, T)
+    def invalidate_feature_cache(self)           # same as RFFGPR
+\end{verbatim}
+\end{planbox}
+
+\subsection{Trainer routing}
+
+In \texttt{training\_single\_run.py}, extend the Woodbury bypass:
+\begin{planbox}
+\begin{verbatim}
+if isinstance(mll, (RFFWoodburyMarginalLogLikelihood,
+                    RFFMTWoodburyMarginalLogLikelihood)):
+    return -mll(None, train_y)
+\end{verbatim}
+\end{planbox}
+Avoid dense \texttt{ExactGP} forward for large $nT$.
+
+\subsection{What does \emph{not} change}
+
+\begin{samebox}
+\begin{itemize}[nosep]
+  \item \texttt{RFFKernel}, \texttt{init\_rbf\_weights}, ORF/SORF sampling in \texttt{rff\_utils.py}
+  \item Existing \texttt{RFFGPR} (scalar) and \texttt{MTGPR} (dense, small $n$)
+  \item Independent $T$ scalar \texttt{RFFGPR} models (valid baseline)
+\end{itemize}
+\end{samebox}
+
+%=============================================================================
+\section{Implementation phases}
+%=============================================================================
+
+\subsection{Phase 1 --- MVP (joint multitask Woodbury)}
+
+\begin{enumerate}
+  \item $r_k \ge 0$ (any \texttt{rank\_kernel}), $r_\ell = 0$ (per-task diagonal noise).
+  \item \texttt{RFFMTGPR} + \texttt{RFFMTWoodburyMarginalLogLikelihood} + \texttt{evaluate\_rff\_mt\_gp\_model}.
+  \item \texttt{build\_icm\_joint\_features} --- \texttt{torch.kron(Phi, R\_B)} with full $B$;
+        vec-order and NLL test vs dense \texttt{MTGPR} on small $n,T,m$.
+  \item Refactor \texttt{toa\_*\_base.py} from 2$\times$ \texttt{RFFGPR} loop to single \texttt{RFFMTGPR}.
+\end{enumerate}
+
+\subsection{Phase 2 --- Parity with \texttt{MTGPR}}
+
+\begin{enumerate}
+  \item $r_\ell > 0$ (correlated task noise); Woodbury-compatible general $\Lambda$.
+  \item \texttt{RFFMTParameterInitializer} (RFF draws + multitask hyperparameters).
+  \item Multitask validation metrics in \texttt{compute\_validation\_metrics}.
+  \item ORF/SORF smoke tests on \texttt{MT1\_analytic\_1d\_GP} benchmark.
+\end{enumerate}
+
+\subsection{Phase 3 --- Experiments and docs}
+
+\begin{enumerate}
+  \item Register in \texttt{run\_*\_experiments.py} batch runners.
+  \item Per-task + aggregate metrics JSON (reuse \texttt{compute\_per\_task\_metrics} from TOA).
+  \item Cross-link this plan with \texttt{rff\_woodbury\_derivation.tex} in repo README.
+\end{enumerate}
+
+%=============================================================================
+\section{Risks and tests}
+%=============================================================================
+
+\begin{enumerate}
+  \item \textbf{Vec ordering.} $\Om = \Ph \otimes \RB$ must match GPyTorch
+        $\Sig_{\mathrm{latent}} = K_x \otimes B$ with $\mathrm{vec}(Y)=\texttt{train\_y.reshape(-1)}$
+        (Section~\ref{sec:mtgpr}).
+        Test: tiny data, compare NLL and predictions to dense \texttt{MTGPR}.
+  \item \textbf{Task matrix $B$.} Use \texttt{covar\_matrix.to\_dense()}, not \texttt{covar\_factor}
+        alone; verify $\RB\RB^\top = B$ before trusting $\Om\Om^\top$.
+  \item \textbf{Likelihood noise.} Phase~1: diagonal $\Lambda = I_n \otimes D_\noise$;
+        Phase~2: low-rank \texttt{MultitaskGaussianLikelihood} ($r_\ell > 0$) needs whitening.
+  \item \textbf{ARD in high $d$.} Same as scalar RFF; $m$ depends on $D$, not $d$.
+  \item \textbf{Woodbury conditioning.} Warn when $mT \ge nT$.
+  \item \textbf{Cross-task predictive correlation.} MVP can report per-task RMSE;
+        full $(T\times T)$ predictive cov optional for calibrated NIS.
+\end{enumerate}
+
+%=============================================================================
+\section{Complexity summary}
+%=============================================================================
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Method} & \textbf{Training / inference cost (dominant)} \\
+\midrule
+Dense \texttt{MTGPR} & $O(n^3 T^3)$ Cholesky on $nT \times nT$ \\
+$T$ independent \texttt{RFFGPR} & $T \cdot O(n m^2)$; no task correlation \\
+\textbf{Proposed \texttt{RFFMTGPR}} & $O\bigl((mT)^3 + nT \cdot mT\bigr)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=============================================================================
+\section{References}
+%=============================================================================
+
+\begin{thebibliography}{99}
+
+\bibitem[Alvarez et al.(2012)]{alvarez2012kernels}
+M.~\'Alvarez, L.~Rosasco, and N.~D. Lawrence.
+\newblock Kernels for vector-valued functions: a review.
+\newblock \emph{Foundations and Trends in Machine Learning}, 4(3):195--266, 2012.
+\newblock \url{https://arxiv.org/abs/1106.6242}.
+
+\bibitem[Bonilla et al.(2008)]{bonilla2008mtgp}
+E.~V. Bonilla, K.~M. Chai, and C.~K.~I. Williams.
+\newblock Multi-task Gaussian process prediction.
+\newblock In \emph{Advances in Neural Information Processing Systems 20}, 2008.
+\newblock \url{https://proceedings.neurips.cc/paper/2007/file/66368270ffd51418ec58bd793f2d9b1b-Paper.pdf}.
+
+\bibitem[Cutajar et al.(2017)]{cutajar2017dgp}
+K.~Cutajar, E.~V. Bonilla, P.~Michiardi, and M.~Filippone.
+\newblock Random feature expansions for deep Gaussian processes.
+\newblock In \emph{Proceedings of ICML}, volume~70, pages 884--893, 2017.
+\newblock \url{https://proceedings.mlr.press/v70/cutajar17a.html}.
+
+\bibitem[Gardner et al.(2018)]{gardner2018gpytorch}
+J.~R. Gardner, G.~Pleiss, D.~Bindel, K.~Q.~Weinberger, and A.~G. Wilson.
+\newblock GPyTorch: Blackbox matrix-matrix Gaussian process inference with GPU acceleration.
+\newblock In \emph{Advances in Neural Information Processing Systems 31}, 2018.
+\newblock \url{https://github.com/cornellius-gp/gpytorch}.
+
+\bibitem[Leroy et al.(2023)]{leroy2023lmc}
+V.~Leroy, F.~Gauthier, C.~Rasmussen, V.~Picheny, N.~Dutertre, and Y.~Richet.
+\newblock Exact and general decoupled solutions of the linear model of coregionalization.
+\newblock \emph{arXiv:2310.12032}, 2023.
+\newblock \url{https://arxiv.org/abs/2310.12032}.
+
+\bibitem[Lin et al.(2025)]{lin2025latentkronecker}
+A.~Lin, S.~S. Wilson, and A.~G. Wilson.
+\newblock Scalable Gaussian processes with latent Kronecker structure.
+\newblock In \emph{Proceedings of ICML}, volume~267, 2025.
+\newblock \url{https://proceedings.mlr.press/v267/lin25a.html}.
+
+\bibitem[Potapczynski et al.(2021)]{potapczynski2021rfftrunc}
+M.~Potapczynski, G.~Pleiss, and A.~G. Wilson.
+\newblock Bias-free scalable Gaussian processes via randomized truncations.
+\newblock In \emph{Proceedings of ICML}, volume~139, pages 8430--8440, 2021.
+\newblock \url{https://arxiv.org/abs/2102.06695}.
+
+\bibitem[Rahimi and Recht(2007)]{rahimi2007rff}
+A.~Rahimi and B.~Recht.
+\newblock Random features for large-scale kernel machines.
+\newblock In \emph{Advances in Neural Information Processing Systems 20}, 2007.
+\newblock \url{https://proceedings.neurips.cc/paper/2007/file/013a006f03dbc5392effeb8f18fda755-Paper.pdf}.
+
+\bibitem[Sevilla-Salinas et al.(2023)]{sevilla2023rffblr}
+F.~Sevilla-Salinas, J.~Navarro-Moreno, and C.~Mart\'inez-Ram\'on.
+\newblock Bayesian learning of feature spaces for multitask regression.
+\newblock \emph{arXiv:2209.03028}, 2023.
+\newblock \url{https://arxiv.org/abs/2209.03028}.
+
+\bibitem[Wilson et al.(2015)]{wilson2015kronecker}
+A.~G. Wilson, C.~Dann, and H.~Nickisch.
+\newblock Fast Kronecker inference in Gaussian processes with non-Gaussian likelihoods.
+\newblock In \emph{Proceedings of ICML}, volume~37, pages 1864--1872, 2015.
+\newblock \url{https://www.cs.cmu.edu/~neill/papers/icml15.pdf}.
+
+\end{thebibliography}
+
+%=============================================================================
+\appendix
+\section{File checklist}
+%=============================================================================
+
+\begin{itemize}
+  \item[\checkmark] \texttt{docs/overleaf/rff\_woodbury\_derivation.tex} --- scalar Woodbury reference
+  \item[\ ] \texttt{docs/overleaf/rff\_multitask\_gp\_plan.tex} --- this document
+  \item[\ ] \texttt{gpplus/models/rff\_mtgpr.py}
+  \item[\ ] \texttt{gpplus/training/rff\_mt\_mll.py}
+  \item[\ ] \texttt{gpplus/utils/rff\_utils.py} --- \texttt{build\_icm\_joint\_features}, MT wrappers
+  \item[\ ] \texttt{gpplus/training/eval.py} --- \texttt{evaluate\_rff\_mt\_gp\_model}
+  \item[\ ] \texttt{gpplus/training/parameter\_initializer.py} --- \texttt{RFFMTParameterInitializer}
+  \item[\ ] \texttt{experiments\_ORF/toa\_orf\_base.py} --- joint model (replace 2$\times$ loop)
+  \item[\ ] \texttt{experiments\_RFF/toa\_rff\_base.py}
+  \item[\ ] \texttt{experiments\_SORF/toa\_sorf\_base.py}
+\end{itemize}
+
+\vspace{1em}
+\noindent
+\textbf{Overleaf:} upload \texttt{docs/overleaf/}, set main file to \texttt{rff\_multitask\_gp\_plan.tex}, compile with pdfLaTeX.
+
+\end{document}

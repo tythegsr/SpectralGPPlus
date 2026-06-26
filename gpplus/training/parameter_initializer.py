@@ -420,16 +420,22 @@ class RFFParameterInitializer(DefaultParameterInitializer):
     def setup(self, model: torch.nn.Module) -> None:
         super().setup(model)
         from ..models.rff_gpr import RFFGPR
+        from ..models.rff_mtgpr import RFFMTGPR
         from ..utils.rff_utils import init_rbf_weights
 
         self._rff_weight_draws = None
-        if not isinstance(model, RFFGPR):
+        if isinstance(model, RFFGPR):
+            rff_kernel = model._rff_kernel
+            train_x = model.train_inputs[0]
+            num_rff = model.num_rff
+        elif isinstance(model, RFFMTGPR):
+            rff_kernel = model._rff_kernel
+            train_x = model.train_inputs[0]
+            num_rff = model.num_rff
+        else:
             return
 
-        train_x = model.train_inputs[0]
         num_dims = train_x.shape[-1]
-        num_samples = model.num_rff
-        rff_kernel = model._rff_kernel
         device = rff_kernel.raw_lengthscale.device
         dtype = rff_kernel.raw_lengthscale.dtype
         rff_sampling = rff_kernel.rff_sampling
@@ -438,7 +444,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             torch.manual_seed(self.seed)
 
         self._rff_weight_draws = [
-            init_rbf_weights(num_dims, num_samples, device=device, dtype=dtype, rff_sampling=rff_sampling)
+            init_rbf_weights(num_dims, num_rff, device=device, dtype=dtype, rff_sampling=rff_sampling)
             for _ in range(self.num_inits)
         ]
         feature_kind = rff_sampling.upper()
@@ -455,13 +461,20 @@ class RFFParameterInitializer(DefaultParameterInitializer):
 
     def _assign_rff_weights(self, model: torch.nn.Module, run_index: int) -> None:
         from ..models.rff_gpr import RFFGPR
+        from ..models.rff_mtgpr import RFFMTGPR
 
-        if not isinstance(model, RFFGPR):
+        if isinstance(model, RFFGPR):
+            rff_kernel = model._rff_kernel
+            num_rff = model.num_rff
+            invalidate = model.invalidate_feature_cache
+        elif isinstance(model, RFFMTGPR):
+            rff_kernel = model._rff_kernel
+            num_rff = model.num_rff
+            invalidate = model.invalidate_feature_cache
+        else:
             return
 
-        rff_kernel = model._rff_kernel
         num_dims = model.train_inputs[0].shape[-1]
-        num_samples = model.num_rff
         rff_sampling = rff_kernel.rff_sampling
 
         if self._rff_weight_draws is not None and run_index < len(self._rff_weight_draws):
@@ -471,7 +484,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             )
             rff_kernel._init_weights(
                 num_dims,
-                num_samples,
+                num_rff,
                 randn_weights=weights,
                 spectral=False,
                 rff_sampling=rff_sampling,
@@ -481,7 +494,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
                 torch.manual_seed(self.seed)
             rff_kernel.resample_weights(spectral=False, rff_sampling=rff_sampling)
 
-        model.invalidate_feature_cache()
+        invalidate()
         feature_kind = rff_sampling.upper()
         logger.info(
             "Assigned %s frequencies for run #%s (master seed=%s, precomputed draw)",
@@ -489,3 +502,9 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             run_index,
             self.seed,
         )
+
+
+class RFFMTParameterInitializer(RFFParameterInitializer):
+    """Alias for multitask RFF models; shares RFF draw logic with :class:`RFFParameterInitializer`."""
+
+    pass

@@ -15,6 +15,7 @@ from .stop_conditions import (
     StopCondition,
 )
 from .rff_mll import RFFWoodburyMarginalLogLikelihood
+from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
 from .trainer_utils import SingleRunResult, check_early_stop, select_epoch_train_fn
 
 
@@ -93,7 +94,7 @@ class GPTrainerSingleProcess:
 
     def _negative_mll_loss(self, mll, train_x: torch.Tensor, train_y: torch.Tensor) -> torch.Tensor:
         """MLL loss; skips ExactGP forward when using Woodbury MLL."""
-        if isinstance(mll, RFFWoodburyMarginalLogLikelihood):
+        if isinstance(mll, (RFFWoodburyMarginalLogLikelihood, RFFMTWoodburyMarginalLogLikelihood)):
             return -mll(None, train_y)
         output = self.model(train_x)
         return -mll(output, train_y)
