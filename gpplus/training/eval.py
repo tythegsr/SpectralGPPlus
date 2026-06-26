@@ -151,3 +151,53 @@ def evaluate_rff_gp_model(
 
     logger.info("RFF evaluation completed.")
     return mean, lower, upper, stddev
+
+
+def evaluate_rff_mt_gp_model(
+    model,
+    test_x: torch.Tensor,
+    jitter: float = 1e-6,
+    chunk_size: int = 512,
+):
+    """
+    Evaluate an :class:`~gpplus.models.RFFMTGPR` model using multitask Woodbury prediction.
+
+    Returns mean, lower, upper, stddev each of shape ``(n_test, T)``.
+    """
+    from ..models.rff_mtgpr import RFFMTGPR
+
+    if not isinstance(model, RFFMTGPR):
+        raise TypeError("evaluate_rff_mt_gp_model requires RFFMTGPR.")
+
+    model.eval()
+    train_inputs = getattr(model, "train_inputs", None)
+    if train_inputs and len(train_inputs) > 0:
+        reference = train_inputs[0]
+        test_x = test_x.to(device=reference.device, dtype=reference.dtype)
+
+    n_test = test_x.shape[0]
+    if n_test == 0:
+        empty = test_x.new_zeros(0, model.num_tasks)
+        return empty, empty, empty, empty
+
+    with torch.no_grad():
+        if chunk_size <= 0 or n_test <= chunk_size:
+            mean, lower, upper = model.predict(test_x, jitter=jitter)
+            stddev = (upper - lower) / 4.0
+        else:
+            mean_chunks = []
+            lower_chunks = []
+            upper_chunks = []
+            for start in range(0, n_test, chunk_size):
+                chunk_x = test_x[start : start + chunk_size]
+                m, lo, hi = model.predict(chunk_x, jitter=jitter)
+                mean_chunks.append(m)
+                lower_chunks.append(lo)
+                upper_chunks.append(hi)
+            mean = torch.cat(mean_chunks, dim=0)
+            lower = torch.cat(lower_chunks, dim=0)
+            upper = torch.cat(upper_chunks, dim=0)
+            stddev = (upper - lower) / 4.0
+
+    logger.info("RFF multitask evaluation completed.")
+    return mean, lower, upper, stddev

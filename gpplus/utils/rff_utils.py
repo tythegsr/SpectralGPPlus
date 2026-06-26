@@ -455,3 +455,263 @@ def woodbury_predict(
         noise_var, z_train, z_test, jitter=jitter, chol=chol, noise=noise
     )
     return f_mean, f_var
+
+
+# ---------------------------------------------------------------------------
+# Multitask ICM Woodbury (Sigma = Lambda + Omega Omega^T, Omega = Phi kron R_B)
+# ---------------------------------------------------------------------------
+
+_warned_woodbury_mt_rank = False
+
+
+def task_psd_factor(task_covar_matrix, jitter: float = 1e-8) -> Tensor:
+    """PSD square root R with B = R R^T from GPyTorch task covar_matrix."""
+    B = task_covar_matrix.to_dense()
+    B = 0.5 * (B + B.transpose(-1, -2))
+    evals, evecs = torch.linalg.eigh(B)
+    evals = evals.clamp(min=jitter)
+    R = (evecs * evals.sqrt().unsqueeze(0)) @ evecs.transpose(-1, -2)
+    return R.contiguous()
+
+
+def flatten_multitask_targets(y: Tensor) -> Tensor:
+    """GPyTorch vec order: task index fastest (row-major flatten of (n, T))."""
+    if y.dim() == 1:
+        return y
+    return y.reshape(-1)
+
+
+def unflatten_multitask_targets(y_flat: Tensor, num_tasks: int) -> Tensor:
+    return y_flat.reshape(-1, num_tasks)
+
+
+def build_icm_joint_features(phi: Tensor, task_psd: Tensor) -> Tensor:
+    """
+    Joint ICM features Omega = Phi kron R_B.
+
+    Parameters
+    ----------
+    phi : (n, m) spatial RFF features
+    task_psd : (T, T) PSD factor with B = task_psd @ task_psd.T
+    """
+    return torch.kron(phi.contiguous(), task_psd.contiguous())
+
+
+def _multitask_noise_per_row(task_noises: Tensor, n: int) -> Tensor:
+    """Observation noise for each of n*T vec entries (Lambda = I_n kron diag(task_noises))."""
+    T = task_noises.shape[-1]
+    return task_noises.view(1, T).expand(n, T).reshape(-1)
+
+
+def _apply_lambda_inv_rows(task_noises: Tensor, n: int, x: Tensor) -> Tensor:
+    """Multiply rows of x (n*T, ...) by 1/task_noises per task within each spatial block."""
+    T = task_noises.shape[-1]
+    inv = task_noises.clamp_min(1e-12).reciprocal()
+    if x.dim() == 1:
+        x = x.view(n, T)
+        return (x * inv).reshape(-1)
+    x = x.view(n, T, -1)
+    return (x * inv.view(1, T, 1)).reshape(n * T, -1)
+
+
+def _check_woodbury_mt_rank(omega: Tensor, n: int, num_tasks: int) -> None:
+    global _warned_woodbury_mt_rank
+    nT = n * num_tasks
+    mT = omega.shape[-1]
+    if mT >= nT and not _warned_woodbury_mt_rank:
+        logger.warning(
+            "Multitask Woodbury feature width m*T=%s >= n*T=%s; low-rank solve may not reduce cost.",
+            mT,
+            nT,
+        )
+        _warned_woodbury_mt_rank = True
+
+
+def woodbury_middle_matrix_mt(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    jitter: float = 0.0,
+) -> Tensor:
+    """M = I + Omega^T Lambda^{-1} Omega with Lambda = I_n kron diag(task_noises)."""
+    T = task_noises.shape[-1]
+    mT = omega.shape[-1]
+    inv_noise = task_noises.clamp_min(1e-12).reciprocal()
+    omega_scaled = omega.view(n, T, mT) * inv_noise.view(1, T, 1)
+    omega_scaled = omega_scaled.reshape(n * T, mT)
+    middle = torch.matmul(omega.transpose(-1, -2), omega_scaled)
+    eye = torch.eye(mT, device=omega.device, dtype=omega.dtype)
+    middle = eye + middle
+    if jitter > 0:
+        middle = middle + jitter * eye
+    return middle
+
+
+def woodbury_factor_mt(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    jitter: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """Cholesky of multitask Woodbury middle matrix M."""
+    _check_woodbury_mt_rank(omega, n, task_noises.shape[-1])
+    noise = task_noises.clamp_min(1e-12)
+    middle = woodbury_middle_matrix_mt(noise, omega, n, jitter=jitter)
+    chol = torch.linalg.cholesky(middle)
+    return chol, noise
+
+
+def woodbury_solve_mt_from_chol(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    chol: Tensor,
+    b: Tensor,
+) -> Tensor:
+    """Sigma^{-1} b for Sigma = Lambda + Omega Omega^T."""
+    squeeze = b.dim() == 1
+    if squeeze:
+        b = b.unsqueeze(-1)
+    lam_inv_b = _apply_lambda_inv_rows(task_noises, n, b)
+    middle_rhs = omega.transpose(-1, -2) @ lam_inv_b
+    inner = torch.cholesky_solve(middle_rhs, chol)
+    lam_inv_omega = _apply_lambda_inv_rows(task_noises, n, omega)
+    correction = lam_inv_omega @ inner
+    out = lam_inv_b - correction
+    return out.squeeze(-1) if squeeze else out
+
+
+def woodbury_solve_mt(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    b: Tensor,
+    jitter: float = 1e-6,
+    chol: Tensor | None = None,
+    noise: Tensor | None = None,
+) -> Tensor:
+    if chol is None or noise is None:
+        chol, noise = woodbury_factor_mt(task_noises, omega, n, jitter=jitter)
+    return woodbury_solve_mt_from_chol(noise, omega, n, chol, b)
+
+
+def woodbury_log_det_mt_from_chol(
+    task_noises: Tensor,
+    n: int,
+    chol: Tensor,
+) -> Tensor:
+    T = task_noises.shape[-1]
+    log_det_lam = n * task_noises.clamp_min(1e-12).log().sum()
+    log_det_middle = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum()
+    return log_det_lam + log_det_middle
+
+
+def woodbury_log_det_mt(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    jitter: float = 1e-6,
+    chol: Tensor | None = None,
+    noise: Tensor | None = None,
+) -> Tensor:
+    if chol is None or noise is None:
+        chol, noise = woodbury_factor_mt(task_noises, omega, n, jitter=jitter)
+    return woodbury_log_det_mt_from_chol(noise, n, chol)
+
+
+def woodbury_marginal_log_likelihood_mt(
+    task_noises: Tensor,
+    omega: Tensor,
+    n: int,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> Tensor:
+    """Gaussian log-density for vec(y) ~ N(0, Lambda + Omega Omega^T)."""
+    nT = y_centered.shape[-1]
+    chol, noise = woodbury_factor_mt(task_noises, omega, n, jitter=jitter)
+    alpha = woodbury_solve_mt_from_chol(noise, omega, n, chol, y_centered)
+    quad = (y_centered * alpha).sum()
+    log_det = woodbury_log_det_mt_from_chol(noise, n, chol)
+    const = -0.5 * nT * math.log(2.0 * math.pi)
+    return const - 0.5 * quad - 0.5 * log_det
+
+
+def woodbury_predictive_mean_mt(
+    task_noises: Tensor,
+    omega_train: Tensor,
+    omega_test: Tensor,
+    n_train: int,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+    chol: Tensor | None = None,
+    noise: Tensor | None = None,
+) -> Tensor:
+    """Latent posterior mean vec; reshape caller to (n_test, T)."""
+    alpha = woodbury_solve_mt(
+        task_noises,
+        omega_train,
+        n_train,
+        y_centered,
+        jitter=jitter,
+        chol=chol,
+        noise=noise,
+    )
+    return omega_test @ (omega_train.transpose(-1, -2) @ alpha)
+
+
+def woodbury_predictive_var_diag_mt(
+    task_noises: Tensor,
+    omega_train: Tensor,
+    omega_test: Tensor,
+    n_train: int,
+    jitter: float = 1e-6,
+    chol: Tensor | None = None,
+    noise: Tensor | None = None,
+) -> Tensor:
+    """Diagonal latent posterior variance for each vec entry (length n_test*T)."""
+    if chol is None or noise is None:
+        chol, noise = woodbury_factor_mt(task_noises, omega_train, n_train, jitter=jitter)
+    prior_var = (omega_test * omega_test).sum(dim=-1)
+    cross = omega_test @ omega_train.transpose(-1, -2)
+    alpha = woodbury_solve_mt_from_chol(noise, omega_train, n_train, chol, cross.transpose(-1, -2))
+    explained = (cross * alpha.transpose(-1, -2)).sum(dim=-1)
+    return prior_var - explained.clamp_min(0.0)
+
+
+def woodbury_predict_mt(
+    task_noises: Tensor,
+    omega_train: Tensor,
+    omega_test: Tensor,
+    n_train: int,
+    num_tasks: int,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """
+    Latent posterior mean (n_test, T) and diagonal variance (n_test, T).
+    """
+    chol, noise = woodbury_factor_mt(task_noises, omega_train, n_train, jitter=jitter)
+    mean_flat = woodbury_predictive_mean_mt(
+        task_noises,
+        omega_train,
+        omega_test,
+        n_train,
+        y_centered,
+        jitter=jitter,
+        chol=chol,
+        noise=noise,
+    )
+    var_flat = woodbury_predictive_var_diag_mt(
+        task_noises,
+        omega_train,
+        omega_test,
+        n_train,
+        jitter=jitter,
+        chol=chol,
+        noise=noise,
+    )
+    n_test = omega_test.shape[0] // num_tasks
+    return (
+        unflatten_multitask_targets(mean_flat, num_tasks),
+        unflatten_multitask_targets(var_flat, num_tasks),
+    )
