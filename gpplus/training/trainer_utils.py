@@ -77,19 +77,58 @@ def _cpu_parallel_jobs(num_inits: int, n_jobs: Optional[int] = None) -> int:
     return min(num_inits, max(1, cpu_count - reserved_cores))
 
 
+def _collect_parallel_results(
+    parallel: Parallel,
+    tasks,
+    *,
+    num_inits: int,
+) -> list[RunResult]:
+    """Run tasks and log each completion as results stream back from joblib."""
+    results: list[RunResult] = []
+    for done, result in enumerate(parallel(tasks), start=1):
+        run_index = result.get("run_index")
+        error = result.get("error")
+        loss = result.get("loss")
+        if error:
+            logger.warning(
+                "Run %s/%s finished (#%s) with error: %s",
+                done,
+                num_inits,
+                run_index,
+                error,
+            )
+        else:
+            loss_text = f"{loss:.6f}" if loss is not None else "n/a"
+            logger.info(
+                "Run %s/%s finished (#%s) loss=%s",
+                done,
+                num_inits,
+                run_index,
+                loss_text,
+            )
+        results.append(result)
+    return results
+
+
 def run_parallel_initializations(
     num_inits: int,
     trainer_device: torch.device,
     run_callable: Callable[[int, torch.device], RunResult],
     n_jobs: Optional[int] = None,
+    parallel_verbose: int = 0,
 ) -> list[RunResult]:
     """Execute initialization runs across CPU cores or available GPUs."""
     if trainer_device.type == "cpu":
         max_jobs = _cpu_parallel_jobs(num_inits, n_jobs=n_jobs)
         logger.info(f"Running {num_inits} runs using {max_jobs} parallel jobs on {os.cpu_count()} available CPU cores.")
-        return Parallel(n_jobs=max_jobs, backend="loky")(
-            delayed(run_callable)(run_index, trainer_device) for run_index in range(num_inits)
+        tasks = (delayed(run_callable)(run_index, trainer_device) for run_index in range(num_inits))
+        parallel = Parallel(
+            n_jobs=max_jobs,
+            backend="loky",
+            verbose=parallel_verbose,
+            return_as="generator",
         )
+        return _collect_parallel_results(parallel, tasks, num_inits=num_inits)
 
     if trainer_device.type == "cuda":
         torch.cuda.empty_cache()
@@ -98,18 +137,30 @@ def run_parallel_initializations(
             logger.warning("CUDA device selected but no GPUs were detected. Falling back to CPU.")
             cpu_device = torch.device("cpu")
             max_jobs = _cpu_parallel_jobs(num_inits, n_jobs=n_jobs)
-            return Parallel(n_jobs=max_jobs, backend="loky")(
-                delayed(run_callable)(run_index, cpu_device) for run_index in range(num_inits)
+            tasks = (delayed(run_callable)(run_index, cpu_device) for run_index in range(num_inits))
+            parallel = Parallel(
+                n_jobs=max_jobs,
+                backend="loky",
+                verbose=parallel_verbose,
+                return_as="generator",
             )
+            return _collect_parallel_results(parallel, tasks, num_inits=num_inits)
 
         max_jobs = min(num_inits, num_gpus)
         if n_jobs is not None:
             max_jobs = min(max_jobs, max(1, n_jobs))
         logger.info(f"Running {num_inits} runs distributed across {num_gpus} GPUs.")
-        return Parallel(n_jobs=max_jobs, backend="threading")(
+        tasks = (
             delayed(run_callable)(run_index, torch.device(f"cuda:{run_index % num_gpus}"))
             for run_index in range(num_inits)
         )
+        parallel = Parallel(
+            n_jobs=max_jobs,
+            backend="threading",
+            verbose=parallel_verbose,
+            return_as="generator",
+        )
+        return _collect_parallel_results(parallel, tasks, num_inits=num_inits)
 
     raise ValueError(f"Unsupported training device: {trainer_device}")
 

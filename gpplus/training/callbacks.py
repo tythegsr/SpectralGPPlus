@@ -1,5 +1,6 @@
 from abc import ABC
 from typing import Any, Callable, List, Optional, Tuple, TypedDict
+import math
 import torch
 
 
@@ -90,6 +91,72 @@ class Callback(ABC):
 class PrintLossCallback(Callback):
     def on_epoch_end(self, context: dict):
         print(f"Epoch {context['epoch']} - Loss: {context['loss']:.4f}")
+
+
+class TrainLossLoggingCallback(Callback):
+    """Log training loss each epoch (Adam) via the gpplus logger."""
+
+    def __init__(
+        self,
+        *,
+        verbose: bool = True,
+        log_every_n_epochs: int = 1,
+        num_inits: int | None = None,
+        total_epochs: int | None = None,
+    ):
+        self.verbose = verbose
+        self.log_every_n_epochs = max(1, int(log_every_n_epochs))
+        self.num_inits = num_inits
+        self.total_epochs = total_epochs
+        self._run_index: int | None = None
+
+    def set_run_index(self, run_index: int) -> None:
+        self._run_index = run_index
+
+    def _init_label(self, context: dict) -> str:
+        run_index = context.get("run_index", self._run_index)
+        num_inits = context.get("num_inits", self.num_inits)
+        if run_index is not None and num_inits is not None:
+            return f"Init {run_index + 1}/{num_inits}"
+        if run_index is not None:
+            return f"Init {run_index}"
+        return "Init ?"
+
+    def on_train_start(self, context: dict) -> None:
+        if not self.verbose:
+            return
+        from ..config import logger
+
+        device = context.get("device")
+        device_str = str(device) if device is not None else "unknown"
+        logger.info(
+            "[%s] Training started (%s epochs) on %s",
+            self._init_label(context),
+            context.get("trainer").num_epochs if context.get("trainer") else self.total_epochs,
+            device_str,
+        )
+
+    def on_epoch_end(self, context: dict) -> None:
+        if not self.verbose:
+            return
+        epoch = int(context["epoch"]) + 1
+        if epoch != 1 and (epoch % self.log_every_n_epochs) != 0:
+            return
+        from ..config import logger
+
+        device = context.get("device")
+        device_str = str(device) if device is not None else "unknown"
+        total = self.total_epochs
+        if total is None and context.get("trainer") is not None:
+            total = context["trainer"].num_epochs
+        epoch_label = f"Epoch {epoch}/{total}" if total else f"Epoch {epoch}"
+        logger.info(
+            "[%s] %s loss=%.6f device=%s",
+            self._init_label(context),
+            epoch_label,
+            float(context["loss"]),
+            device_str,
+        )
 
 
 class PrintTrainingMetricsCallback(Callback):
@@ -4015,6 +4082,7 @@ class ValidationMetricsCallback(Callback):
         self._records: list[dict] = []
         self._trainer = None
         self._lbfgs_registered = False
+        self._prev_val_nll: Optional[float] = None
 
     def set_run_index(self, run_index: int) -> None:
         self._run_index = run_index
@@ -4038,6 +4106,94 @@ class ValidationMetricsCallback(Callback):
         if hasattr(x, "item"):
             return float(x.item())
         return float(x)
+
+    @staticmethod
+    def _format_compact_diag(val_diag: dict) -> str:
+        task_noises = val_diag.get("task_noises")
+        pred_std_min = val_diag.get("pred_std_min")
+        f_var_zero_frac = val_diag.get("f_var_zero_frac")
+        parts: list[str] = []
+        if task_noises is not None:
+            parts.append(f"task_noises={task_noises}")
+        if pred_std_min is not None:
+            parts.append(f"pred_std_min={pred_std_min}")
+        if f_var_zero_frac is not None:
+            parts.append(f"f_var_zero_frac={f_var_zero_frac:.4f}")
+        return " ".join(parts)
+
+    @staticmethod
+    def _is_val_nll_spike(val_nll: float, prev: Optional[float]) -> bool:
+        if not math.isfinite(val_nll):
+            return False
+        if val_nll > 0:
+            return True
+        if prev is not None and math.isfinite(prev):
+            if val_nll - prev > 50.0:
+                return True
+            if prev > 0 and val_nll > 10.0 * prev:
+                return True
+            if prev < 0 and val_nll > prev / 10.0:
+                return True
+        return False
+
+    def _maybe_log_spike_diagnostics(
+        self,
+        context: dict,
+        metrics: dict,
+        *,
+        epoch: Optional[int] = None,
+        lbfgs_iter: Optional[int] = None,
+    ) -> bool:
+        from ..config import logger
+
+        val_nll = float(metrics.get("val_NLL", float("nan")))
+        if not self._is_val_nll_spike(val_nll, self._prev_val_nll):
+            return False
+
+        val_diag = metrics.get("val_diag")
+        if not isinstance(val_diag, dict):
+            return False
+
+        label = self._init_label(context)
+        step = f"epoch {epoch}" if epoch is not None else f"LBFGS iter {lbfgs_iter}"
+        prev_str = (
+            f"{self._prev_val_nll:.4f}"
+            if self._prev_val_nll is not None and math.isfinite(self._prev_val_nll)
+            else "n/a"
+        )
+        lines = [
+            f"[{label}] val_NLL spike at {step} ({val_nll:.4f}, prev={prev_str})",
+            f"  per_task_val_NLL={val_diag.get('per_task_val_NLL')}  "
+            f"per_task_val_RRMSE={val_diag.get('per_task_val_RRMSE')}",
+            f"  task_noises={val_diag.get('task_noises')}  "
+            f"raw_task_noises={val_diag.get('raw_task_noises')}",
+        ]
+
+        pred_std_stats = val_diag.get("pred_std_stats") or []
+        for t, stats in enumerate(pred_std_stats):
+            lines.append(
+                f"  pred_std task{t}: min={stats.get('min'):.4e} "
+                f"med={stats.get('median'):.4e} max={stats.get('max'):.4e}"
+            )
+
+        f_var_stats = val_diag.get("f_var_stats") or []
+        for t, stats in enumerate(f_var_stats):
+            lines.append(
+                f"  f_var task{t}: min={stats.get('min'):.4e} "
+                f"med={stats.get('median'):.4e} max={stats.get('max'):.4e}"
+            )
+
+        lines.append(
+            f"  f_var_zero_frac={val_diag.get('f_var_zero_frac'):.4f}  "
+            f"outputscale={val_diag.get('outputscale')}  "
+            f"lengthscale_median={val_diag.get('lengthscale_median')}"
+        )
+        lines.append(
+            f"  max_point_nll={val_diag.get('max_point_nll')}  "
+            f"frac_nll_above_10={val_diag.get('frac_nll_above_10')}"
+        )
+        logger.info("\n".join(lines))
+        return True
 
     def _compute_and_record(
         self,
@@ -4073,6 +4229,15 @@ class ValidationMetricsCallback(Callback):
             record["epoch"] = int(epoch)
         if lbfgs_iter is not None:
             record["lbfgs_iter"] = int(lbfgs_iter)
+        val_diag = metrics.get("val_diag")
+        if isinstance(val_diag, dict):
+            record["val_diag"] = val_diag
+        spike_logged = self._maybe_log_spike_diagnostics(
+            context, metrics, epoch=epoch, lbfgs_iter=lbfgs_iter
+        )
+        if spike_logged:
+            record["val_diag_expanded_logged"] = True
+        self._prev_val_nll = float(metrics["val_NLL"])
         self._records.append(record)
         context["val_metrics"] = metrics
         return metrics
@@ -4098,6 +4263,11 @@ class ValidationMetricsCallback(Callback):
             parts.append(f"train_loss={train_loss:.4f}")
         parts.append(f"val_NLL={metrics['val_NLL']:.4f}")
         parts.append(f"val_RRMSE={metrics['val_RRMSE']:.4f}")
+        val_diag = metrics.get("val_diag")
+        if isinstance(val_diag, dict):
+            compact = self._format_compact_diag(val_diag)
+            if compact:
+                parts.append(compact)
         print(" | ".join(parts))
 
     def on_train_start(self, context: dict) -> None:
@@ -4105,6 +4275,7 @@ class ValidationMetricsCallback(Callback):
         self._run_index = context.get("run_index", self._run_index)
         self._fold_index = context.get("fold_index", self._fold_index)
         self._records = []
+        self._prev_val_nll = None
 
     def on_epoch_end(self, context: dict) -> None:
         if self._lbfgs_registered:

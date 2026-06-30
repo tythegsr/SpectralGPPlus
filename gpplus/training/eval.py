@@ -11,9 +11,15 @@ if TYPE_CHECKING:
 from ..likelihoods import MultiLikelihood
 from ..models.rff_gpr import _drop_singleton_batch
 from ..utils.rff_utils import (
+    flatten_multitask_targets,
+    unflatten_multitask_targets,
     woodbury_factor,
+    woodbury_factor_mt,
     woodbury_predictive_mean,
+    woodbury_predictive_mean_mt,
+    woodbury_predictive_obs_std,
     woodbury_predictive_var_diag,
+    woodbury_predictive_var_diag_mt,
 )
 
 
@@ -140,7 +146,7 @@ def evaluate_rff_gp_model(
                     chol=chol,
                     noise=noise_clamped,
                 )
-                obs_std = (f_var + noise).clamp_min(0.0).sqrt()
+                obs_std = woodbury_predictive_obs_std(f_var, noise)
                 mean_chunks.append(f_mean)
                 lower_chunks.append(f_mean - 2 * obs_std)
                 upper_chunks.append(f_mean + 2 * obs_std)
@@ -158,11 +164,15 @@ def evaluate_rff_mt_gp_model(
     test_x: torch.Tensor,
     jitter: float = 1e-6,
     chunk_size: int = 512,
+    return_latent_var: bool = False,
 ):
     """
     Evaluate an :class:`~gpplus.models.RFFMTGPR` model using multitask Woodbury prediction.
 
+    Factors the Woodbury middle matrix once per call and reuses it across test chunks.
+
     Returns mean, lower, upper, stddev each of shape ``(n_test, T)``.
+    If ``return_latent_var`` is True, also returns latent ``f_var`` (before adding noise).
     """
     from ..models.rff_mtgpr import RFFMTGPR
 
@@ -176,28 +186,69 @@ def evaluate_rff_mt_gp_model(
         test_x = test_x.to(device=reference.device, dtype=reference.dtype)
 
     n_test = test_x.shape[0]
+    num_tasks = model.num_tasks
     if n_test == 0:
-        empty = test_x.new_zeros(0, model.num_tasks)
+        empty = test_x.new_zeros(0, num_tasks)
+        if return_latent_var:
+            return empty, empty, empty, empty, empty
         return empty, empty, empty, empty
 
     with torch.no_grad():
-        if chunk_size <= 0 or n_test <= chunk_size:
-            mean, lower, upper = model.predict(test_x, jitter=jitter)
-            stddev = (upper - lower) / 4.0
-        else:
-            mean_chunks = []
-            lower_chunks = []
-            upper_chunks = []
-            for start in range(0, n_test, chunk_size):
-                chunk_x = test_x[start : start + chunk_size]
-                m, lo, hi = model.predict(chunk_x, jitter=jitter)
-                mean_chunks.append(m)
-                lower_chunks.append(lo)
-                upper_chunks.append(hi)
-            mean = torch.cat(mean_chunks, dim=0)
-            lower = torch.cat(lower_chunks, dim=0)
-            upper = torch.cat(upper_chunks, dim=0)
-            stddev = (upper - lower) / 4.0
+        train_x = _drop_singleton_batch(model.train_inputs[0])
+        train_y = _drop_singleton_batch(model.train_targets)
+        n_train = train_x.shape[0]
+        omega_train = model.train_joint_features()
+        mean_train = model.mean_module(train_x)
+        y_centered = flatten_multitask_targets(train_y - mean_train)
+        task_noises = model.task_noises()
+        chol, noise = woodbury_factor_mt(task_noises, omega_train, n_train, jitter=jitter)
+
+        step = n_test if chunk_size <= 0 else chunk_size
+        mean_chunks: list[torch.Tensor] = []
+        lower_chunks: list[torch.Tensor] = []
+        upper_chunks: list[torch.Tensor] = []
+        f_var_chunks: list[torch.Tensor] = []
+        for start in range(0, n_test, step):
+            chunk_x = test_x[start : start + step]
+            omega_test = model.joint_features(chunk_x)
+            f_mean = woodbury_predictive_mean_mt(
+                task_noises,
+                omega_train,
+                omega_test,
+                n_train,
+                y_centered,
+                jitter=jitter,
+                chol=chol,
+                noise=noise,
+            )
+            f_mean = unflatten_multitask_targets(f_mean, num_tasks) + model.mean_module(chunk_x)
+            f_var = unflatten_multitask_targets(
+                woodbury_predictive_var_diag_mt(
+                    task_noises,
+                    omega_train,
+                    omega_test,
+                    n_train,
+                    jitter=jitter,
+                    chol=chol,
+                    noise=noise,
+                ),
+                num_tasks,
+            )
+            noise_rows = task_noises.view(1, -1).expand(f_mean.shape[0], -1)
+            obs_std = woodbury_predictive_obs_std(f_var, noise_rows)
+            mean_chunks.append(f_mean)
+            lower_chunks.append(f_mean - 2 * obs_std)
+            upper_chunks.append(f_mean + 2 * obs_std)
+            if return_latent_var:
+                f_var_chunks.append(f_var)
+
+        mean = torch.cat(mean_chunks, dim=0)
+        lower = torch.cat(lower_chunks, dim=0)
+        upper = torch.cat(upper_chunks, dim=0)
+        stddev = (upper - lower) / 4.0
 
     logger.info("RFF multitask evaluation completed.")
+    if return_latent_var:
+        f_var_out = torch.cat(f_var_chunks, dim=0)
+        return mean, lower, upper, stddev, f_var_out
     return mean, lower, upper, stddev

@@ -118,7 +118,18 @@ class GPTrainerSingleProcess:
         else:
             self.scheduler = None
 
-        mll = self.mll_class(self.model.likelihood, self.model)
+        if isinstance(
+            self.mll_class,
+            type,
+        ) and issubclass(
+            self.mll_class,
+            (RFFWoodburyMarginalLogLikelihood, RFFMTWoodburyMarginalLogLikelihood),
+        ):
+            mll = self.mll_class(
+                self.model.likelihood, self.model, jitter=self.cholesky_jitter
+            )
+        else:
+            mll = self.mll_class(self.model.likelihood, self.model)
         train_epoch = select_epoch_train_fn(
             optimizer=optimizer,
             standard_epoch_fn=self._train_standard_epoch,

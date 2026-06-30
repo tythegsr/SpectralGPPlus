@@ -821,6 +821,38 @@ def _gaussian_predictive_nll(
     return float(val.item()) if torch.isfinite(val) else float("nan")
 
 
+def _gaussian_predictive_nll_per_point(
+    y_true: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Per-point negative log predictive density, shape (n,) flattened over tasks."""
+    y_flat = y_true.reshape(-1).to(dtype=pred_mean.dtype)
+    mean = pred_mean.reshape(-1)
+    var = (pred_std.reshape(-1) ** 2).clamp_min(eps)
+    resid = y_flat - mean
+    return 0.5 * (torch.log(2 * torch.pi * var) + (resid * resid) / var)
+
+
+def _gaussian_predictive_nll_per_task(
+    y_true: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+) -> List[float]:
+    """Mean NLL per task column."""
+    nlls: List[float] = []
+    for t in range(y_true.shape[-1]):
+        yt = y_true[..., t]
+        pm = pred_mean[..., t]
+        ps = pred_std[..., t]
+        nlls.append(_gaussian_predictive_nll(yt, pm, ps, eps=eps))
+    return nlls
+
+
 def _relative_rmse(y_true: torch.Tensor, pred_mean: torch.Tensor, *, eps: float = 1e-12) -> float:
     """RRMSE = RMSE / std(y_true), matching compute_metrics."""
     y_flat = y_true.view(-1).to(dtype=pred_mean.dtype)
@@ -831,6 +863,102 @@ def _relative_rmse(y_true: torch.Tensor, pred_mean: torch.Tensor, *, eps: float 
     return float(rrmse.item()) if torch.isfinite(rrmse) else float("nan")
 
 
+def _relative_rmse_per_task(
+    y_true: torch.Tensor,
+    pred_mean: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+) -> List[float]:
+    """RRMSE per task column."""
+    rrmse: List[float] = []
+    for t in range(y_true.shape[-1]):
+        rrmse.append(_relative_rmse(y_true[..., t], pred_mean[..., t], eps=eps))
+    return rrmse
+
+
+def _tensor_summary_stats(x: torch.Tensor, *, dim: int = 0, eps: float = 1e-12) -> List[Dict[str, float]]:
+    """Per-column min, median, p01, max."""
+    if x.numel() == 0:
+        return []
+    stats: List[Dict[str, float]] = []
+    num_cols = x.shape[-1] if x.dim() > 1 else 1
+    for t in range(num_cols):
+        col = x[..., t] if x.dim() > 1 else x
+        col = col.reshape(-1).to(dtype=torch.float64)
+        q01 = torch.quantile(col, 0.01)
+        stats.append(
+            {
+                "min": float(col.min().clamp_min(eps).item()),
+                "median": float(col.median().item()),
+                "p01": float(q01.item()),
+                "max": float(col.max().item()),
+            }
+        )
+    return stats
+
+
+def _collect_rff_mt_hyperparams(model) -> Dict[str, object]:
+    """Scalars from RFFMTGPR safe for JSON logging."""
+    out: Dict[str, object] = {}
+    task_noises = model.task_noises().detach().cpu()
+    out["task_noises"] = [float(v) for v in task_noises.tolist()]
+
+    raw_task_noises = getattr(model.likelihood, "raw_task_noises", None)
+    if raw_task_noises is not None:
+        out["raw_task_noises"] = [float(v) for v in raw_task_noises.detach().cpu().view(-1).tolist()]
+
+    data_covar = model.covar_module.data_covar_module
+    out["outputscale"] = float(data_covar.outputscale.detach().cpu().item())
+
+    lengthscale = model._rff_kernel.lengthscale.detach().cpu()
+    if lengthscale.numel() == 1:
+        out["lengthscale_median"] = float(lengthscale.item())
+    else:
+        out["lengthscale_median"] = float(lengthscale.median().item())
+
+    return out
+
+
+def _rff_mt_validation_diagnostics(
+    model,
+    val_y: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    f_var: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+    nll_spike_threshold: float = 10.0,
+) -> Dict[str, object]:
+    """Compact + expanded validation diagnostics for RFFMTGPR."""
+    hyperparams = _collect_rff_mt_hyperparams(model)
+    task_noises = hyperparams["task_noises"]
+    pred_std_min = [float(v) for v in pred_std.min(dim=0).values.detach().cpu().tolist()]
+    f_var_flat = f_var.reshape(-1)
+    f_var_zero_frac = float((f_var_flat <= eps).float().mean().item())
+
+    per_task_nll = _gaussian_predictive_nll_per_task(val_y, pred_mean, pred_std, eps=eps)
+    per_task_rrmse = _relative_rmse_per_task(val_y, pred_mean, eps=eps)
+    pred_std_stats = _tensor_summary_stats(pred_std, dim=0, eps=eps)
+    f_var_stats = _tensor_summary_stats(f_var.clamp_min(0.0), dim=0, eps=eps)
+
+    point_nll = _gaussian_predictive_nll_per_point(val_y, pred_mean, pred_std, eps=eps)
+    max_point_nll = float(point_nll.max().item()) if point_nll.numel() else float("nan")
+    frac_nll_above = float((point_nll > nll_spike_threshold).float().mean().item())
+
+    return {
+        "task_noises": task_noises,
+        "pred_std_min": pred_std_min,
+        "f_var_zero_frac": f_var_zero_frac,
+        "per_task_val_NLL": per_task_nll,
+        "per_task_val_RRMSE": per_task_rrmse,
+        "pred_std_stats": pred_std_stats,
+        "f_var_stats": f_var_stats,
+        "max_point_nll": max_point_nll,
+        "frac_nll_above_10": frac_nll_above,
+        **hyperparams,
+    }
+
+
 def compute_validation_metrics(
     model,
     val_x: torch.Tensor,
@@ -838,11 +966,12 @@ def compute_validation_metrics(
     *,
     cholesky_jitter: Optional[float] = None,
     chunk_size: int = 512,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     """
     Compute validation metrics on held-out points (not used for training).
 
     Returns val_NLL (mean negative log predictive density) and val_RRMSE.
+    For RFFMTGPR, also returns val_diag with uncertainty and hyperparameter diagnostics.
     """
     if val_x.numel() == 0 or val_y.numel() == 0:
         return {"val_NLL": float("nan"), "val_RRMSE": float("nan")}
@@ -869,8 +998,11 @@ def compute_validation_metrics(
 
                 if hasattr(model, "invalidate_feature_cache"):
                     model.invalidate_feature_cache()
-                pred_mean, _, _, pred_std = evaluate_rff_mt_gp_model(
-                    model, val_x, jitter=jitter, chunk_size=chunk_size
+                pred_mean, _, _, pred_std, f_var = evaluate_rff_mt_gp_model(
+                    model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
+                )
+                val_diag = _rff_mt_validation_diagnostics(
+                    model, val_y, pred_mean, pred_std, f_var
                 )
             elif is_rff:
                 from .eval import evaluate_rff_gp_model
@@ -895,4 +1027,7 @@ def compute_validation_metrics(
         else:
             model.eval()
 
-    return {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
+    out: Dict[str, object] = {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
+    if is_rff_mt:
+        out["val_diag"] = val_diag
+    return out

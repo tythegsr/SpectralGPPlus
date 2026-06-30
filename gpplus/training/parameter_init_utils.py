@@ -250,7 +250,15 @@ def initialize_parameter(
 
     if method == "constant":
         value = config.get("value", 0.0)
-        param.data = torch.full_like(param, value, dtype=param.dtype)
+        if torch.is_tensor(value):
+            value = value.to(device=param.device, dtype=param.dtype)
+            if value.shape != param.shape:
+                raise ValueError(
+                    f"constant init shape mismatch for {name}: value {tuple(value.shape)} vs param {tuple(param.shape)}"
+                )
+            param.data.copy_(value)
+        else:
+            param.data = torch.full_like(param, value, dtype=param.dtype)
         return
 
     if method == "skip":

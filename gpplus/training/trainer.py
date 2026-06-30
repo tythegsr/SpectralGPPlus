@@ -41,6 +41,7 @@ class GPTrainer:
         n_jobs: Optional[int] = None,
         inner_max_num_threads: Optional[int] = 1,
         dtype: torch.dtype = torch.float64,
+        parallel_verbose: int = 0,
     ):
         #! TODO: Update so LBFGS and adam use different trainers to minimize 'if' lines
         """
@@ -66,6 +67,7 @@ class GPTrainer:
             n_jobs: Optional parallel job cap used by run dispatch.
             inner_max_num_threads: Optional torch thread cap per run worker.
             dtype: Tensor dtype used for model and training data.
+            parallel_verbose: joblib Parallel verbosity (0=quiet, 10=progress).
         """
         if device.startswith("cuda") and not torch.cuda.is_available():
             logger.warning("CUDA not available. Falling back to CPU.")
@@ -88,6 +90,7 @@ class GPTrainer:
         self.min_epochs = min_epochs
         self.n_jobs = n_jobs
         self.inner_max_num_threads = inner_max_num_threads
+        self.parallel_verbose = parallel_verbose
 
         if stop_conditions is None:
             from .stop_conditions import ConvergencePatienceStopCondition, MinLossChangeStopCondition
@@ -236,6 +239,7 @@ class GPTrainer:
             trainer_device=self.device,
             run_callable=self._train_single_process_safe,
             n_jobs=self.n_jobs,
+            parallel_verbose=self.parallel_verbose,
         )
         logger.info("Training completed.")
         return results

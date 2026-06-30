@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 # Create a package-wide logger
@@ -17,7 +18,7 @@ def configure_logger(level=logging.INFO, log_to_file=None):
 
     Parameters:
     - level (int): Logging level (e.g., logging.DEBUG, logging.INFO, logging.WARNING)
-    - log_to_file (str | None): File path to log output (if None, logs to stdout)
+    - log_to_file (str | None): Optional file path; when set, logs to file and stdout
     """
     # Remove existing handlers
     logger.handlers.clear()
@@ -25,17 +26,23 @@ def configure_logger(level=logging.INFO, log_to_file=None):
     # Create formatter
     formatter = logging.Formatter("[%(asctime)s] %(name)s - %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S")
 
+    handlers = [logging.StreamHandler(sys.stdout)]
     if log_to_file:
-        handler = logging.FileHandler(log_to_file)
-    else:
-        handler = logging.StreamHandler(sys.stdout)
+        log_dir = os.path.dirname(os.path.abspath(log_to_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.FileHandler(log_to_file))
 
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
     logger.setLevel(level)
 
+    outputs = ["console"]
+    if log_to_file:
+        outputs.append(f"file:{log_to_file}")
     logger.info(
-        f"Logger configured: level={logging.getLevelName(level)}, output={'file' if log_to_file else 'console'}"
+        f"Logger configured: level={logging.getLevelName(level)}, output={'+'.join(outputs)}"
     )
 
 

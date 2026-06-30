@@ -27,12 +27,61 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Literal
+from typing import Callable, Literal
 
 import torch
 from torch import Tensor
 
 logger = logging.getLogger(__name__)
+
+_WOODBURY_JITTER_DEFAULT = 1e-6
+
+
+def woodbury_jitter_for_dtype(dtype: torch.dtype) -> float:
+    """Default Woodbury diagonal jitter (linalg may run in float64 even for float32 inputs)."""
+    del dtype  # same jitter in promoted precision
+    return _WOODBURY_JITTER_DEFAULT
+
+
+def _woodbury_linalg_dtype(dtype: torch.dtype) -> torch.dtype:
+    """Promote float32 inputs to float64 for Woodbury Cholesky/solve stability."""
+    return torch.float64 if dtype == torch.float32 else dtype
+
+
+def _symmetrize_matrix(m: Tensor) -> Tensor:
+    return 0.5 * (m + m.transpose(-1, -2))
+
+
+def _woodbury_cholesky_factor(
+    build_middle: Callable[[float], Tensor],
+    jitter: float,
+    *,
+    max_attempts: int = 10,
+    jitter_scale: float = 10.0,
+) -> tuple[Tensor, float]:
+    """
+    Cholesky of a Woodbury middle matrix, rebuilding M(j) with escalating jitter.
+
+    ``build_middle(j)`` must return M already including ``j * I`` on the diagonal.
+    """
+    base = float(jitter)
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        j = base * (jitter_scale**attempt)
+        middle = _symmetrize_matrix(build_middle(j))
+        try:
+            chol = torch.linalg.cholesky(middle)
+            if attempt > 0:
+                logger.warning(
+                    "Woodbury Cholesky recovered with jitter=%.2e (requested %.2e)",
+                    j,
+                    base,
+                )
+            return chol, j
+        except torch.linalg.LinAlgError as exc:
+            last_err = exc
+    assert last_err is not None
+    raise last_err
 
 RffSampling = Literal["rff", "orf", "sorf"]
 RFF_SAMPLING_MODES = frozenset({"rff", "orf", "sorf"})
@@ -50,21 +99,23 @@ def _next_pow2(n: int) -> int:
     return 1 << (n - 1).bit_length()
 
 
-def _fwht(x: Tensor) -> Tensor:
-    """Normalized fast Walsh-Hadamard transform on the last dimension (power-of-2 size)."""
-    n = x.shape[-1]
+def _fwht(x: Tensor, dim: int = -1) -> Tensor:
+    """Normalized fast Walsh-Hadamard transform along ``dim`` (size must be a power of 2)."""
+    dim = dim % x.dim()
+    n = x.shape[dim]
     if n & (n - 1):
-        raise ValueError(f"FWHT last dimension must be a power of 2, got {n}.")
-    out = x.clone()
+        raise ValueError(f"FWHT dimension must be a power of 2, got {n}.")
+    out = x.movedim(dim, -1).clone()
     h = 1
     while h < n:
         for i in range(0, n, h * 2):
-            a = out[..., i : i + h].clone()
-            b = out[..., i + h : i + 2 * h].clone()
+            a = out[..., i : i + h]
+            b = out[..., i + h : i + 2 * h]
             out[..., i : i + h] = a + b
             out[..., i + h : i + 2 * h] = a - b
         h *= 2
-    return out / math.sqrt(n)
+    out = out / math.sqrt(n)
+    return out.movedim(-1, dim)
 
 
 def _rademacher(length: int, device: torch.device, dtype: torch.dtype) -> Tensor:
@@ -72,14 +123,29 @@ def _rademacher(length: int, device: torch.device, dtype: torch.dtype) -> Tensor
     return (2 * signs - 1).to(dtype)
 
 
-def _sorf_apply(v: Tensor, d1: Tensor, d2: Tensor, d3: Tensor, scale: float) -> Tensor:
-    """Apply sqrt(d) * H D1 H D2 H D3 to vector v (Yu et al. Eq. 5, padded dimension)."""
-    x = v * d3
-    x = _fwht(x)
-    x = x * d2
-    x = _fwht(x)
-    x = x * d1
-    x = _fwht(x)
+def _sorf_apply_columns(
+    d1: Tensor,
+    d2: Tensor,
+    d3: Tensor,
+    num_cols: int,
+    scale: float,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+    fwht_dim: int = 0,
+) -> Tensor:
+    """Apply sqrt(d) * H D1 H D2 H D3 to the first ``num_cols`` basis vectors (batched)."""
+    d_pad = d1.shape[-1]
+    x = torch.eye(d_pad, num_cols, device=device, dtype=dtype)
+    if d1.dim() > 1:
+        x = x.unsqueeze(0).expand(d1.shape[0], -1, -1)
+        fwht_dim = 1
+    x = x * d3.unsqueeze(-1)
+    x = _fwht(x, dim=fwht_dim)
+    x = x * d2.unsqueeze(-1)
+    x = _fwht(x, dim=fwht_dim)
+    x = x * d1.unsqueeze(-1)
+    x = _fwht(x, dim=fwht_dim)
     return x * scale
 
 
@@ -96,12 +162,10 @@ def _sorf_block(
     d2 = _rademacher(d_pad, device, dtype)
     d3 = _rademacher(d_pad, device, dtype)
     scale = math.sqrt(num_dims)
-    columns: list[Tensor] = []
-    for j in range(num_cols):
-        v = torch.zeros(d_pad, device=device, dtype=dtype)
-        v[j] = 1.0
-        columns.append(_sorf_apply(v, d1, d2, d3, scale)[:num_dims])
-    return torch.stack(columns, dim=1)
+    x = _sorf_apply_columns(
+        d1, d2, d3, num_cols, scale, device=device, dtype=dtype, fwht_dim=0
+    )
+    return x[:num_dims]
 
 
 def _sample_sorf_weights(
@@ -266,10 +330,15 @@ def woodbury_factor(
     noise : clamped noise variance scalar tensor.
     """
     _check_woodbury_rank(z_train)
-    noise = noise_var.clamp_min(1e-12)
-    middle = woodbury_middle_matrix(noise, z_train, jitter=jitter)
-    chol = torch.linalg.cholesky(middle)
-    return chol, noise
+    lin_dtype = _woodbury_linalg_dtype(z_train.dtype)
+    noise = noise_var.clamp_min(1e-12).to(lin_dtype)
+    z_c = z_train.to(lin_dtype)
+
+    def build_middle(j: float) -> Tensor:
+        return woodbury_middle_matrix(noise, z_c, jitter=j)
+
+    chol, _ = _woodbury_cholesky_factor(build_middle, jitter)
+    return chol, noise_var.clamp_min(1e-12)
 
 
 def woodbury_solve_from_chol(
@@ -297,6 +366,10 @@ def woodbury_solve_from_chol(
     squeeze = b.dim() == 1
     if squeeze:
         b = b.unsqueeze(-1)
+    dtype = chol.dtype
+    noise = noise.to(dtype)
+    z_train = z_train.to(dtype)
+    b = b.to(dtype)
     inv_noise_b = b / noise
     middle_rhs = z_train.transpose(-1, -2) @ inv_noise_b
     inner = torch.cholesky_solve(middle_rhs, chol)
@@ -433,6 +506,11 @@ def woodbury_predictive_var_diag(
     return prior_var - explained.clamp_min(0.0)
 
 
+def woodbury_predictive_obs_std(f_var: Tensor, noise_var: Tensor) -> Tensor:
+    """sqrt(max(f_var, 0) + noise_var); observation noise always contributes."""
+    return (f_var.clamp_min(0.0) + noise_var).sqrt()
+
+
 def woodbury_predict(
     noise_var: Tensor,
     z_train: Tensor,
@@ -555,10 +633,15 @@ def woodbury_factor_mt(
 ) -> tuple[Tensor, Tensor]:
     """Cholesky of multitask Woodbury middle matrix M."""
     _check_woodbury_mt_rank(omega, n, task_noises.shape[-1])
-    noise = task_noises.clamp_min(1e-12)
-    middle = woodbury_middle_matrix_mt(noise, omega, n, jitter=jitter)
-    chol = torch.linalg.cholesky(middle)
-    return chol, noise
+    lin_dtype = _woodbury_linalg_dtype(omega.dtype)
+    noise = task_noises.clamp_min(1e-12).to(lin_dtype)
+    omega_c = omega.to(lin_dtype)
+
+    def build_middle(j: float) -> Tensor:
+        return woodbury_middle_matrix_mt(noise, omega_c, n, jitter=j)
+
+    chol, _ = _woodbury_cholesky_factor(build_middle, jitter)
+    return chol, task_noises.clamp_min(1e-12)
 
 
 def woodbury_solve_mt_from_chol(
@@ -572,6 +655,10 @@ def woodbury_solve_mt_from_chol(
     squeeze = b.dim() == 1
     if squeeze:
         b = b.unsqueeze(-1)
+    dtype = chol.dtype
+    task_noises = task_noises.to(dtype)
+    omega = omega.to(dtype)
+    b = b.to(dtype)
     lam_inv_b = _apply_lambda_inv_rows(task_noises, n, b)
     middle_rhs = omega.transpose(-1, -2) @ lam_inv_b
     inner = torch.cholesky_solve(middle_rhs, chol)
@@ -629,8 +716,9 @@ def woodbury_marginal_log_likelihood_mt(
     """Gaussian log-density for vec(y) ~ N(0, Lambda + Omega Omega^T)."""
     nT = y_centered.shape[-1]
     chol, noise = woodbury_factor_mt(task_noises, omega, n, jitter=jitter)
-    alpha = woodbury_solve_mt_from_chol(noise, omega, n, chol, y_centered)
-    quad = (y_centered * alpha).sum()
+    y_c = y_centered.to(chol.dtype)
+    alpha = woodbury_solve_mt_from_chol(noise, omega, n, chol, y_c)
+    quad = (y_c * alpha).sum()
     log_det = woodbury_log_det_mt_from_chol(noise, n, chol)
     const = -0.5 * nT * math.log(2.0 * math.pi)
     return const - 0.5 * quad - 0.5 * log_det
@@ -647,6 +735,9 @@ def woodbury_predictive_mean_mt(
     noise: Tensor | None = None,
 ) -> Tensor:
     """Latent posterior mean vec; reshape caller to (n_test, T)."""
+    lin_dtype = chol.dtype if chol is not None else _woodbury_linalg_dtype(omega_train.dtype)
+    omega_train = omega_train.to(lin_dtype)
+    omega_test = omega_test.to(lin_dtype)
     alpha = woodbury_solve_mt(
         task_noises,
         omega_train,
@@ -671,6 +762,10 @@ def woodbury_predictive_var_diag_mt(
     """Diagonal latent posterior variance for each vec entry (length n_test*T)."""
     if chol is None or noise is None:
         chol, noise = woodbury_factor_mt(task_noises, omega_train, n_train, jitter=jitter)
+    lin_dtype = chol.dtype
+    omega_train = omega_train.to(lin_dtype)
+    omega_test = omega_test.to(lin_dtype)
+    noise = noise.to(lin_dtype)
     prior_var = (omega_test * omega_test).sum(dim=-1)
     cross = omega_test @ omega_train.transpose(-1, -2)
     alpha = woodbury_solve_mt_from_chol(noise, omega_train, n_train, chol, cross.transpose(-1, -2))

@@ -29,8 +29,9 @@ def load_toa_data(
         data_path: Path to toa_data_flattened.npz (defaults to repo root).
 
     Returns:
-        X_train, y_train, X_test, y_test or
-        X_train, y_train, X_val, y_val, X_test, y_test when n_val > 0.
+        X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx
+        (val tensors/indices are empty when ``n_val == 0``).
+        Indices are global positions in the dataset permutation (int64 tensors).
     """
     if data_path is None:
         data_path = os.path.join(os.path.dirname(__file__), "..", "toa_data_flattened.npz")
@@ -66,5 +67,9 @@ def load_toa_data(
     if n_val > 0:
         X_val = X[val_idx]
         y_val = y[val_idx]
-        return X_train, y_train, X_val, y_val, X_test, y_test
-    return X_train, y_train, X_test, y_test
+    else:
+        X_val = X.new_zeros((0, X.shape[-1]))
+        y_val = y.new_zeros((0, y.shape[-1]))
+        val_idx = perm.new_zeros((0,), dtype=torch.int64)
+
+    return X_train, y_train, X_val, y_val, X_test, y_test, train_idx, val_idx, test_idx
