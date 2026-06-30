@@ -12,7 +12,7 @@ from linear_operator.operators import LowRankRootLinearOperator
 from ..config import logger
 from ..kernels import LogScaleKernel, RFFKernel
 from ..likelihoods import LogGaussianLikelihood
-from ..utils.rff_utils import RffSampling, woodbury_predict
+from ..utils.rff_utils import RffSampling, woodbury_predict, woodbury_predictive_obs_std
 
 
 def _drop_singleton_batch(t: torch.Tensor) -> torch.Tensor:
@@ -164,8 +164,7 @@ class RFFGPR(gpytorch.models.ExactGP):
         if return_latent:
             return f_mean, f_mean - 2 * f_std, f_mean + 2 * f_std
 
-        obs_var = f_var + noise
-        obs_std = obs_var.clamp_min(0.0).sqrt()
+        obs_std = woodbury_predictive_obs_std(f_var, noise)
         return f_mean, f_mean - 2 * obs_std, f_mean + 2 * obs_std
 
     def save(self, filepath: str = "rff_model_weights.pth") -> None:

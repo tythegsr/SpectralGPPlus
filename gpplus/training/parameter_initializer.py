@@ -73,6 +73,13 @@ class DefaultParameterInitializer(ParameterInitializer):
         logger.info("All constraints are now built into kernel and likelihood classes - no manual setup needed")
         logger.debug("Excluding .weight and .bias parameters from Sobol sampling (initialized separately)")
 
+    @staticmethod
+    def _make_generator(param: torch.Tensor, seed: int) -> torch.Generator:
+        """Seeded RNG on the same device as ``param`` (required for CUDA orthogonal init)."""
+        if param.device.type == "cuda":
+            return torch.Generator(device=param.device).manual_seed(seed)
+        return torch.Generator().manual_seed(seed)
+
     def get_parameter_type(self, name: str, param: torch.Tensor) -> str:
         """Determine the parameter type based on parameter name only."""
         if "projection_matrix" in name:
@@ -81,6 +88,12 @@ class DefaultParameterInitializer(ParameterInitializer):
             return "raw_lengthscale"
         elif "raw_outputscale" in name:
             return "raw_outputscale"
+        elif "raw_task_noises" in name:
+            return "raw_task_noises"
+        elif "covar_factor" in name:
+            return "covar_factor"
+        elif "raw_var" in name and "task_covar" in name:
+            return "task_raw_var"
         elif "raw_noise" in name:
             return "raw_noise"
         elif "weight" in name and param.dim() >= 2:
@@ -130,6 +143,27 @@ class DefaultParameterInitializer(ParameterInitializer):
                 "lower": -7.0,
                 "upper": -1.0,
                 "description": "Noise parameter - uniform scale",
+            }
+        elif param_type == "raw_task_noises":
+            return {
+                "method": "uniform",
+                "lower": -7.0,
+                "upper": -1.0,
+                "description": "Per-task noise parameters - uniform scale",
+            }
+        elif param_type == "covar_factor":
+            return {
+                "method": "normal_matrix",
+                "mean": 0.0,
+                "std": 0.5,
+                "description": "ICM task covariance factor",
+            }
+        elif param_type == "task_raw_var":
+            return {
+                "method": "normal",
+                "mean": 0.0,
+                "std": 0.5,
+                "description": "ICM task covariance variance (log scale)",
             }
         elif param_type == "constant":
             return {
@@ -217,6 +251,13 @@ class DefaultParameterInitializer(ParameterInitializer):
                     "description": "Matrix encoder projection matrix (default orthogonal)",
                 }
         else:
+            if param.dim() < 2:
+                return {
+                    "method": "normal",
+                    "mean": 0.0,
+                    "std": 0.5,
+                    "description": "Unknown low-dimensional parameter",
+                }
             return {
                 "method": "orthogonal_matrix",
                 "gain": 0.1,
@@ -250,7 +291,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                 # Use run_index to generate different seeds for each initialization
                 generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
                 torch.nn.init.orthogonal_(
-                    temp_param, gain=config.get("gain", 1.0), generator=torch.Generator().manual_seed(generator_seed)
+                    temp_param,
+                    gain=config.get("gain", 1.0),
+                    generator=self._make_generator(temp_param, generator_seed),
                 )
                 # Check for NaN after initialization
                 if torch.isnan(temp_param).any():
@@ -262,7 +305,13 @@ class DefaultParameterInitializer(ParameterInitializer):
             except Exception as e:
                 logger.error(f"Orthogonal initialization failed for {name}: {e}")
                 # Fallback to normal initialization
-                torch.nn.init.normal_(temp_param, mean=0.0, std=0.1)
+                generator_seed = (self.seed + run_index * 1000) if self.seed is not None else (run_index * 1000)
+                torch.nn.init.normal_(
+                    temp_param,
+                    mean=0.0,
+                    std=0.1,
+                    generator=self._make_generator(temp_param, generator_seed),
+                )
                 param.data = temp_param
 
         elif method == "orthogonal":
@@ -275,7 +324,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                 param,
                 mean=config.get("mean", 0.0),
                 std=config.get("std", 0.1),
-                generator=torch.Generator().manual_seed(generator_seed),
+                generator=self._make_generator(param, generator_seed),
             )
 
         elif method == "uniform_matrix":
@@ -285,14 +334,14 @@ class DefaultParameterInitializer(ParameterInitializer):
                 param,
                 a=config.get("lower", -0.1),
                 b=config.get("upper", 0.1),
-                generator=torch.Generator().manual_seed(generator_seed),
+                generator=self._make_generator(param, generator_seed),
             )
 
         elif method == "xavier_uniform":
             # Use PyTorch's xavier_uniform initialization directly
             # Use run_index to generate different seeds for each initialization
             generator_seed = (self.seed + run_index) if self.seed is not None else run_index
-            g = torch.Generator().manual_seed(generator_seed)
+            g = self._make_generator(param, generator_seed)
             torch.nn.init.xavier_uniform_(param, generator=g)
             logger.debug(f"Initialized weight parameter '{name}' with Xavier uniform (seed={generator_seed})")
 
@@ -315,7 +364,16 @@ class DefaultParameterInitializer(ParameterInitializer):
 
         elif method == "constant":
             value = config.get("value", 0.0)
-            param.data = torch.full_like(param, value, dtype=param.dtype)
+            if torch.is_tensor(value):
+                value = value.to(device=param.device, dtype=param.dtype)
+                if value.shape != param.shape:
+                    raise ValueError(
+                        f"constant init shape mismatch for {name}: "
+                        f"value {tuple(value.shape)} vs param {tuple(param.shape)}"
+                    )
+                param.data.copy_(value)
+            else:
+                param.data = torch.full_like(param, value, dtype=param.dtype)
 
         elif method == "skip":
             pass
@@ -355,9 +413,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                 # Handle weight parameters with Xavier uniform (exclude from Sobol sampling)
                 # Only apply Xavier to parameters with at least 2 dimensions (required for fan_in/fan_out calculation)
                 if ".weight" in name:
-                    # reproducible per-run, on CPU
+                    # reproducible per-run, on same device as parameter
                     generator_seed = (self.seed + run_index) if self.seed is not None else run_index
-                    g = torch.Generator().manual_seed(generator_seed)
+                    g = self._make_generator(param, generator_seed)
                     if param.dim() >= 2:
                         # Standard neural network weight matrix: use Xavier uniform
                         torch.nn.init.xavier_uniform_(param, generator=g)
@@ -421,37 +479,24 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         super().setup(model)
         from ..models.rff_gpr import RFFGPR
         from ..models.rff_mtgpr import RFFMTGPR
-        from ..utils.rff_utils import init_rbf_weights
 
-        self._rff_weight_draws = None
+        self._rff_weight_draws: list[torch.Tensor] = []
         if isinstance(model, RFFGPR):
             rff_kernel = model._rff_kernel
-            train_x = model.train_inputs[0]
-            num_rff = model.num_rff
         elif isinstance(model, RFFMTGPR):
             rff_kernel = model._rff_kernel
-            train_x = model.train_inputs[0]
-            num_rff = model.num_rff
         else:
             return
 
-        num_dims = train_x.shape[-1]
-        device = rff_kernel.raw_lengthscale.device
-        dtype = rff_kernel.raw_lengthscale.dtype
-        rff_sampling = rff_kernel.rff_sampling
+        self._rff_sampling = rff_kernel.rff_sampling
 
         if self.seed is not None:
             torch.manual_seed(self.seed)
 
-        self._rff_weight_draws = [
-            init_rbf_weights(num_dims, num_rff, device=device, dtype=dtype, rff_sampling=rff_sampling)
-            for _ in range(self.num_inits)
-        ]
-        feature_kind = rff_sampling.upper()
         logger.info(
-            "Precomputed %s %s weight draws from master seed %s (sequential RNG, not seed+run_index)",
+            "RFF weight draws will be generated lazily (%s draws, %s, master seed=%s)",
             self.num_inits,
-            feature_kind,
+            self._rff_sampling.upper(),
             self.seed,
         )
 
@@ -477,27 +522,31 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         num_dims = model.train_inputs[0].shape[-1]
         rff_sampling = rff_kernel.rff_sampling
 
-        if self._rff_weight_draws is not None and run_index < len(self._rff_weight_draws):
-            weights = self._rff_weight_draws[run_index].to(
-                device=rff_kernel.raw_lengthscale.device,
-                dtype=rff_kernel.raw_lengthscale.dtype,
+        from ..utils.rff_utils import init_rbf_weights
+
+        while len(self._rff_weight_draws) <= run_index:
+            self._rff_weight_draws.append(
+                init_rbf_weights(
+                    num_dims,
+                    num_rff,
+                    device=rff_kernel.raw_lengthscale.device,
+                    dtype=rff_kernel.raw_lengthscale.dtype,
+                    rff_sampling=rff_sampling,
+                )
             )
-            rff_kernel._init_weights(
-                num_dims,
-                num_rff,
-                randn_weights=weights,
-                spectral=False,
-                rff_sampling=rff_sampling,
-            )
-        else:
-            if self.seed is not None:
-                torch.manual_seed(self.seed)
-            rff_kernel.resample_weights(spectral=False, rff_sampling=rff_sampling)
+        weights = self._rff_weight_draws[run_index]
+        rff_kernel._init_weights(
+            num_dims,
+            num_rff,
+            randn_weights=weights,
+            spectral=False,
+            rff_sampling=rff_sampling,
+        )
 
         invalidate()
         feature_kind = rff_sampling.upper()
         logger.info(
-            "Assigned %s frequencies for run #%s (master seed=%s, precomputed draw)",
+            "Assigned %s frequencies for run #%s (master seed=%s, lazy draw)",
             feature_kind,
             run_index,
             self.seed,

@@ -60,5 +60,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
             y_centered,
             jitter=self.jitter,
         )
+        from ..priors.response_noise import align_registered_priors
+
+        align_registered_priors(model)
         res = self._add_other_terms(res, args)
         return res.div(target.numel())

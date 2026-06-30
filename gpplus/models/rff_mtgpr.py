@@ -7,15 +7,18 @@ import os
 import gpytorch
 import torch
 from gpytorch.distributions import MultitaskMultivariateNormal
+from gpytorch.priors import Prior
 
 from ..config import logger
 from ..kernels import LogScaleKernel, RFFKernel
+from ..priors.response_noise import align_registered_priors, build_multitask_noise_likelihood
 from ..utils.rff_utils import (
     RffSampling,
     build_icm_joint_features,
     flatten_multitask_targets,
     task_psd_factor,
     woodbury_predict_mt,
+    woodbury_predictive_obs_std,
 )
 from .rff_gpr import _drop_singleton_batch
 
@@ -40,6 +43,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         rff_sampling: RffSampling = "rff",
         rank_kernel: int = 1,
         rank_likelihood: int = 0,
+        noise_prior: Prior | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -53,11 +57,15 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.rff_sampling = rff_sampling
 
         if likelihood is None:
-            likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-                num_tasks=self.num_tasks,
+            likelihood = build_multitask_noise_likelihood(
+                self.num_tasks,
+                noise_prior=noise_prior,
                 rank=self.rank_likelihood,
             )
-            logger.warning("No likelihood provided. Using MultitaskGaussianLikelihood.")
+            logger.warning(
+                "No likelihood provided. Using MultitaskGaussianLikelihood "
+                "(per-task noise only, Woodbury-compatible)."
+            )
         if mean_module is None:
             base_mean = gpytorch.means.ConstantMean()
             mean_module = gpytorch.means.MultitaskMean(base_mean, self.num_tasks)
@@ -89,8 +97,14 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.mean_module = mean_module.to(dtype=self.dtype)
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)
+        align_registered_priors(self)
         self._train_omega_cache: torch.Tensor | None = None
         self._train_omega_cache_key: tuple | None = None
+
+    def to(self, *args, **kwargs):
+        out = super().to(*args, **kwargs)
+        align_registered_priors(self)
+        return out
 
     @property
     def _rff_kernel(self) -> RFFKernel:
@@ -172,13 +186,17 @@ class RFFMTGPR(gpytorch.models.ExactGP):
             jitter=jitter,
         )
         f_mean = f_mean + self.mean_module(test_x)
+        out_dtype = test_x.dtype
+        if f_mean.dtype != out_dtype:
+            f_mean = f_mean.to(out_dtype)
+            f_var = f_var.to(out_dtype)
         f_std = f_var.clamp_min(0.0).sqrt()
 
         if return_latent:
             return f_mean, f_mean - 2 * f_std, f_mean + 2 * f_std
 
         noise_rows = task_noises.view(1, -1).expand(f_mean.shape[0], -1)
-        obs_std = (f_var + noise_rows).clamp_min(0.0).sqrt()
+        obs_std = woodbury_predictive_obs_std(f_var, noise_rows)
         return f_mean, f_mean - 2 * obs_std, f_mean + 2 * obs_std
 
     def save(self, filepath: str = "rff_mt_model_weights.pth") -> None:
