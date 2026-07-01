@@ -564,7 +564,7 @@ def mt_analytic_1d_GP(
 if __name__ == "__main__":
     mt_analytic_1d_GP(
         num_runs=2,
-        n_train=30,
+        n_train=10,
         n_test=500,
         x_bounds=[-4.0, 4.0],
         num_inits=16,
