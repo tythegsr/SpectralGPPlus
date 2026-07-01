@@ -135,3 +135,65 @@ def task_noise_raw_init_from_variances(
     ref = likelihood.raw_task_noises
     v = variances.reshape(-1).to(device=ref.device, dtype=ref.dtype)
     return likelihood.raw_task_noises_constraint.inverse_transform(v)
+
+
+def empirical_scalar_noise_variance(
+    y_train: Tensor,
+    *,
+    fraction: float = 0.01,
+    min_variance: float = 1e-6,
+) -> Tensor:
+    """Heuristic scalar noise variance from a 1D training response vector."""
+    y_flat = y_train.reshape(-1)
+    if y_flat.numel() == 0:
+        raise ValueError("y_train must be non-empty.")
+    if not (0.0 < fraction):
+        raise ValueError(f"fraction must be positive, got {fraction}.")
+    var = y_flat.var(unbiased=False)
+    return (fraction * var).clamp_min(min_variance)
+
+
+def log_normal_scalar_noise_prior_from_responses(
+    y_train: Tensor,
+    *,
+    fraction: float = 0.01,
+    log_scale: Union[float, Tensor] = 0.5,
+    min_variance: float = 1e-6,
+    dtype: torch.dtype | None = None,
+    device: torch.device | None = None,
+) -> LogNormalPrior:
+    """Build a scalar :class:`~gpytorch.priors.LogNormalPrior` on noise variance σ²."""
+    target_var = empirical_scalar_noise_variance(
+        y_train, fraction=fraction, min_variance=min_variance
+    )
+    ref = y_train if dtype is None and device is None else y_train.to(
+        dtype=dtype or y_train.dtype, device=device or y_train.device
+    )
+    loc = torch.log(target_var.to(device=ref.device, dtype=ref.dtype))
+    if isinstance(log_scale, Tensor):
+        scale = log_scale.to(device=ref.device, dtype=ref.dtype)
+    else:
+        scale = torch.tensor(float(log_scale), device=ref.device, dtype=ref.dtype)
+    return LogNormalPrior(loc=loc, scale=scale)
+
+
+def build_scalar_noise_likelihood(
+    noise_prior: Prior | None = None,
+) -> gpytorch.likelihoods.Likelihood:
+    """LogGaussianLikelihood with optional LogNormal prior on homoscedastic noise variance."""
+    from ..likelihoods import LogGaussianLikelihood
+
+    return LogGaussianLikelihood(noise_prior=noise_prior)
+
+
+def scalar_noise_raw_init_from_variance(
+    likelihood: gpytorch.likelihoods.Likelihood,
+    variance: Tensor,
+) -> Tensor:
+    """Map target noise variance σ² to ``raw_noise`` (log10 constraint inverse)."""
+    if not hasattr(likelihood, "raw_noise_constraint"):
+        raise TypeError("likelihood must expose raw_noise_constraint (LogGaussianLikelihood).")
+    ref = likelihood.raw_noise
+    v = variance.reshape(()).to(device=ref.device, dtype=ref.dtype)
+    log_value = torch.log10(v)
+    return likelihood.raw_noise_constraint.inverse_transform(log_value)
