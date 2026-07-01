@@ -478,10 +478,14 @@ def woodbury_predictive_mean(
     noise: Tensor | None = None,
 ) -> Tensor:
     """Posterior mean of latent f at test points: Z_test Z_train^T Sigma^{-1} y."""
+    lin_dtype = chol.dtype if chol is not None else _woodbury_linalg_dtype(z_train.dtype)
+    z_train_c = z_train.to(lin_dtype)
+    z_test_c = z_test.to(lin_dtype)
+    y_c = y_centered.to(lin_dtype)
     alpha = woodbury_solve(
-        noise_var, z_train, y_centered, jitter=jitter, chol=chol, noise=noise
+        noise_var, z_train_c, y_c, jitter=jitter, chol=chol, noise=noise
     )
-    return z_test @ (z_train.transpose(-1, -2) @ alpha)
+    return (z_test_c @ (z_train_c.transpose(-1, -2) @ alpha)).to(z_test.dtype)
 
 
 def woodbury_predictive_var_diag(
@@ -499,11 +503,14 @@ def woodbury_predictive_var_diag(
     """
     if chol is None or noise is None:
         chol, noise = woodbury_factor(noise_var, z_train, jitter=jitter)
-    prior_var = (z_test * z_test).sum(dim=-1)
-    cross = z_test @ z_train.transpose(-1, -2)
-    alpha = woodbury_solve_from_chol(noise, z_train, chol, cross.transpose(-1, -2))
+    lin_dtype = chol.dtype
+    z_train_c = z_train.to(lin_dtype)
+    z_test_c = z_test.to(lin_dtype)
+    prior_var = (z_test_c * z_test_c).sum(dim=-1)
+    cross = z_test_c @ z_train_c.transpose(-1, -2)
+    alpha = woodbury_solve_from_chol(noise, z_train_c, chol, cross.transpose(-1, -2))
     explained = (cross * alpha.transpose(-1, -2)).sum(dim=-1)
-    return prior_var - explained.clamp_min(0.0)
+    return (prior_var - explained.clamp_min(0.0)).to(z_test.dtype)
 
 
 def woodbury_predictive_obs_std(f_var: Tensor, noise_var: Tensor) -> Tensor:
