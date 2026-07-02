@@ -769,17 +769,34 @@ def _run_single_input_dim(
         )
         metrics["predictions_npz"] = out_npz
 
-        if plot_posterior:
-            plot_toa_posterior_figures(
-                save_path=save_path,
-                title=title,
-                y_true=y_test_np,
-                y_pred=y_pred_stacked,
-                y_std=y_std_stacked,
-                x_test_orig=x_test_orig.detach().cpu().numpy(),
-                example_indices=example_indices,
-                log_grain=log_grain,
-            )
+        if plot_posterior and example_indices:
+            import logging
+
+            from plot_multid_slice_predictions import sanitize_plot_subdir
+
+            post_dir = Path(save_path) / "plots" / "posterior" / sanitize_plot_subdir(title)
+            try:
+                post_paths = plot_toa_posterior_figures(
+                    x_test_orig.detach().cpu().numpy(),
+                    y_test_np,
+                    y_pred_stacked,
+                    y_std_stacked,
+                    lower_stacked,
+                    upper_stacked,
+                    post_dir,
+                    title=title,
+                    example_indices=example_indices,
+                    rel_metrics_by_task=rel_metrics_by_task,
+                    rel_tolerance=rel_tolerance,
+                    wavelength_nm=wl,
+                    log_grain=log_grain,
+                )
+                for plot_path in post_paths:
+                    print(f"Saved posterior plot to {plot_path}")
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Posterior plot generation failed: %s", exc
+                )
 
         out_json = save_metrics_json(metrics, save_path, title)
         print(f"Saved metrics to {out_json}")

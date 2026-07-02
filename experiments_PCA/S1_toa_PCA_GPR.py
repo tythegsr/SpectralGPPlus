@@ -32,9 +32,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-train", type=int, default=49000)
     parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--n-components", type=int, default=8, help="PCA dimension p")
+    parser.add_argument("--n-components", type=int, default=30, help="PCA dimension p")
     parser.add_argument("--partition-size", type=int, default=1500, help="Training points per GP partition")
-    parser.add_argument("--num-inits", type=int, default=8)
+    parser.add_argument("--num-inits", type=int, default=4)
     parser.add_argument(
         "--num-epochs",
         type=int,
@@ -42,11 +42,11 @@ if __name__ == "__main__":
         help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float64",
+        default="float32",
         choices=("float32", "float64"),
     )
     parser.add_argument(
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         default=512,
         help="Reserved for API parity (exact GP uses full test batch in evaluate_gp_model)",
     )
-    parser.add_argument("--n-jobs", type=int, default=4, help="Parallel hyperparameter inits per partition")
+    parser.add_argument("--n-jobs", type=int, default=1, help="Parallel hyperparameter inits per partition")
     parser.add_argument("--ard", action="store_true", default=True)
     parser.add_argument("--no-ard", action="store_false", dest="ard")
     parser.add_argument(
