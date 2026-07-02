@@ -150,6 +150,8 @@ def run_toa_stgp(
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
+    n_pca_components: int | None = None,
+    pca_svd_solver: str = "randomized",
 ) -> dict:
     """Train independent RFFGPR models on TOA data and evaluate on held-out test points."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
@@ -172,6 +174,8 @@ def run_toa_stgp(
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
     title = f"TOA_nTrain{n_train}_nTest{n_test}_{rff_sampling}D{num_rff}"
+    if n_pca_components is not None:
+        title = f"TOA_nTrain{n_train}_nTest{n_test}_pcaP{n_pca_components}_{rff_sampling}D{num_rff}"
     feature_dim = 2 * num_rff
     sampling_label = rff_sampling.upper()
     print("=" * 60)
@@ -180,6 +184,7 @@ def run_toa_stgp(
         f"Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, "
         f"tasks={TASK_NAMES}, log_grain={log_grain}"
+        + (f", pca={n_pca_components}" if n_pca_components is not None else "")
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
@@ -224,8 +229,33 @@ def run_toa_stgp(
             f"-> input_dim={input_dim}"
         )
 
-    x_train = x_train.to(dtype=dtype)
-    x_test = x_test.to(dtype=dtype)
+    pca_meta: dict | None = None
+    input_dim_before_pca = input_dim
+    if n_pca_components is not None:
+        _pca_dir = _ROOT / "experiments_PCA"
+        if str(_pca_dir) not in sys.path:
+            sys.path.insert(0, str(_pca_dir))
+        from toa_pca_utils import fit_pca_on_train, transform_pca
+
+        pca_fit = fit_pca_on_train(
+            x_train,
+            n_components=n_pca_components,
+            svd_solver=pca_svd_solver,
+            random_state=seed,
+        )
+        x_train = transform_pca(pca_fit, x_train, dtype=dtype)
+        x_test = transform_pca(pca_fit, x_test, dtype=dtype)
+        if x_val.numel() > 0:
+            x_val = transform_pca(pca_fit, x_val, dtype=dtype)
+        input_dim = pca_fit.n_components
+        pca_meta = pca_fit.to_dict()
+        print(
+            f"PCA: {input_dim_before_pca} -> {input_dim} components, "
+            f"variance explained={pca_fit.total_variance_explained:.4f}"
+        )
+    else:
+        x_train = x_train.to(dtype=dtype)
+        x_test = x_test.to(dtype=dtype)
     y_train = y_train.to(dtype=dtype)
     y_test = y_test.to(dtype=dtype)
 
@@ -506,6 +536,7 @@ def run_toa_stgp(
         per_task[f"{name}_n_rel_error_excluded"] = int(rel_m["n_rel_error_excluded"])
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
+    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
     metrics: dict = {
         "title": title,
         "input_dim": input_dim,
@@ -534,9 +565,14 @@ def run_toa_stgp(
         "Training_Time": total_train_time,
         "Prediction_Time": total_prediction_time,
         "Total_Time": total_train_time + total_prediction_time,
+        "aggregate_RRMSE": aggregate_rrmse,
         "RMSE": aggregate_rmse,
         **per_task,
     }
+    if pca_meta is not None:
+        metrics["pca"] = pca_meta
+        metrics["input_dim_before_pca"] = input_dim_before_pca
+        metrics["n_pca_components"] = n_pca_components
 
     for task_name in TASK_NAMES:
         tm = task_metrics[task_name]
@@ -562,11 +598,11 @@ def run_toa_stgp(
             for key, value in val_summary.items():
                 metrics[f"{task_name}_{key}"] = value
 
-    print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}")
+    print(f"\nTest aggregate RRMSE: {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
     for name in TASK_NAMES:
         print(
-            f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
-            f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
+            f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
+            f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
         )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"Total training time: {total_train_time:.1f}s")

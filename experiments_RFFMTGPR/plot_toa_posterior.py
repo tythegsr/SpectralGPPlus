@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from scipy.special import erf
 
 from plot_validation_curves import sanitize_plot_subdir
+
+PdfMode = Literal["gaussian", "tabpfn_bar", "auto"]
 
 TOA_SPECTRAL_DIM = 285
 WAVELENGTH_MIN_NM = 250.0
@@ -210,6 +214,75 @@ def _posterior_x_grid(x0: float, x1: float, n_grid: int = 300) -> np.ndarray:
     return np.linspace(x0, x1, n_grid)
 
 
+def _resolve_pdf_mode(
+    pdf_mode: PdfMode,
+    *,
+    tabpfn_logits_row: np.ndarray | None,
+    posterior_pdf_mode: str | None = None,
+) -> Literal["gaussian", "tabpfn_bar"]:
+    if pdf_mode == "auto":
+        if tabpfn_logits_row is not None:
+            return "tabpfn_bar"
+        if posterior_pdf_mode == "tabpfn_bar":
+            return "tabpfn_bar"
+        return "gaussian"
+    return pdf_mode
+
+
+def _tabpfn_bar_distribution(borders: np.ndarray):
+    from tabpfn.architectures.base.bar_distribution import FullSupportBarDistribution
+
+    borders_t = torch.as_tensor(borders, dtype=torch.float32)
+    return FullSupportBarDistribution(borders_t)
+
+
+def _tabpfn_bar_pdf_on_grid(
+    grid: np.ndarray,
+    logits: np.ndarray,
+    borders: np.ndarray,
+    *,
+    x_min: float,
+    x_max: float | None,
+    train_scale_log: bool = False,
+) -> np.ndarray:
+    """Evaluate TabPFN bar-distribution PDF on a 1D grid (display units)."""
+    criterion = _tabpfn_bar_distribution(borders)
+    logits_t = torch.as_tensor(logits, dtype=torch.float32).reshape(1, -1)
+    grid = np.asarray(grid, dtype=np.float64)
+    pdf = np.zeros_like(grid, dtype=np.float64)
+
+    for i, x_val in enumerate(grid):
+        if not np.isfinite(x_val):
+            continue
+        if train_scale_log:
+            if x_val <= 0.0:
+                continue
+            y_eval = float(np.log(x_val))
+        else:
+            y_eval = float(x_val)
+        y_t = torch.tensor(y_eval, dtype=torch.float32)
+        p = criterion.pdf(logits_t, y_t).squeeze().detach().cpu().numpy()
+        p = float(np.asarray(p).reshape(-1)[0])
+        if not np.isfinite(p):
+            p = 0.0
+        if train_scale_log and x_val > 0.0:
+            p /= x_val
+        pdf[i] = max(p, 0.0)
+
+    mask = grid >= x_min
+    if x_max is not None:
+        mask &= grid <= x_max
+    pdf[~mask] = 0.0
+    pdf = np.nan_to_num(pdf, nan=0.0, posinf=0.0, neginf=0.0)
+    if np.any(mask):
+        norm = float(np.trapezoid(pdf[mask], grid[mask]))
+        if np.isfinite(norm) and norm > 1e-12:
+            pdf[mask] /= norm
+        else:
+            pdf[mask] = 0.0
+    return pdf
+
+
 def _plot_posterior_density_axis(
     ax: plt.Axes,
     *,
@@ -223,6 +296,10 @@ def _plot_posterior_density_axis(
     rel_metrics: dict[str, float | int] | None,
     rel_tolerance: float,
     log_grain: bool = False,
+    pdf_mode: Literal["gaussian", "tabpfn_bar"] = "gaussian",
+    tabpfn_logits: np.ndarray | None = None,
+    tabpfn_borders: np.ndarray | None = None,
+    tabpfn_train_scale_log: bool = False,
 ) -> None:
     x_min, x_max = TASK_BOUNDS.get(task_key, (0.0, None))
     ci_lo, ci_hi, plot_std = _clip_interval(
@@ -232,11 +309,28 @@ def _plot_posterior_density_axis(
         y_true, y_pred, ci_lo, ci_hi, plot_std, x_min=x_min, x_max=x_max
     )
     grid = _posterior_x_grid(x0, x1)
-    if log_grain and task_key == TASK_GRAIN:
+    use_tabpfn = (
+        pdf_mode == "tabpfn_bar"
+        and tabpfn_logits is not None
+        and tabpfn_borders is not None
+    )
+    if use_tabpfn:
+        pdf = _tabpfn_bar_pdf_on_grid(
+            grid,
+            tabpfn_logits,
+            tabpfn_borders,
+            x_min=x_min,
+            x_max=x_max,
+            train_scale_log=tabpfn_train_scale_log,
+        )
+        density_label = "TabPFN posterior"
+    elif log_grain and task_key == TASK_GRAIN:
         mu_log, sigma_log = _lognormal_params_from_original(y_pred, lower, upper)
         pdf = _truncated_lognormal_pdf(grid, mu_log, sigma_log, x_min=x_min)
+        density_label = "posterior"
     else:
         pdf = _truncated_normal_pdf(grid, y_pred, plot_std, x_min=x_min, x_max=x_max)
+        density_label = "posterior"
 
     fmt = lambda v: _format_posterior_value(task_key, v)
     ci_label = f"95% CI = [{fmt(lower)}, {fmt(upper)}]"
@@ -244,7 +338,7 @@ def _plot_posterior_density_axis(
     mean_label = f"mean = {fmt(y_pred)}"
 
     ax.fill_between(grid, 0.0, pdf, color="C0", alpha=0.25)
-    ax.plot(grid, pdf, color="C0", linewidth=1.8, label="posterior")
+    ax.plot(grid, pdf, color="C0", linewidth=1.8, label=density_label)
     ax.axvspan(ci_lo, ci_hi, color="C0", alpha=0.12, label=ci_label)
     ax.axvline(y_true, color="C2", linestyle="--", linewidth=1.5, label=true_label)
     ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=mean_label)
@@ -284,6 +378,11 @@ def save_toa_posterior_figure(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    pdf_mode: PdfMode = "gaussian",
+    tabpfn_logits_row: np.ndarray | None = None,
+    tabpfn_borders: np.ndarray | None = None,
+    tabpfn_train_scale: np.ndarray | list[str] | None = None,
+    posterior_pdf_mode: str | None = None,
 ) -> Path:
     """One figure: spectrum | cos_i posterior | grain posterior (all in original units)."""
     spectrum = np.asarray(spectrum, dtype=np.float64).ravel()
@@ -305,7 +404,18 @@ def save_toa_posterior_figure(
     axes[0].set_title(f"true cos_i={cos_true:.4f}, true grain={grain_true:.4g}")
     axes[0].grid(True, alpha=0.3)
 
+    train_scales = (
+        list(tabpfn_train_scale)
+        if tabpfn_train_scale is not None
+        else ["physical", "log" if log_grain else "physical"]
+    )
+
     rel_cos = rel_metrics_by_task.get(TASK_COS) if rel_metrics_by_task else None
+    cos_pdf_mode = _resolve_pdf_mode(
+        pdf_mode,
+        tabpfn_logits_row=tabpfn_logits_row[0] if tabpfn_logits_row is not None else None,
+        posterior_pdf_mode=posterior_pdf_mode,
+    )
     _plot_posterior_density_axis(
         axes[1],
         task_key=TASK_COS,
@@ -317,9 +427,18 @@ def save_toa_posterior_figure(
         upper=float(upper[0]),
         rel_metrics=rel_cos,
         rel_tolerance=rel_tolerance,
+        pdf_mode=cos_pdf_mode,
+        tabpfn_logits=tabpfn_logits_row[0] if tabpfn_logits_row is not None else None,
+        tabpfn_borders=tabpfn_borders[0] if tabpfn_borders is not None else None,
+        tabpfn_train_scale_log=train_scales[0] == "log",
     )
 
     rel_grain = rel_metrics_by_task.get(TASK_GRAIN) if rel_metrics_by_task else None
+    grain_pdf_mode = _resolve_pdf_mode(
+        pdf_mode,
+        tabpfn_logits_row=tabpfn_logits_row[1] if tabpfn_logits_row is not None else None,
+        posterior_pdf_mode=posterior_pdf_mode,
+    )
     _plot_posterior_density_axis(
         axes[2],
         task_key=TASK_GRAIN,
@@ -331,7 +450,11 @@ def save_toa_posterior_figure(
         upper=float(upper[1]),
         rel_metrics=rel_grain,
         rel_tolerance=rel_tolerance,
-        log_grain=log_grain,
+        log_grain=log_grain and grain_pdf_mode == "gaussian",
+        pdf_mode=grain_pdf_mode,
+        tabpfn_logits=tabpfn_logits_row[1] if tabpfn_logits_row is not None else None,
+        tabpfn_borders=tabpfn_borders[1] if tabpfn_borders is not None else None,
+        tabpfn_train_scale_log=train_scales[1] == "log",
     )
 
     fig.suptitle(f"TOA test example {example_k}", fontsize=11)
@@ -374,6 +497,11 @@ def plot_toa_posterior_figures(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    pdf_mode: PdfMode = "gaussian",
+    tabpfn_logits: np.ndarray | None = None,
+    tabpfn_borders: np.ndarray | None = None,
+    tabpfn_train_scale: np.ndarray | list[str] | None = None,
+    posterior_pdf_mode: str | None = None,
 ) -> list[Path]:
     save_dir = Path(save_dir)
     written: list[Path] = []
@@ -384,6 +512,7 @@ def plot_toa_posterior_figures(
         grain_t = float(y_true[i, 1])
         fname = f"example_{k:04d}_cos{cos_t:.3f}_grain{grain_t:.1f}.png"
         out_path = save_dir / fname
+        logits_row = tabpfn_logits[i] if tabpfn_logits is not None else None
         written.append(
             save_toa_posterior_figure(
                 out_path,
@@ -398,6 +527,11 @@ def plot_toa_posterior_figures(
                 rel_tolerance=rel_tolerance,
                 wavelength_nm=wl,
                 log_grain=log_grain,
+                pdf_mode=pdf_mode,
+                tabpfn_logits_row=logits_row,
+                tabpfn_borders=tabpfn_borders,
+                tabpfn_train_scale=tabpfn_train_scale,
+                posterior_pdf_mode=posterior_pdf_mode,
             )
         )
     return written
@@ -420,6 +554,10 @@ def save_predictions_npz(
     example_indices: list[int] | None = None,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    posterior_pdf_mode: str | None = None,
+    tabpfn_logits: np.ndarray | None = None,
+    tabpfn_borders: np.ndarray | None = None,
+    tabpfn_train_scale: np.ndarray | list[str] | None = None,
 ) -> str:
     import os
 
@@ -427,8 +565,7 @@ def save_predictions_npz(
     out_npz = os.path.join(str(save_path), f"predictions_{title}.npz")
     if wavelength_nm is None:
         wavelength_nm = wavelength_axis(x_test_orig.shape[-1])
-    np.savez(
-        out_npz,
+    npz_kwargs: dict = dict(
         y_true=y_true,
         y_pred=y_pred,
         y_std=y_std,
@@ -444,6 +581,15 @@ def save_predictions_npz(
         example_indices=np.array(example_indices if example_indices is not None else [], dtype=np.int64),
         log_grain=np.array(log_grain),
     )
+    if posterior_pdf_mode is not None:
+        npz_kwargs["posterior_pdf_mode"] = np.array(posterior_pdf_mode)
+    if tabpfn_logits is not None:
+        npz_kwargs["tabpfn_logits"] = tabpfn_logits
+    if tabpfn_borders is not None:
+        npz_kwargs["tabpfn_borders"] = tabpfn_borders
+    if tabpfn_train_scale is not None:
+        npz_kwargs["tabpfn_train_scale"] = np.array(tabpfn_train_scale)
+    np.savez(out_npz, **npz_kwargs)
     return out_npz
 
 
@@ -454,6 +600,7 @@ def plot_posterior_from_npz(
     rel_tolerance: float | None = None,
     posterior_n_examples: int | None = None,
     posterior_example_indices: list[int] | None = None,
+    pdf_mode: PdfMode = "auto",
 ) -> list[Path]:
     data = np.load(npz_path, allow_pickle=True)
     y_true = data["y_true"]
@@ -467,6 +614,12 @@ def plot_posterior_from_npz(
     tol = float(rel_tolerance if rel_tolerance is not None else data.get("rel_tolerance", 0.01))
     wl = data["wavelength_nm"] if "wavelength_nm" in data else wavelength_axis(x_test_orig.shape[-1])
     log_grain = bool(data["log_grain"].item()) if "log_grain" in data else False
+    posterior_pdf_mode = (
+        str(data["posterior_pdf_mode"].item()) if "posterior_pdf_mode" in data else None
+    )
+    tabpfn_logits = data["tabpfn_logits"] if "tabpfn_logits" in data else None
+    tabpfn_borders = data["tabpfn_borders"] if "tabpfn_borders" in data else None
+    tabpfn_train_scale = data["tabpfn_train_scale"] if "tabpfn_train_scale" in data else None
 
     from mtgpr_experiment_utils import compute_relative_error_metrics
 
@@ -500,6 +653,11 @@ def plot_posterior_from_npz(
         rel_tolerance=tol,
         wavelength_nm=wl,
         log_grain=log_grain,
+        pdf_mode=pdf_mode,
+        tabpfn_logits=tabpfn_logits,
+        tabpfn_borders=tabpfn_borders,
+        tabpfn_train_scale=tabpfn_train_scale,
+        posterior_pdf_mode=posterior_pdf_mode,
     )
 
 
@@ -517,6 +675,13 @@ def main() -> None:
         default=None,
         help="Comma-separated test row indices, e.g. 0,12,99",
     )
+    parser.add_argument(
+        "--pdf-mode",
+        type=str,
+        default="auto",
+        choices=("auto", "gaussian", "tabpfn_bar"),
+        help="Posterior density type: auto uses tabpfn_bar when NPZ has tabpfn_logits",
+    )
     args = parser.parse_args()
 
     explicit = None
@@ -529,6 +694,7 @@ def main() -> None:
         rel_tolerance=args.rel_tolerance,
         posterior_n_examples=args.posterior_n_examples,
         posterior_example_indices=explicit,
+        pdf_mode=args.pdf_mode,  # type: ignore[arg-type]
     )
     for p in paths:
         print(f"Wrote {p}")
