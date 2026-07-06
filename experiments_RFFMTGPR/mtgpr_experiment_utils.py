@@ -35,6 +35,51 @@ def save_metrics_json(metrics: dict, save_path: str, title: str) -> str:
     return out_json
 
 
+def compute_point_estimate_metrics(
+    y_true: np.ndarray | torch.Tensor,
+    y_pred: np.ndarray | torch.Tensor,
+    *,
+    prefix: str = "",
+) -> dict[str, float]:
+    """RMSE, RRMSE, MAE, R2 for one point estimate vs true values (1D)."""
+    yt = np.asarray(y_true, dtype=np.float64).ravel()
+    yp = np.asarray(y_pred, dtype=np.float64).ravel()
+    rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
+    std = float(np.std(yt))
+    rrmse = rmse / std if std > 0 else float("inf")
+    mae = float(np.mean(np.abs(yp - yt)))
+    ss_res = float(np.sum((yt - yp) ** 2))
+    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    p = f"{prefix}_" if prefix else ""
+    return {
+        f"{p}RMSE": rmse,
+        f"{p}RRMSE": rrmse,
+        f"{p}MAE": mae,
+        f"{p}R2": r2,
+    }
+
+
+def merge_grain_mean_metrics(
+    per_task: dict[str, float],
+    y_true: np.ndarray,
+    y_pred_mean_grain: np.ndarray,
+    *,
+    grain_task_name: str = "y_grain",
+) -> dict[str, float]:
+    """Add y_grain_*_mean metrics from log-normal mean point estimates."""
+    mean_metrics = compute_point_estimate_metrics(
+        y_true[:, 1],
+        y_pred_mean_grain,
+        prefix="mean",
+    )
+    per_task[f"{grain_task_name}_RMSE_mean"] = mean_metrics["mean_RMSE"]
+    per_task[f"{grain_task_name}_RRMSE_mean"] = mean_metrics["mean_RRMSE"]
+    per_task[f"{grain_task_name}_MAE_mean"] = mean_metrics["mean_MAE"]
+    per_task[f"{grain_task_name}_R2_mean"] = mean_metrics["mean_R2"]
+    return per_task
+
+
 def compute_relative_error_metrics(
     y_true: np.ndarray | torch.Tensor,
     y_pred: np.ndarray | torch.Tensor,

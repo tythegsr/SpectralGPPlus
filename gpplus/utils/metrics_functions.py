@@ -103,6 +103,87 @@ def compute_nlpd_gaussian(y_true, y_hat, output_std, eps: float = 1e-12):
     return float(np.mean(nlpd))
 
 
+def compute_nlpd_lognormal(
+    y_true,
+    log_mu,
+    log_sigma,
+    *,
+    eps: float = 1e-12,
+) -> float | None:
+    """
+    Negative log predictive density for log-normal on original scale when log(Y) ~ N(μ, σ²).
+    """
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.detach().cpu().numpy()
+    if isinstance(log_mu, torch.Tensor):
+        log_mu = log_mu.detach().cpu().numpy()
+    if isinstance(log_sigma, torch.Tensor):
+        log_sigma = log_sigma.detach().cpu().numpy()
+
+    y_true = np.asarray(y_true).reshape(-1)
+    log_mu = np.asarray(log_mu).reshape(-1)
+    log_sigma = np.asarray(log_sigma).reshape(-1)
+
+    valid_mask = (
+        np.isfinite(y_true)
+        & (y_true > 0.0)
+        & np.isfinite(log_mu)
+        & np.isfinite(log_sigma)
+        & (log_sigma > 0.0)
+    )
+    if not np.any(valid_mask):
+        return None
+
+    y = y_true[valid_mask]
+    mu = log_mu[valid_mask]
+    sigma = np.maximum(log_sigma[valid_mask], eps)
+    log_y = np.log(y)
+    nlpd = (
+        log_y
+        + np.log(sigma)
+        + 0.5 * np.log(2.0 * np.pi)
+        + 0.5 * ((log_y - mu) ** 2) / (sigma**2)
+    )
+    return float(np.mean(nlpd))
+
+
+def compute_crps_lognormal(y_true, log_mu, log_sigma, *, eps: float = 1e-12) -> float:
+    """
+    Closed-form CRPS when log(Y) ~ N(log_mu, log_sigma²) on the original scale.
+
+    Uses the scoringRules ``crps_lnorm`` identity (location/scale on log scale).
+    """
+    from scipy.stats import lognorm, norm
+
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.detach().cpu().numpy()
+    if isinstance(log_mu, torch.Tensor):
+        log_mu = log_mu.detach().cpu().numpy()
+    if isinstance(log_sigma, torch.Tensor):
+        log_sigma = log_sigma.detach().cpu().numpy()
+
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    log_mu = np.asarray(log_mu, dtype=np.float64).reshape(-1)
+    log_sigma = np.maximum(np.asarray(log_sigma, dtype=np.float64).reshape(-1), eps)
+
+    valid = np.isfinite(y_true) & (y_true > 0.0) & np.isfinite(log_mu) & np.isfinite(log_sigma)
+    if not np.any(valid):
+        return float("nan")
+
+    y = y_true[valid]
+    mu = log_mu[valid]
+    sigma = log_sigma[valid]
+
+    c1 = y * (2.0 * lognorm.cdf(y, s=sigma, scale=np.exp(mu)) - 1.0)
+    c2 = 2.0 * np.exp(mu + 0.5 * sigma**2)
+    c3 = (
+        lognorm.cdf(y, s=sigma, scale=np.exp(mu + sigma**2))
+        + norm.cdf(sigma / np.sqrt(2.0))
+        - 1.0
+    )
+    return float(np.mean(c1 - c2 * c3))
+
+
 def logits_to_ensemble(logits, bar_dist, n_samples=1000):
     """
     Convert TabPFN logits to ensemble members by sampling from bar distribution.
@@ -396,7 +477,13 @@ def compute_metrics(
         and (log_sigma is not None)
         and (log_scale_C is not None)
     )
-    if (output_std is not None) or has_bounds or has_log_params:
+    has_lognormal_grain_params = (
+        (log_mu is not None)
+        and (log_sigma is not None)
+        and (log_scale_C is None)
+        and not use_log_quantile_nis
+    )
+    if (output_std is not None) or has_bounds or has_log_params or has_lognormal_grain_params:
         if has_log_params:
             nis_metrics = compute_nis_from_log_params(
                 y_true,
@@ -477,8 +564,8 @@ def compute_metrics(
                 "Install CRPS or set tabpfn_logits=None."
             )
         
-        if output_std is not None:
-            # Always compute Gaussian CRPS for comparison
+        if output_std is not None and not has_lognormal_grain_params:
+            # Gaussian CRPS / NLPD (not used for plain log(grain) TOA with log params)
             crps = compute_crps_gaussian(y_true, y_hat, output_std)
             metrics["CRPS"] = crps
             # Normalized CRPS (similar to RRMSE normalization)
@@ -486,6 +573,13 @@ def compute_metrics(
 
             # Gaussian negative log predictive density (NLPD)
             nlpd = compute_nlpd_gaussian(y_true, y_hat, output_std)
+            if nlpd is not None:
+                metrics["NLPD"] = nlpd
+        elif has_lognormal_grain_params:
+            crps = compute_crps_lognormal(y_true, log_mu, log_sigma)
+            metrics["CRPS"] = crps
+            metrics["NCRPS"] = crps / y_true.std()
+            nlpd = compute_nlpd_lognormal(y_true, log_mu, log_sigma)
             if nlpd is not None:
                 metrics["NLPD"] = nlpd
         

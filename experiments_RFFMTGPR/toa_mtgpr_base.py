@@ -42,6 +42,7 @@ from mtgpr_experiment_utils import (
     format_relative_error_summary,
     json_safe_optimizer_kwargs,
     make_validation_callback,
+    merge_grain_mean_metrics,
     plot_validation_curves_after_save,
     save_metrics_json,
     summarize_validation_from_runs,
@@ -49,7 +50,7 @@ from mtgpr_experiment_utils import (
     make_train_loss_callback,
 )
 from toa_mtgpr_checkpoint import checkpoint_path_for_run, save_toa_mtgpr_checkpoint
-from toa_y_transform import forward_y, inverse_y_predictions
+from toa_y_transform import GRAIN_TASK_NAME, forward_y, inverse_y_predictions
 
 TOA_INPUT_DIM = 285
 NUM_TASKS = 2
@@ -437,7 +438,7 @@ def run_toa_mtgpr(
     lower = lower.detach().cpu()
     upper = upper.detach().cpu()
 
-    pred_mean, pred_std, lower, upper = inverse_y_predictions(
+    inv = inverse_y_predictions(
         pred_mean,
         pred_std,
         lower,
@@ -445,12 +446,31 @@ def run_toa_mtgpr(
         y_scaler=y_scaler,
         standardize_y=standardize_y,
         log_grain=log_grain,
+        extended=True,
     )
+    pred_mean = inv.point
+    pred_std = inv.std
+    lower = inv.lower
+    upper = inv.upper
     y_test_eval = y_test.cpu()
 
     y_pred_np = pred_mean.numpy()
+    y_pred_mean_np = (
+        inv.point_mean.numpy()
+        if inv.point_mean is not None
+        else y_pred_np.copy()
+    )
+    y_pred_mode_np = (
+        inv.point_mode.numpy()
+        if inv.point_mode is not None
+        else y_pred_np.copy()
+    )
+    log_mu_np = inv.log_mu.numpy() if inv.log_mu is not None else None
+    log_sigma_np = inv.log_sigma.numpy() if inv.log_sigma is not None else None
     y_true_np = y_test_eval.numpy()
     per_task = compute_per_task_metrics(y_true_np, y_pred_np)
+    if log_grain:
+        merge_grain_mean_metrics(per_task, y_true_np, y_pred_mean_np[:, 1])
 
     rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
     for t, name in enumerate(TASK_NAMES):
@@ -467,6 +487,13 @@ def run_toa_mtgpr(
         per_task[f"{name}_n_rel_error_excluded"] = int(rel_m["n_rel_error_excluded"])
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
+    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
+    if log_grain:
+        aggregate_rrmse_mean = float(
+            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
+        )
+    else:
+        aggregate_rrmse_mean = aggregate_rrmse
     metrics: dict = {
         "title": title,
         "input_dim": input_dim,
@@ -500,6 +527,8 @@ def run_toa_mtgpr(
         "Prediction_Time": prediction_time,
         "Total_Time": train_time + prediction_time,
         "RMSE": aggregate_rmse,
+        "aggregate_RRMSE": aggregate_rrmse,
+        "aggregate_RRMSE_mean": aggregate_rrmse_mean,
         **per_task,
     }
     if noise_prior_meta is not None:
@@ -508,14 +537,25 @@ def run_toa_mtgpr(
     for t, name in enumerate(TASK_NAMES):
         yt = y_test_eval[:, t].numpy()
         yp = pred_mean[:, t].numpy()
+        metrics_kwargs: dict = {
+            "output_std": pred_std[:, t],
+            "lower_95": lower[:, t],
+            "upper_95": upper[:, t],
+            "training_time": train_time / NUM_TASKS,
+            "prediction_time": prediction_time / NUM_TASKS,
+        }
+        if (
+            log_grain
+            and name == GRAIN_TASK_NAME
+            and inv.log_mu is not None
+            and inv.log_sigma is not None
+        ):
+            metrics_kwargs["log_mu"] = inv.log_mu[:, t]
+            metrics_kwargs["log_sigma"] = inv.log_sigma[:, t]
         computed = compute_metrics(
             torch.from_numpy(yt),
             torch.from_numpy(yp),
-            output_std=pred_std[:, t],
-            lower_95=lower[:, t],
-            upper_95=upper[:, t],
-            training_time=train_time / NUM_TASKS,
-            prediction_time=prediction_time / NUM_TASKS,
+            **metrics_kwargs,
         )
         for key, value in computed.items():
             metrics[f"{name}_{key}"] = value
@@ -528,11 +568,19 @@ def run_toa_mtgpr(
         metrics.update(val_summary)
 
     print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}")
+    print(f"Test aggregate RRMSE: {aggregate_rrmse:.6f}")
+    if log_grain:
+        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
     for name in TASK_NAMES:
         print(
             f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
             f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
         )
+        if log_grain and name == GRAIN_TASK_NAME:
+            print(
+                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
+                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"best loss: {best_loss:.4f}  train time: {train_time:.1f}s")
 
@@ -574,9 +622,6 @@ def run_toa_mtgpr(
             metrics["checkpoint_path"] = str(ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
 
-        out_json = save_metrics_json(metrics, save_path, title)
-        print(f"Saved metrics to {out_json}")
-
         from plot_toa_posterior import (
             plot_toa_posterior_figures,
             save_predictions_npz,
@@ -607,8 +652,27 @@ def run_toa_mtgpr(
             example_indices=example_indices,
             wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
             log_grain=log_grain,
+            y_pred_mean=y_pred_mean_np if log_grain else None,
+            y_pred_mode=y_pred_mode_np if log_grain else None,
+            log_mu=log_mu_np if log_grain else None,
+            log_sigma=log_sigma_np if log_grain else None,
         )
         print(f"Saved predictions to {out_npz}")
+        metrics["predictions_npz"] = out_npz
+
+        if log_grain and plot_posterior:
+            from toa_distribution_diagnostics import run_toa_distribution_diagnostics
+
+            cal_dir = Path(save_path) / "calibration"
+            cal_metrics = run_toa_distribution_diagnostics(
+                out_npz,
+                cal_dir,
+                log_grain=True,
+            )
+            metrics.update(cal_metrics)
+
+        out_json = save_metrics_json(metrics, save_path, title)
+        print(f"Saved metrics to {out_json}")
 
         if plot_validation and monitor_validation and n_val > 0:
             for plot_path in plot_validation_curves_after_save(metrics, save_path, out_json):
@@ -635,6 +699,10 @@ def run_toa_mtgpr(
                     rel_tolerance=rel_tolerance,
                     wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
                     log_grain=log_grain,
+                    y_pred_mean=y_pred_mean_np if log_grain else None,
+                    y_pred_mode=y_pred_mode_np if log_grain else None,
+                    log_mu=log_mu_np if log_grain else None,
+                    log_sigma=log_sigma_np if log_grain else None,
                 )
                 for plot_path in post_paths:
                     print(f"Saved posterior plot to {plot_path}")

@@ -55,6 +55,7 @@ from mtgpr_experiment_utils import (
     json_safe_optimizer_kwargs,
     make_train_loss_callback,
     make_validation_callback,
+    merge_grain_mean_metrics,
     save_metrics_json,
     summarize_validation_from_runs,
     unpack_train_val_test,
@@ -74,7 +75,7 @@ from toa_mtgpr_base import (
     normalize_columns_to_drop,
 )
 from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
-from toa_y_transform import forward_y_single, inverse_y_single
+from toa_y_transform import GRAIN_TASK_NAME, forward_y_single, inverse_y_single
 
 NUM_TASKS = 2
 RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
@@ -290,9 +291,13 @@ def run_toa_stgp(
     task_runs: dict[str, list] = {}
     task_best_runs: dict[str, dict] = {}
     y_pred_all: list[np.ndarray] = []
+    y_pred_mean_all: list[np.ndarray] = []
+    y_pred_mode_all: list[np.ndarray] = []
     y_std_all: list[np.ndarray] = []
     lower_all: list[np.ndarray] = []
     upper_all: list[np.ndarray] = []
+    log_mu_all: list[np.ndarray] = []
+    log_sigma_all: list[np.ndarray] = []
     rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
 
     for task_idx, task_name in enumerate(TASK_NAMES):
@@ -471,7 +476,7 @@ def run_toa_stgp(
         prediction_time = time.time() - t_pred
         total_prediction_time += prediction_time
 
-        pred_mean, pred_std, lower, upper = inverse_y_single(
+        inv = inverse_y_single(
             pred_mean.detach().cpu(),
             pred_std.detach().cpu(),
             lower.detach().cpu(),
@@ -480,17 +485,29 @@ def run_toa_stgp(
             y_scaler=y_scaler,
             standardize_y=standardize_y,
             log_grain=log_grain,
+            extended=True,
         )
+        pred_mean = inv.point
+        pred_std = inv.std
+        lower = inv.lower
+        upper = inv.upper
         y_test_eval = y_te.cpu()
+
+        metrics_kwargs: dict = {
+            "output_std": pred_std,
+            "lower_95": lower,
+            "upper_95": upper,
+            "training_time": train_time,
+            "prediction_time": prediction_time,
+        }
+        if log_grain and task_name == GRAIN_TASK_NAME and inv.log_mu is not None and inv.log_sigma is not None:
+            metrics_kwargs["log_mu"] = inv.log_mu
+            metrics_kwargs["log_sigma"] = inv.log_sigma
 
         computed = compute_metrics(
             y_test_eval,
             pred_mean,
-            output_std=pred_std,
-            lower_95=lower,
-            upper_95=upper,
-            training_time=train_time,
-            prediction_time=prediction_time,
+            **metrics_kwargs,
         )
 
         tm: dict = {
@@ -505,9 +522,22 @@ def run_toa_stgp(
         task_best_runs[task_name] = best_run
 
         y_pred_all.append(pred_mean.numpy())
+        y_pred_mean_all.append(
+            inv.point_mean.numpy() if inv.point_mean is not None else pred_mean.numpy()
+        )
+        y_pred_mode_all.append(
+            inv.point_mode.numpy() if inv.point_mode is not None else pred_mean.numpy()
+        )
         y_std_all.append(pred_std.numpy())
         lower_all.append(lower.numpy())
         upper_all.append(upper.numpy())
+        if inv.log_mu is not None:
+            log_mu_all.append(inv.log_mu.numpy())
+            log_sigma_all.append(inv.log_sigma.numpy())
+        else:
+            nan_arr = np.full(pred_mean.numpy().shape, np.nan, dtype=np.float64)
+            log_mu_all.append(nan_arr)
+            log_sigma_all.append(nan_arr)
 
         print(
             f"{task_name} Test RMSE: {computed['RMSE']:.6f}  "
@@ -516,11 +546,17 @@ def run_toa_stgp(
         print(f"{task_name} best loss: {best_loss:.4f}  train time: {train_time:.1f}s")
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
+    y_pred_mean_stacked = np.stack(y_pred_mean_all, axis=1)
+    y_pred_mode_stacked = np.stack(y_pred_mode_all, axis=1)
     y_std_stacked = np.stack(y_std_all, axis=1)
     lower_stacked = np.stack(lower_all, axis=1)
     upper_stacked = np.stack(upper_all, axis=1)
+    log_mu_stacked = np.stack(log_mu_all, axis=1)
+    log_sigma_stacked = np.stack(log_sigma_all, axis=1)
     y_test_np = y_test.detach().cpu().numpy()
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked)
+    if log_grain:
+        merge_grain_mean_metrics(per_task, y_test_np, y_pred_mean_stacked[:, 1])
 
     for t, name in enumerate(TASK_NAMES):
         rel_m = compute_relative_error_metrics(
@@ -537,6 +573,12 @@ def run_toa_stgp(
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
     aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
+    if log_grain:
+        aggregate_rrmse_mean = float(
+            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
+        )
+    else:
+        aggregate_rrmse_mean = aggregate_rrmse
     metrics: dict = {
         "title": title,
         "input_dim": input_dim,
@@ -566,6 +608,7 @@ def run_toa_stgp(
         "Prediction_Time": total_prediction_time,
         "Total_Time": total_train_time + total_prediction_time,
         "aggregate_RRMSE": aggregate_rrmse,
+        "aggregate_RRMSE_mean": aggregate_rrmse_mean,
         "RMSE": aggregate_rmse,
         **per_task,
     }
@@ -599,11 +642,18 @@ def run_toa_stgp(
                 metrics[f"{task_name}_{key}"] = value
 
     print(f"\nTest aggregate RRMSE: {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    if log_grain:
+        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
     for name in TASK_NAMES:
         print(
             f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
             f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
         )
+        if log_grain and name == GRAIN_TASK_NAME:
+            print(
+                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
+                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"Total training time: {total_train_time:.1f}s")
 
@@ -631,9 +681,24 @@ def run_toa_stgp(
             example_indices=example_indices,
             wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
             log_grain=log_grain,
+            y_pred_mean=y_pred_mean_stacked if log_grain else None,
+            y_pred_mode=y_pred_mode_stacked if log_grain else None,
+            log_mu=log_mu_stacked if log_grain else None,
+            log_sigma=log_sigma_stacked if log_grain else None,
         )
         print(f"Saved predictions to {out_npz}")
         metrics["predictions_npz"] = out_npz
+
+        if log_grain and plot_posterior:
+            from toa_distribution_diagnostics import run_toa_distribution_diagnostics
+
+            cal_dir = Path(save_path) / "calibration"
+            cal_metrics = run_toa_distribution_diagnostics(
+                out_npz,
+                cal_dir,
+                log_grain=True,
+            )
+            metrics.update(cal_metrics)
 
         out_json = save_metrics_json(metrics, save_path, title)
         print(f"Saved metrics to {out_json}")
@@ -666,6 +731,10 @@ def run_toa_stgp(
                     rel_tolerance=rel_tolerance,
                     wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
                     log_grain=log_grain,
+                    y_pred_mean=y_pred_mean_stacked if log_grain else None,
+                    y_pred_mode=y_pred_mode_stacked if log_grain else None,
+                    log_mu=log_mu_stacked if log_grain else None,
+                    log_sigma=log_sigma_stacked if log_grain else None,
                 )
                 for plot_path in post_paths:
                     print(f"Saved posterior plot to {plot_path}")

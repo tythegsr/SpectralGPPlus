@@ -49,6 +49,7 @@ from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     compute_relative_error_metrics,
     format_relative_error_summary,
+    merge_grain_mean_metrics,
     unpack_train_val_test,
 )
 from plot_toa_posterior import (
@@ -57,6 +58,7 @@ from plot_toa_posterior import (
     wavelength_axis,
 )
 from toa_mtgpr_base import (
+    GRAIN_TASK_NAME,
     TASK_NAMES,
     TOA_INPUT_DIM,
     compute_per_task_metrics,
@@ -64,7 +66,7 @@ from toa_mtgpr_base import (
     normalize_columns_to_drop,
 )
 from toa_pca_utils import fit_pca_on_train, make_train_partitions, transform_pca
-from toa_y_transform import forward_y_single, inverse_y_single
+from toa_y_transform import forward_y_single, inverse_y_single, lognormal_summaries_from_log_params
 
 
 def _extract_kernel_hyperparams(model) -> dict[str, Any]:
@@ -167,6 +169,77 @@ def _ensemble_diagnostics(
         "partition_disagreement_std_mean": float(np.mean(disagreement_std)),
         "max_partition_spread": float(np.max(spread)),
     }
+
+
+def _aggregate_task_predictions(
+    mode: str,
+    task_name: str,
+    *,
+    log_grain: bool,
+    mu_stack: np.ndarray,
+    mean_stack: np.ndarray | None,
+    std_stack: np.ndarray,
+    log_mu_stack: np.ndarray | None,
+    log_sigma_stack: np.ndarray | None,
+    centroids: np.ndarray,
+    z_test_np: np.ndarray,
+    single_partition_index: int,
+    top_m: int,
+) -> tuple[
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    dict[str, float],
+]:
+    """Aggregate partition predictions on original scale (log-normal for grain when enabled)."""
+    if (
+        log_grain
+        and task_name == GRAIN_TASK_NAME
+        and log_mu_stack is not None
+        and log_sigma_stack is not None
+    ):
+        agg_log_mu, agg_log_sigma, mode_meta = _aggregate_ensemble(
+            log_mu_stack,
+            log_sigma_stack,
+            centroids,
+            z_test_np,
+            mode=mode,
+            single_partition_index=single_partition_index,
+            top_m=top_m,
+        )
+        median, mean, mode_pt, std, lower, upper = lognormal_summaries_from_log_params(
+            agg_log_mu, agg_log_sigma
+        )
+        return median, mean, mode_pt, std, lower, upper, agg_log_mu, agg_log_sigma, mode_meta
+
+    mu, std, mode_meta = _aggregate_ensemble(
+        mu_stack,
+        std_stack,
+        centroids,
+        z_test_np,
+        mode=mode,
+        single_partition_index=single_partition_index,
+        top_m=top_m,
+    )
+    lower = mu - 1.96 * std
+    upper = mu + 1.96 * std
+    mean_out = None
+    if mean_stack is not None:
+        mean_out, _, _ = _aggregate_ensemble(
+            mean_stack,
+            std_stack,
+            centroids,
+            z_test_np,
+            mode=mode,
+            single_partition_index=single_partition_index,
+            top_m=top_m,
+        )
+    return mu, mean_out, None, std, lower, upper, None, None, mode_meta
 
 
 def _print_ensemble_comparison(
@@ -480,9 +553,12 @@ def _run_single_input_dim(
     # Per-task storage
     task_y_scalers: dict[str, StandardScaler | None] = {}
     task_mu_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
+    task_mu_mean_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
     task_std_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
     task_lower_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
     task_upper_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
+    task_log_mu_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
+    task_log_sigma_by_part: dict[str, list[np.ndarray]] = {n: [] for n in TASK_NAMES}
     centroids = np.stack(
         [p["z"].detach().cpu().numpy().mean(axis=0) for p in partitions],
         axis=0,
@@ -535,7 +611,7 @@ def _run_single_input_dim(
             pred_time = time.time() - t_pred
             total_prediction_time += pred_time
 
-            pred_mean, pred_std, lower, upper = inverse_y_single(
+            inv = inverse_y_single(
                 pred_mean.detach().cpu(),
                 pred_std.detach().cpu(),
                 lower.detach().cpu(),
@@ -544,16 +620,32 @@ def _run_single_input_dim(
                 y_scaler=y_scaler,
                 standardize_y=standardize_y,
                 log_grain=log_grain,
+                extended=True,
             )
+            pred_mean = inv.point
+            pred_std = inv.std
+            lower = inv.lower
+            upper = inv.upper
             y_te_np = y_te.detach().cpu().numpy()
             pred_np = pred_mean.numpy()
+            pred_mean_np = (
+                inv.point_mean.numpy() if inv.point_mean is not None else pred_np
+            )
             part_rrmse = _task_rrmse(y_te_np, pred_np)
             part_rmse = float(np.sqrt(np.mean((pred_np - y_te_np) ** 2)))
 
             task_mu_by_part[task_name].append(pred_np)
+            task_mu_mean_by_part[task_name].append(pred_mean_np)
             task_std_by_part[task_name].append(pred_std.numpy())
             task_lower_by_part[task_name].append(lower.numpy())
             task_upper_by_part[task_name].append(upper.numpy())
+            if inv.log_mu is not None and inv.log_sigma is not None:
+                task_log_mu_by_part[task_name].append(inv.log_mu.numpy())
+                task_log_sigma_by_part[task_name].append(inv.log_sigma.numpy())
+            else:
+                nan_arr = np.full_like(pred_np, np.nan, dtype=np.float64)
+                task_log_mu_by_part[task_name].append(nan_arr)
+                task_log_sigma_by_part[task_name].append(nan_arr)
 
             partition_runs.append(
                 {
@@ -589,9 +681,13 @@ def _run_single_input_dim(
     y_std_by_partition: dict[str, np.ndarray] = {}
 
     y_pred_primary_list: list[np.ndarray] = []
+    y_pred_mean_primary_list: list[np.ndarray] = []
+    y_pred_mode_primary_list: list[np.ndarray] = []
     y_std_primary_list: list[np.ndarray] = []
     lower_primary_list: list[np.ndarray] = []
     upper_primary_list: list[np.ndarray] = []
+    log_mu_primary_list: list[np.ndarray] = []
+    log_sigma_primary_list: list[np.ndarray] = []
 
     y_test_np = y_test.detach().cpu().numpy()
 
@@ -604,24 +700,52 @@ def _run_single_input_dim(
 
         y_true_task = y_test_np[:, task_idx]
 
+        mu_mean_stack = np.stack(task_mu_mean_by_part[task_name], axis=0)
+        log_mu_stack = (
+            np.stack(task_log_mu_by_part[task_name], axis=0)
+            if log_grain and task_name == GRAIN_TASK_NAME
+            else None
+        )
+        log_sigma_stack = (
+            np.stack(task_log_sigma_by_part[task_name], axis=0)
+            if log_grain and task_name == GRAIN_TASK_NAME
+            else None
+        )
+
         for mode in ENSEMBLE_MODE_NAMES:
-            mu, std, mode_meta = _aggregate_ensemble(
-                mu_stack,
-                std_stack,
-                centroids,
-                z_test_np,
-                mode=mode,
-                single_partition_index=single_partition_index,
-                top_m=top_m_partitions,
+            mu, mu_mean, _mode_pt, std, lower, upper, agg_log_mu, agg_log_sigma, mode_meta = (
+                _aggregate_task_predictions(
+                    mode,
+                    task_name,
+                    log_grain=log_grain,
+                    mu_stack=mu_stack,
+                    mean_stack=mu_mean_stack,
+                    std_stack=std_stack,
+                    log_mu_stack=log_mu_stack,
+                    log_sigma_stack=log_sigma_stack,
+                    centroids=centroids,
+                    z_test_np=z_test_np,
+                    single_partition_index=single_partition_index,
+                    top_m=top_m_partitions,
+                )
             )
-            lower = mu - 1.96 * std
-            upper = mu + 1.96 * std
+            metrics_kwargs: dict = {
+                "output_std": torch.as_tensor(std),
+                "lower_95": torch.as_tensor(lower),
+                "upper_95": torch.as_tensor(upper),
+            }
+            if (
+                log_grain
+                and task_name == GRAIN_TASK_NAME
+                and agg_log_mu is not None
+                and agg_log_sigma is not None
+            ):
+                metrics_kwargs["log_mu"] = torch.as_tensor(agg_log_mu)
+                metrics_kwargs["log_sigma"] = torch.as_tensor(agg_log_sigma)
             computed = compute_metrics(
                 torch.as_tensor(y_true_task),
                 torch.as_tensor(mu),
-                output_std=torch.as_tensor(std),
-                lower_95=torch.as_tensor(lower),
-                upper_95=torch.as_tensor(upper),
+                **metrics_kwargs,
             )
             task_rrmse = _task_rrmse(y_true_task, mu)
             mode_metrics[mode][task_name] = {
@@ -635,29 +759,57 @@ def _run_single_input_dim(
             y_std_by_mode[f"{mode}_{task_name}"] = std
 
         # Primary full mode for stacked outputs
-        mu_full, std_full, _ = _aggregate_ensemble(
-            mu_stack,
-            std_stack,
-            centroids,
-            z_test_np,
-            mode="full",
-            single_partition_index=single_partition_index,
-            top_m=top_m_partitions,
+        mu_full, mu_mean_full, mode_full, std_full, lower_full, upper_full, log_mu_full, log_sigma_full, _ = (
+            _aggregate_task_predictions(
+                "full",
+                task_name,
+                log_grain=log_grain,
+                mu_stack=mu_stack,
+                mean_stack=mu_mean_stack,
+                std_stack=std_stack,
+                log_mu_stack=log_mu_stack,
+                log_sigma_stack=log_sigma_stack,
+                centroids=centroids,
+                z_test_np=z_test_np,
+                single_partition_index=single_partition_index,
+                top_m=top_m_partitions,
+            )
         )
-        lower_full = mu_full - 1.96 * std_full
-        upper_full = mu_full + 1.96 * std_full
+        if mu_mean_full is None:
+            mu_mean_full = mu_full
+
         y_pred_primary_list.append(mu_full)
+        y_pred_mean_primary_list.append(mu_mean_full)
+        y_pred_mode_primary_list.append(mode_full if mode_full is not None else mu_full)
         y_std_primary_list.append(std_full)
         lower_primary_list.append(lower_full)
         upper_primary_list.append(upper_full)
+        if log_mu_full is not None:
+            log_mu_primary_list.append(log_mu_full)
+            log_sigma_primary_list.append(log_sigma_full)
+        else:
+            log_mu_primary_list.append(np.full_like(mu_full, np.nan))
+            log_sigma_primary_list.append(np.full_like(mu_full, np.nan))
 
     y_pred_stacked = np.stack(y_pred_primary_list, axis=1)
+    y_pred_mean_stacked = np.stack(y_pred_mean_primary_list, axis=1)
+    y_pred_mode_stacked = np.stack(y_pred_mode_primary_list, axis=1)
     y_std_stacked = np.stack(y_std_primary_list, axis=1)
     lower_stacked = np.stack(lower_primary_list, axis=1)
     upper_stacked = np.stack(upper_primary_list, axis=1)
+    log_mu_stacked = np.stack(log_mu_primary_list, axis=1)
+    log_sigma_stacked = np.stack(log_sigma_primary_list, axis=1)
 
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked)
+    if log_grain:
+        merge_grain_mean_metrics(per_task, y_test_np, y_pred_mean_stacked[:, 1])
     aggregate_rrmse = float(np.mean([per_task[f"{n}_RRMSE"] for n in TASK_NAMES]))
+    if log_grain:
+        aggregate_rrmse_mean = float(
+            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
+        )
+    else:
+        aggregate_rrmse_mean = aggregate_rrmse
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
 
     rel_metrics_by_task: dict[str, dict] = {}
@@ -706,6 +858,7 @@ def _run_single_input_dim(
         "Prediction_Time": total_prediction_time,
         "Total_Time": total_train_time + total_prediction_time,
         "aggregate_RRMSE": aggregate_rrmse,
+        "aggregate_RRMSE_mean": aggregate_rrmse_mean,
         "RMSE": aggregate_rmse,
         "pca": pca_fit.to_dict(),
         "ensemble_modes": mode_metrics,
@@ -717,11 +870,18 @@ def _run_single_input_dim(
     _print_ensemble_comparison(mode_metrics, top_m=top_m_partitions)
 
     print(f"\nTest aggregate RRMSE: {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    if log_grain:
+        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
     for name in TASK_NAMES:
         print(
             f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
             f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
         )
+        if log_grain and name == GRAIN_TASK_NAME:
+            print(
+                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
+                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"Total training time: {total_train_time:.1f}s")
 
@@ -737,8 +897,7 @@ def _run_single_input_dim(
         os.makedirs(save_path, exist_ok=True)
         out_npz = os.path.join(str(save_path), f"predictions_{title}.npz")
         wl = wavelength_axis(x_test_orig.shape[-1])
-        np.savez_compressed(
-            out_npz,
+        npz_kwargs: dict = dict(
             y_true=y_test_np,
             y_pred=y_pred_stacked,
             y_std=y_std_stacked,
@@ -767,7 +926,24 @@ def _run_single_input_dim(
                 [y_std_by_partition[n] for n in TASK_NAMES], axis=1
             ),
         )
+        if log_grain:
+            npz_kwargs["y_pred_mean"] = y_pred_mean_stacked
+            npz_kwargs["y_pred_mode"] = y_pred_mode_stacked
+            npz_kwargs["log_mu"] = log_mu_stacked
+            npz_kwargs["log_sigma"] = log_sigma_stacked
+        np.savez_compressed(out_npz, **npz_kwargs)
         metrics["predictions_npz"] = out_npz
+
+        if log_grain and plot_posterior:
+            from toa_distribution_diagnostics import run_toa_distribution_diagnostics
+
+            cal_dir = Path(save_path) / "calibration"
+            cal_metrics = run_toa_distribution_diagnostics(
+                out_npz,
+                cal_dir,
+                log_grain=True,
+            )
+            metrics.update(cal_metrics)
 
         if plot_posterior and example_indices:
             import logging
@@ -790,6 +966,10 @@ def _run_single_input_dim(
                     rel_tolerance=rel_tolerance,
                     wavelength_nm=wl,
                     log_grain=log_grain,
+                    y_pred_mean=y_pred_mean_stacked if log_grain else None,
+                    y_pred_mode=y_pred_mode_stacked if log_grain else None,
+                    log_mu=log_mu_stacked if log_grain else None,
+                    log_sigma=log_sigma_stacked if log_grain else None,
                 )
                 for plot_path in post_paths:
                     print(f"Saved posterior plot to {plot_path}")

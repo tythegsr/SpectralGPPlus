@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -23,6 +24,8 @@ from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     compute_relative_error_metrics,
     format_relative_error_summary,
+    json_default,
+    merge_grain_mean_metrics,
     unpack_train_val_test,
 )
 from plot_toa_posterior import (
@@ -32,7 +35,7 @@ from plot_toa_posterior import (
     wavelength_axis,
 )
 from plot_validation_curves import sanitize_plot_subdir
-from toa_mtgpr_base import TASK_NAMES, compute_per_task_metrics, select_input_columns
+from toa_mtgpr_base import GRAIN_TASK_NAME, TASK_NAMES, compute_per_task_metrics, select_input_columns
 from toa_mtgpr_checkpoint import load_toa_mtgpr_checkpoint
 from toa_y_transform import inverse_y_predictions
 
@@ -49,6 +52,10 @@ def predict_from_checkpoint(
     np.ndarray,
     np.ndarray,
     np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
     float,
 ]:
     """Load test data from checkpoint split metadata, predict, return original-scale arrays."""
@@ -93,7 +100,7 @@ def predict_from_checkpoint(
     lower = lower.detach().cpu()
     upper = upper.detach().cpu()
 
-    pred_mean, pred_std, lower, upper = inverse_y_predictions(
+    inv = inverse_y_predictions(
         pred_mean,
         pred_std,
         lower,
@@ -101,20 +108,33 @@ def predict_from_checkpoint(
         y_scaler=bundle.y_scaler,
         standardize_y=bundle.standardize_y,
         log_grain=bundle.log_grain,
+        extended=True,
     )
     y_test_eval = y_test.cpu()
 
-    y_pred_np = pred_mean.numpy()
+    y_pred_np = inv.point.numpy()
     y_true_np = y_test_eval.numpy()
+    y_pred_mean_np = (
+        inv.point_mean.numpy() if inv.point_mean is not None else y_pred_np.copy()
+    )
+    y_pred_mode_np = (
+        inv.point_mode.numpy() if inv.point_mode is not None else y_pred_np.copy()
+    )
+    log_mu_np = inv.log_mu.numpy() if inv.log_mu is not None else None
+    log_sigma_np = inv.log_sigma.numpy() if inv.log_sigma is not None else None
 
     return (
         y_true_np,
         y_pred_np,
-        pred_std.numpy(),
-        lower.numpy(),
-        upper.numpy(),
+        inv.std.numpy(),
+        inv.lower.numpy(),
+        inv.upper.numpy(),
         x_test_orig.numpy(),
         test_idx.cpu().numpy(),
+        y_pred_mean_np,
+        y_pred_mode_np,
+        log_mu_np,
+        log_sigma_np,
         pred_time,
     )
 
@@ -184,13 +204,30 @@ def main() -> None:
         upper_np,
         x_test_orig_np,
         test_idx_np,
+        y_pred_mean_np,
+        y_pred_mode_np,
+        log_mu_np,
+        log_sigma_np,
         pred_time,
     ) = predict_from_checkpoint(bundle, predict_chunk_size=args.predict_chunk_size)
 
     per_task = compute_per_task_metrics(y_true_np, y_pred_np)
+    if bundle.log_grain:
+        merge_grain_mean_metrics(per_task, y_true_np, y_pred_mean_np[:, 1])
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
+    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
+    if bundle.log_grain:
+        aggregate_rrmse_mean = float(
+            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
+        )
+    else:
+        aggregate_rrmse_mean = aggregate_rrmse
 
-    print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}  (predict time: {pred_time:.1f}s)")
+    print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}  RRMSE: {aggregate_rrmse:.6f}")
+    if bundle.log_grain:
+        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
+    print(f"Predict time: {pred_time:.1f}s")
+
     rel_metrics_by_task: dict[str, dict] = {}
     for name in TASK_NAMES:
         rel_m = compute_relative_error_metrics(
@@ -203,6 +240,11 @@ def main() -> None:
             f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
             f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
         )
+        if bundle.log_grain and name == GRAIN_TASK_NAME:
+            print(
+                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
+                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_m, rel_tolerance=bundle.rel_tolerance))
 
     if args.save_predictions is not None or args.plot_posterior:
@@ -221,7 +263,8 @@ def main() -> None:
             explicit_indices=posterior_example_indices,
         )
 
-        if args.save_predictions is not None:
+        out_npz = None
+        if args.save_predictions is not None or args.plot_posterior:
             out_npz = save_predictions_npz(
                 save_dir,
                 bundle.title,
@@ -238,8 +281,27 @@ def main() -> None:
                 example_indices=example_indices,
                 wavelength_nm=wavelength_axis(x_test_orig_np.shape[-1]),
                 log_grain=bundle.log_grain,
+                y_pred_mean=y_pred_mean_np if bundle.log_grain else None,
+                y_pred_mode=y_pred_mode_np if bundle.log_grain else None,
+                log_mu=log_mu_np if bundle.log_grain else None,
+                log_sigma=log_sigma_np if bundle.log_grain else None,
             )
             print(f"Saved predictions to {out_npz}")
+
+        if bundle.log_grain and args.plot_posterior and out_npz is not None:
+            from toa_distribution_diagnostics import run_toa_distribution_diagnostics
+
+            cal_dir = Path(save_dir) / "calibration"
+            cal_metrics = run_toa_distribution_diagnostics(
+                out_npz,
+                cal_dir,
+                log_grain=True,
+            )
+            cal_json = Path(save_dir) / f"calibration_{bundle.title}.json"
+            cal_json.parent.mkdir(parents=True, exist_ok=True)
+            with open(cal_json, "w", encoding="utf-8") as f:
+                json.dump(cal_metrics, f, indent=2, default=json_default)
+            print(f"Saved calibration metrics to {cal_json}")
 
         if args.plot_posterior and example_indices:
             post_dir = Path(save_dir) / "plots" / "posterior" / sanitize_plot_subdir(bundle.title)
@@ -257,6 +319,10 @@ def main() -> None:
                 rel_tolerance=bundle.rel_tolerance,
                 wavelength_nm=wavelength_axis(x_test_orig_np.shape[-1]),
                 log_grain=bundle.log_grain,
+                y_pred_mean=y_pred_mean_np if bundle.log_grain else None,
+                y_pred_mode=y_pred_mode_np if bundle.log_grain else None,
+                log_mu=log_mu_np if bundle.log_grain else None,
+                log_sigma=log_sigma_np if bundle.log_grain else None,
             )
             for plot_path in post_paths:
                 print(f"Saved posterior plot to {plot_path}")

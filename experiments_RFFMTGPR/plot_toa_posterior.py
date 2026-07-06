@@ -296,6 +296,10 @@ def _plot_posterior_density_axis(
     rel_metrics: dict[str, float | int] | None,
     rel_tolerance: float,
     log_grain: bool = False,
+    y_pred_mean: float | None = None,
+    y_pred_mode: float | None = None,
+    log_mu: float | None = None,
+    log_sigma: float | None = None,
     pdf_mode: Literal["gaussian", "tabpfn_bar"] = "gaussian",
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -325,7 +329,10 @@ def _plot_posterior_density_axis(
         )
         density_label = "TabPFN posterior"
     elif log_grain and task_key == TASK_GRAIN:
-        mu_log, sigma_log = _lognormal_params_from_original(y_pred, lower, upper)
+        if log_mu is not None and log_sigma is not None and np.isfinite(log_mu) and np.isfinite(log_sigma):
+            mu_log, sigma_log = float(log_mu), max(float(log_sigma), _PDF_STD_EPS)
+        else:
+            mu_log, sigma_log = _lognormal_params_from_original(y_pred, lower, upper)
         pdf = _truncated_lognormal_pdf(grid, mu_log, sigma_log, x_min=x_min)
         density_label = "posterior"
     else:
@@ -335,13 +342,37 @@ def _plot_posterior_density_axis(
     fmt = lambda v: _format_posterior_value(task_key, v)
     ci_label = f"95% CI = [{fmt(lower)}, {fmt(upper)}]"
     true_label = f"true = {fmt(y_true)}"
-    mean_label = f"mean = {fmt(y_pred)}"
+    if log_grain and task_key == TASK_GRAIN:
+        point_label = f"median = {fmt(y_pred)}"
+    else:
+        point_label = f"mean = {fmt(y_pred)}"
 
     ax.fill_between(grid, 0.0, pdf, color="C0", alpha=0.25)
     ax.plot(grid, pdf, color="C0", linewidth=1.8, label=density_label)
     ax.axvspan(ci_lo, ci_hi, color="C0", alpha=0.12, label=ci_label)
     ax.axvline(y_true, color="C2", linestyle="--", linewidth=1.5, label=true_label)
-    ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=mean_label)
+    ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
+    if y_pred_mean is not None and log_grain and task_key == TASK_GRAIN:
+        ax.axvline(
+            y_pred_mean,
+            color="C1",
+            linestyle=":",
+            linewidth=1.5,
+            label=f"mean = {fmt(y_pred_mean)}",
+        )
+    if log_grain and task_key == TASK_GRAIN:
+        mode_val = y_pred_mode
+        if mode_val is None and log_mu is not None and log_sigma is not None:
+            if np.isfinite(log_mu) and np.isfinite(log_sigma):
+                mode_val = float(np.exp(log_mu - log_sigma**2))
+        if mode_val is not None and np.isfinite(mode_val):
+            ax.axvline(
+                mode_val,
+                color="C1",
+                linestyle="-.",
+                linewidth=1.5,
+                label=f"mode = {fmt(mode_val)}",
+            )
     ax.axvline(ci_lo, color="C0", linestyle=":", linewidth=1.0)
     ax.axvline(ci_hi, color="C0", linestyle=":", linewidth=1.0)
     ax.set_xlim(x0, x1)
@@ -378,6 +409,10 @@ def save_toa_posterior_figure(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    y_pred_mean: np.ndarray | None = None,
+    y_pred_mode: np.ndarray | None = None,
+    log_mu: np.ndarray | None = None,
+    log_sigma: np.ndarray | None = None,
     pdf_mode: PdfMode = "gaussian",
     tabpfn_logits_row: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -451,6 +486,10 @@ def save_toa_posterior_figure(
         rel_metrics=rel_grain,
         rel_tolerance=rel_tolerance,
         log_grain=log_grain and grain_pdf_mode == "gaussian",
+        y_pred_mean=float(y_pred_mean[1]) if y_pred_mean is not None else None,
+        y_pred_mode=float(y_pred_mode[1]) if y_pred_mode is not None else None,
+        log_mu=float(log_mu[1]) if log_mu is not None else None,
+        log_sigma=float(log_sigma[1]) if log_sigma is not None else None,
         pdf_mode=grain_pdf_mode,
         tabpfn_logits=tabpfn_logits_row[1] if tabpfn_logits_row is not None else None,
         tabpfn_borders=tabpfn_borders[1] if tabpfn_borders is not None else None,
@@ -497,6 +536,10 @@ def plot_toa_posterior_figures(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    y_pred_mean: np.ndarray | None = None,
+    y_pred_mode: np.ndarray | None = None,
+    log_mu: np.ndarray | None = None,
+    log_sigma: np.ndarray | None = None,
     pdf_mode: PdfMode = "gaussian",
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -527,6 +570,10 @@ def plot_toa_posterior_figures(
                 rel_tolerance=rel_tolerance,
                 wavelength_nm=wl,
                 log_grain=log_grain,
+                y_pred_mean=y_pred_mean[i] if y_pred_mean is not None else None,
+                y_pred_mode=y_pred_mode[i] if y_pred_mode is not None else None,
+                log_mu=log_mu[i] if log_mu is not None else None,
+                log_sigma=log_sigma[i] if log_sigma is not None else None,
                 pdf_mode=pdf_mode,
                 tabpfn_logits_row=logits_row,
                 tabpfn_borders=tabpfn_borders,
@@ -554,6 +601,10 @@ def save_predictions_npz(
     example_indices: list[int] | None = None,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    y_pred_mean: np.ndarray | None = None,
+    y_pred_mode: np.ndarray | None = None,
+    log_mu: np.ndarray | None = None,
+    log_sigma: np.ndarray | None = None,
     posterior_pdf_mode: str | None = None,
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -581,6 +632,14 @@ def save_predictions_npz(
         example_indices=np.array(example_indices if example_indices is not None else [], dtype=np.int64),
         log_grain=np.array(log_grain),
     )
+    if y_pred_mean is not None:
+        npz_kwargs["y_pred_mean"] = y_pred_mean
+    if y_pred_mode is not None:
+        npz_kwargs["y_pred_mode"] = y_pred_mode
+    if log_mu is not None:
+        npz_kwargs["log_mu"] = log_mu
+    if log_sigma is not None:
+        npz_kwargs["log_sigma"] = log_sigma
     if posterior_pdf_mode is not None:
         npz_kwargs["posterior_pdf_mode"] = np.array(posterior_pdf_mode)
     if tabpfn_logits is not None:
@@ -620,6 +679,10 @@ def plot_posterior_from_npz(
     tabpfn_logits = data["tabpfn_logits"] if "tabpfn_logits" in data else None
     tabpfn_borders = data["tabpfn_borders"] if "tabpfn_borders" in data else None
     tabpfn_train_scale = data["tabpfn_train_scale"] if "tabpfn_train_scale" in data else None
+    y_pred_mean = data["y_pred_mean"] if "y_pred_mean" in data else None
+    y_pred_mode = data["y_pred_mode"] if "y_pred_mode" in data else None
+    log_mu = data["log_mu"] if "log_mu" in data else None
+    log_sigma = data["log_sigma"] if "log_sigma" in data else None
 
     from mtgpr_experiment_utils import compute_relative_error_metrics
 
@@ -653,6 +716,10 @@ def plot_posterior_from_npz(
         rel_tolerance=tol,
         wavelength_nm=wl,
         log_grain=log_grain,
+        y_pred_mean=y_pred_mean,
+        y_pred_mode=y_pred_mode,
+        log_mu=log_mu,
+        log_sigma=log_sigma,
         pdf_mode=pdf_mode,
         tabpfn_logits=tabpfn_logits,
         tabpfn_borders=tabpfn_borders,
