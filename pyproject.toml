@@ -21,6 +21,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["gpplus*", "experiments_toa*"]
 
 [tool.ruff]
 # Global settings (e.g., line length, exclude, etc.)

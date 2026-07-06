@@ -31,10 +31,17 @@ def _pin_experiment_paths() -> None:
     sys.path[:] = list(ordered) + [p for p in sys.path if p not in ordered]
 
 
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _TABPFN_DIR)
+
 _pin_experiment_paths()
 
+from experiments_toa.data import load_toa_data
 from gpplus.utils import compute_metrics, set_seed
-from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     compute_relative_error_metrics,
     format_relative_error_summary,
@@ -135,7 +142,7 @@ def _eval_tabpfn_task(
     if isinstance(logits, np.ndarray):
         logits_t = torch.as_tensor(logits, dtype=torch.float32)
     else:
-        logits_t = logits.detach().cpu().float()
+        logits_t = logits.detach().float()
     if logits_t.ndim > 2:
         logits_t = logits_t.reshape(logits_t.shape[0], -1)
 
@@ -157,8 +164,15 @@ def _eval_tabpfn_task(
 
     pred_std_t = None
     if hasattr(criterion, "variance"):
-        variance = criterion.variance(logits_t if isinstance(logits, torch.Tensor) else logits_t)
+        # criterion.borders live on pfn_device (e.g. cuda); logits must match.
+        borders = getattr(criterion, "borders", None)
+        logits_for_var = logits_t
+        if borders is not None and logits_for_var.device != borders.device:
+            logits_for_var = logits_for_var.to(device=borders.device)
+        variance = criterion.variance(logits_for_var)
         pred_std_t = torch.sqrt(variance.detach().cpu().float()).reshape(-1)
+
+    logits_t = logits_t.detach().cpu()
 
     if lower_t is None or upper_t is None:
         if pred_std_t is None:

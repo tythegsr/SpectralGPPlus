@@ -11,9 +11,13 @@ import torch
 _ROOT = Path(__file__).resolve().parents[1]
 _RFF_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-for p in (_ROOT, _RFF_DIR, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
 
 import gpplus
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
@@ -81,7 +85,10 @@ if __name__ == "__main__":
         "--monitor-validation",
         action="store_true",
         default=True,
-        help="Hold out val_fraction of training for validation callbacks (default: on)",
+        help=(
+            "Use the fixed 4900-sample validation pool for training callbacks "
+            "(default: on). Train/val/test pools are always reserved from the seed."
+        ),
     )
     parser.add_argument(
         "--no-monitor-validation",
@@ -89,7 +96,6 @@ if __name__ == "__main__":
         dest="monitor_validation",
         help="Disable validation monitoring during training",
     )
-    parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument(
         "--no-plot",
         action="store_true",
@@ -240,7 +246,6 @@ if __name__ == "__main__":
         n_jobs=n_jobs,
         predict_chunk_size=args.predict_chunk_size,
         monitor_validation=args.monitor_validation,
-        val_fraction=args.val_fraction,
         plot_validation=not args.no_plot,
         plot_posterior=args.plot_posterior,
         rel_tolerance=args.rel_tolerance,

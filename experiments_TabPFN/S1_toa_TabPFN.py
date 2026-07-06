@@ -11,9 +11,13 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _TABPFN_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-for p in (_ROOT, _TABPFN_DIR, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _TABPFN_DIR)
 
 from toa_tabpfn_base import PFN_MODEL_VERSION_CHOICES, run_toa_tabpfn
 
@@ -26,7 +30,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="TOA dataset with TabPFN (one regressor per task)")
-    parser.add_argument("--n-train", type=int, default=49000)
+    parser.add_argument("--n-train", type=int, default=20000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

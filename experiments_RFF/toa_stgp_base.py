@@ -24,14 +24,25 @@ _DEFAULT_SAVE_DIRS = {
     "sorf": "experiments_SORF/results/toa_sorf",
 }
 
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 
 def _pin_experiment_paths() -> None:
-    """Ensure MTGPR helpers/loaders resolve before per-folder copies."""
-    ordered = (str(_MTGPR_DIR), str(_RFF_DIR), str(_ROOT))
-    sys.path[:] = list(ordered) + [p for p in sys.path if p not in ordered]
+    """Ensure MTGPR helpers resolve before per-folder copies."""
+    from experiments_toa.paths import pin_toa_import_paths
+
+    pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
 
 
 _pin_experiment_paths()
+
+from experiments_toa.data import (
+    TOA_TEST_POOL_SIZE,
+    TOA_TRAIN_POOL_SIZE,
+    TOA_VAL_POOL_SIZE,
+    load_toa_data,
+)
 
 from gpplus.models import RFFGPR
 from gpplus.training import (
@@ -45,11 +56,9 @@ from gpplus.training import (
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
 from gpplus.utils.rff_utils import woodbury_jitter_for_dtype
-from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
-    compute_n_val,
     compute_relative_error_metrics,
     format_relative_error_summary,
     json_safe_optimizer_kwargs,
@@ -134,7 +143,6 @@ def run_toa_stgp(
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
     monitor_validation: bool = True,
-    val_fraction: float = 0.2,
     validation_verbose: bool = True,
     plot_validation: bool = True,
     plot_posterior: bool = True,
@@ -198,9 +206,12 @@ def run_toa_stgp(
         )
     print("=" * 60)
 
-    n_val = compute_n_val(n_train, val_fraction) if monitor_validation else 0
+    n_val = TOA_VAL_POOL_SIZE if monitor_validation else 0
     if monitor_validation and validation_verbose:
-        print(f"Validation monitoring: n_val={n_val} ({val_fraction:.0%} of n_train={n_train})")
+        print(
+            f"Validation monitoring: n_val={n_val} "
+            f"(fixed pool; train_pool={TOA_TRAIN_POOL_SIZE}, test_pool={TOA_TEST_POOL_SIZE})"
+        )
 
     data = load_toa_data(
         n_train=n_train,
@@ -632,8 +643,10 @@ def run_toa_stgp(
 
     if monitor_validation and n_val > 0:
         metrics["monitor_validation"] = True
-        metrics["val_fraction"] = val_fraction
         metrics["n_val"] = n_val
+        metrics["train_pool_size"] = TOA_TRAIN_POOL_SIZE
+        metrics["val_pool_size"] = TOA_VAL_POOL_SIZE
+        metrics["test_pool_size"] = TOA_TEST_POOL_SIZE
         for task_name in TASK_NAMES:
             val_summary = summarize_validation_from_runs(
                 task_runs[task_name], task_best_runs[task_name]

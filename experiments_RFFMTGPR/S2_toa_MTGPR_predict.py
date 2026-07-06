@@ -14,18 +14,20 @@ import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
 _MTGPR_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR)
 
 import gpplus
 from gpplus.training import evaluate_rff_mt_gp_model
-from load_experimental_data import load_toa_data
+from experiments_toa.data import load_toa_data
 from mtgpr_experiment_utils import (
-    compute_relative_error_metrics,
-    format_relative_error_summary,
     json_default,
-    merge_grain_mean_metrics,
+    save_metrics_json,
     unpack_train_val_test,
 )
 from plot_toa_posterior import (
@@ -35,7 +37,12 @@ from plot_toa_posterior import (
     wavelength_axis,
 )
 from plot_validation_curves import sanitize_plot_subdir
-from toa_mtgpr_base import GRAIN_TASK_NAME, TASK_NAMES, compute_per_task_metrics, select_input_columns
+from toa_mtgpr_base import (
+    TASK_NAMES,
+    evaluate_toa_mtgpr_test_predictions,
+    print_toa_mtgpr_test_summary,
+    select_input_columns,
+)
 from toa_mtgpr_checkpoint import load_toa_mtgpr_checkpoint
 from toa_y_transform import inverse_y_predictions
 
@@ -211,44 +218,48 @@ def main() -> None:
         pred_time,
     ) = predict_from_checkpoint(bundle, predict_chunk_size=args.predict_chunk_size)
 
-    per_task = compute_per_task_metrics(y_true_np, y_pred_np)
-    if bundle.log_grain:
-        merge_grain_mean_metrics(per_task, y_true_np, y_pred_mean_np[:, 1])
-    aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
-    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
-    if bundle.log_grain:
-        aggregate_rrmse_mean = float(
-            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
-        )
-    else:
-        aggregate_rrmse_mean = aggregate_rrmse
-
-    print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}  RRMSE: {aggregate_rrmse:.6f}")
-    if bundle.log_grain:
-        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
-    print(f"Predict time: {pred_time:.1f}s")
-
-    rel_metrics_by_task: dict[str, dict] = {}
-    for name in TASK_NAMES:
-        rel_m = compute_relative_error_metrics(
-            y_true_np[:, TASK_NAMES.index(name)],
-            y_pred_np[:, TASK_NAMES.index(name)],
-            rel_tolerance=bundle.rel_tolerance,
-        )
-        rel_metrics_by_task[name] = rel_m
-        print(
-            f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
-            f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
-        )
-        if bundle.log_grain and name == GRAIN_TASK_NAME:
-            print(
-                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
-                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
-            )
-        print(format_relative_error_summary(name, rel_m, rel_tolerance=bundle.rel_tolerance))
+    test_eval = evaluate_toa_mtgpr_test_predictions(
+        y_true_np,
+        y_pred_np,
+        pred_std_np,
+        lower_np,
+        upper_np,
+        log_grain=bundle.log_grain,
+        rel_tolerance=bundle.rel_tolerance,
+        y_pred_mean=y_pred_mean_np,
+        log_mu=log_mu_np,
+        log_sigma=log_sigma_np,
+        prediction_time=pred_time,
+    )
+    rel_metrics_by_task = test_eval.rel_metrics_by_task
+    print_toa_mtgpr_test_summary(
+        test_eval,
+        log_grain=bundle.log_grain,
+        rel_tolerance=bundle.rel_tolerance,
+        prediction_time=pred_time,
+    )
 
     if args.save_predictions is not None or args.plot_posterior:
         save_dir = args.save_predictions or str(ckpt_path.parent)
+
+        metrics = {
+            "title": bundle.title,
+            "n_train": bundle.n_train,
+            "n_test": bundle.n_test,
+            "n_val": bundle.n_val,
+            "task_names": list(TASK_NAMES),
+            "log_grain": bundle.log_grain,
+            "rel_tolerance": bundle.rel_tolerance,
+            "best_train_loss": bundle.best_train_loss,
+            "Prediction_Time": pred_time,
+            "RMSE": test_eval.aggregate_rmse,
+            "aggregate_RRMSE": test_eval.aggregate_rrmse,
+            "aggregate_RRMSE_mean": test_eval.aggregate_rrmse_mean,
+            **test_eval.per_task,
+            **test_eval.prob_metrics,
+        }
+        out_json = save_metrics_json(metrics, save_dir, bundle.title)
+        print(f"Saved metrics to {out_json}")
 
         posterior_example_indices = None
         if args.posterior_example_indices:

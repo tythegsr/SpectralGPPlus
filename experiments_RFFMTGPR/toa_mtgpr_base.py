@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -17,10 +18,20 @@ import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
 _MTGPR_DIR = Path(__file__).resolve().parent
-for p in (_ROOT, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR)
+
+from experiments_toa.data import (
+    TOA_TEST_POOL_SIZE,
+    TOA_TRAIN_POOL_SIZE,
+    TOA_VAL_POOL_SIZE,
+    load_toa_data,
+)
 from gpplus.models import RFFMTGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
@@ -33,11 +44,9 @@ from gpplus.training import (
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
 from gpplus.utils.rff_utils import woodbury_jitter_for_dtype
-from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
-    compute_n_val,
     compute_relative_error_metrics,
     format_relative_error_summary,
     json_safe_optimizer_kwargs,
@@ -79,6 +88,153 @@ def compute_per_task_metrics(
         metrics[f"{name}_RRMSE"] = rrmse
         metrics[f"{name}_R2"] = r2
     return metrics
+
+
+@dataclass
+class ToaMtgprTestEvaluation:
+    """Point and probabilistic test metrics for TOA MTGPR predictions."""
+
+    per_task: dict[str, float | int]
+    rel_metrics_by_task: dict[str, dict[str, float | int]]
+    aggregate_rmse: float
+    aggregate_rrmse: float
+    aggregate_rrmse_mean: float
+    prob_metrics: dict[str, float]
+
+
+def evaluate_toa_mtgpr_test_predictions(
+    y_true: np.ndarray | torch.Tensor,
+    y_pred: np.ndarray | torch.Tensor,
+    pred_std: np.ndarray | torch.Tensor,
+    lower: np.ndarray | torch.Tensor,
+    upper: np.ndarray | torch.Tensor,
+    *,
+    log_grain: bool,
+    rel_tolerance: float,
+    y_pred_mean: np.ndarray | torch.Tensor | None = None,
+    log_mu: np.ndarray | torch.Tensor | None = None,
+    log_sigma: np.ndarray | torch.Tensor | None = None,
+    training_time: float = 0.0,
+    prediction_time: float = 0.0,
+) -> ToaMtgprTestEvaluation:
+    """Compute shared TOA MTGPR test metrics (point + NLPD/CRPS when log params available)."""
+    y_true_np = np.asarray(y_true, dtype=np.float64)
+    y_pred_np = np.asarray(y_pred, dtype=np.float64)
+    pred_std_np = np.asarray(pred_std, dtype=np.float64)
+    lower_np = np.asarray(lower, dtype=np.float64)
+    upper_np = np.asarray(upper, dtype=np.float64)
+
+    per_task = compute_per_task_metrics(y_true_np, y_pred_np)
+    if log_grain and y_pred_mean is not None:
+        merge_grain_mean_metrics(per_task, y_true_np, np.asarray(y_pred_mean, dtype=np.float64)[:, 1])
+
+    rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
+    for t, name in enumerate(TASK_NAMES):
+        rel_m = compute_relative_error_metrics(
+            y_true_np[:, t],
+            y_pred_np[:, t],
+            rel_tolerance=rel_tolerance,
+        )
+        rel_metrics_by_task[name] = rel_m
+        per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
+        per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
+        per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
+        per_task[f"{name}_n_rel_error_valid"] = int(rel_m["n_rel_error_valid"])
+        per_task[f"{name}_n_rel_error_excluded"] = int(rel_m["n_rel_error_excluded"])
+
+    aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
+    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
+    if log_grain:
+        aggregate_rrmse_mean = float(
+            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
+        )
+    else:
+        aggregate_rrmse_mean = aggregate_rrmse
+
+    log_mu_np = np.asarray(log_mu, dtype=np.float64) if log_mu is not None else None
+    log_sigma_np = np.asarray(log_sigma, dtype=np.float64) if log_sigma is not None else None
+
+    prob_metrics: dict[str, float] = {}
+    time_per_task = training_time / NUM_TASKS
+    pred_time_per_task = prediction_time / NUM_TASKS
+    for t, name in enumerate(TASK_NAMES):
+        metrics_kwargs: dict = {
+            "output_std": torch.as_tensor(pred_std_np[:, t]),
+            "lower_95": torch.as_tensor(lower_np[:, t]),
+            "upper_95": torch.as_tensor(upper_np[:, t]),
+            "training_time": time_per_task,
+            "prediction_time": pred_time_per_task,
+        }
+        if (
+            log_grain
+            and name == GRAIN_TASK_NAME
+            and log_mu_np is not None
+            and log_sigma_np is not None
+        ):
+            if log_mu_np.ndim > 1:
+                metrics_kwargs["log_mu"] = torch.as_tensor(log_mu_np[:, t])
+                metrics_kwargs["log_sigma"] = torch.as_tensor(log_sigma_np[:, t])
+            else:
+                metrics_kwargs["log_mu"] = torch.as_tensor(log_mu_np)
+                metrics_kwargs["log_sigma"] = torch.as_tensor(log_sigma_np)
+        computed = compute_metrics(
+            torch.as_tensor(y_true_np[:, t]),
+            torch.as_tensor(y_pred_np[:, t]),
+            **metrics_kwargs,
+        )
+        for key, value in computed.items():
+            prob_metrics[f"{name}_{key}"] = value
+
+    return ToaMtgprTestEvaluation(
+        per_task=per_task,
+        rel_metrics_by_task=rel_metrics_by_task,
+        aggregate_rmse=aggregate_rmse,
+        aggregate_rrmse=aggregate_rrmse,
+        aggregate_rrmse_mean=aggregate_rrmse_mean,
+        prob_metrics=prob_metrics,
+    )
+
+
+def print_toa_mtgpr_test_summary(
+    evaluation: ToaMtgprTestEvaluation,
+    *,
+    log_grain: bool,
+    rel_tolerance: float,
+    prediction_time: float | None = None,
+    best_loss: float | None = None,
+    train_time: float | None = None,
+) -> None:
+    """Print TOA MTGPR test metrics in the same format as ``run_toa_mtgpr``."""
+    per_task = evaluation.per_task
+    print(f"\nTest aggregate RMSE: {evaluation.aggregate_rmse:.6f}")
+    print(f"Test aggregate RRMSE: {evaluation.aggregate_rrmse:.6f}")
+    if log_grain:
+        print(f"Test aggregate RRMSE (mean grain): {evaluation.aggregate_rrmse_mean:.6f}")
+    if prediction_time is not None:
+        print(f"Predict time: {prediction_time:.1f}s")
+    for name in TASK_NAMES:
+        print(
+            f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
+            f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
+        )
+        if log_grain and name == GRAIN_TASK_NAME:
+            print(
+                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
+                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
+            )
+        for key in ("NLPD", "CRPS", "NCRPS", "NIS"):
+            metric_key = f"{name}_{key}"
+            if metric_key in evaluation.prob_metrics:
+                print(f"  {key}: {evaluation.prob_metrics[metric_key]:.6f}")
+        print(
+            format_relative_error_summary(
+                name,
+                evaluation.rel_metrics_by_task[name],
+                rel_tolerance=rel_tolerance,
+            )
+        )
+    if best_loss is not None and train_time is not None:
+        print(f"best loss: {best_loss:.4f}  train time: {train_time:.1f}s")
 
 
 def extract_mt_learned_noise(model) -> dict[str, float | list[float]]:
@@ -171,7 +327,6 @@ def run_toa_mtgpr(
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
     monitor_validation: bool = True,
-    val_fraction: float = 0.2,
     validation_verbose: bool = True,
     plot_validation: bool = True,
     plot_posterior: bool = True,
@@ -232,9 +387,12 @@ def run_toa_mtgpr(
         )
     print("=" * 60)
 
-    n_val = compute_n_val(n_train, val_fraction) if monitor_validation else 0
+    n_val = TOA_VAL_POOL_SIZE if monitor_validation else 0
     if monitor_validation and validation_verbose:
-        print(f"Validation monitoring: n_val={n_val} ({val_fraction:.0%} of n_train={n_train})")
+        print(
+            f"Validation monitoring: n_val={n_val} "
+            f"(fixed pool; train_pool={TOA_TRAIN_POOL_SIZE}, test_pool={TOA_TEST_POOL_SIZE})"
+        )
 
     data = load_toa_data(
         n_train=n_train,
@@ -468,32 +626,25 @@ def run_toa_mtgpr(
     log_mu_np = inv.log_mu.numpy() if inv.log_mu is not None else None
     log_sigma_np = inv.log_sigma.numpy() if inv.log_sigma is not None else None
     y_true_np = y_test_eval.numpy()
-    per_task = compute_per_task_metrics(y_true_np, y_pred_np)
-    if log_grain:
-        merge_grain_mean_metrics(per_task, y_true_np, y_pred_mean_np[:, 1])
-
-    rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
-    for t, name in enumerate(TASK_NAMES):
-        rel_m = compute_relative_error_metrics(
-            y_true_np[:, t],
-            y_pred_np[:, t],
-            rel_tolerance=rel_tolerance,
-        )
-        rel_metrics_by_task[name] = rel_m
-        per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
-        per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
-        per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
-        per_task[f"{name}_n_rel_error_valid"] = int(rel_m["n_rel_error_valid"])
-        per_task[f"{name}_n_rel_error_excluded"] = int(rel_m["n_rel_error_excluded"])
-
-    aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
-    aggregate_rrmse = float(np.mean([per_task[f"{name}_RRMSE"] for name in TASK_NAMES]))
-    if log_grain:
-        aggregate_rrmse_mean = float(
-            np.mean([per_task["y_cos_RRMSE"], per_task[f"{GRAIN_TASK_NAME}_RRMSE_mean"]])
-        )
-    else:
-        aggregate_rrmse_mean = aggregate_rrmse
+    test_eval = evaluate_toa_mtgpr_test_predictions(
+        y_true_np,
+        y_pred_np,
+        inv.std,
+        inv.lower,
+        inv.upper,
+        log_grain=log_grain,
+        rel_tolerance=rel_tolerance,
+        y_pred_mean=y_pred_mean_np,
+        log_mu=inv.log_mu,
+        log_sigma=inv.log_sigma,
+        training_time=train_time,
+        prediction_time=prediction_time,
+    )
+    per_task = test_eval.per_task
+    rel_metrics_by_task = test_eval.rel_metrics_by_task
+    aggregate_rmse = test_eval.aggregate_rmse
+    aggregate_rrmse = test_eval.aggregate_rrmse
+    aggregate_rrmse_mean = test_eval.aggregate_rrmse_mean
     metrics: dict = {
         "title": title,
         "input_dim": input_dim,
@@ -533,56 +684,25 @@ def run_toa_mtgpr(
     }
     if noise_prior_meta is not None:
         metrics.update(noise_prior_meta)
-
-    for t, name in enumerate(TASK_NAMES):
-        yt = y_test_eval[:, t].numpy()
-        yp = pred_mean[:, t].numpy()
-        metrics_kwargs: dict = {
-            "output_std": pred_std[:, t],
-            "lower_95": lower[:, t],
-            "upper_95": upper[:, t],
-            "training_time": train_time / NUM_TASKS,
-            "prediction_time": prediction_time / NUM_TASKS,
-        }
-        if (
-            log_grain
-            and name == GRAIN_TASK_NAME
-            and inv.log_mu is not None
-            and inv.log_sigma is not None
-        ):
-            metrics_kwargs["log_mu"] = inv.log_mu[:, t]
-            metrics_kwargs["log_sigma"] = inv.log_sigma[:, t]
-        computed = compute_metrics(
-            torch.from_numpy(yt),
-            torch.from_numpy(yp),
-            **metrics_kwargs,
-        )
-        for key, value in computed.items():
-            metrics[f"{name}_{key}"] = value
+    metrics.update(test_eval.prob_metrics)
 
     if monitor_validation and n_val > 0:
         metrics["monitor_validation"] = True
-        metrics["val_fraction"] = val_fraction
         metrics["n_val"] = n_val
+        metrics["train_pool_size"] = TOA_TRAIN_POOL_SIZE
+        metrics["val_pool_size"] = TOA_VAL_POOL_SIZE
+        metrics["test_pool_size"] = TOA_TEST_POOL_SIZE
         val_summary = summarize_validation_from_runs(runs, best_run)
         metrics.update(val_summary)
 
-    print(f"\nTest aggregate RMSE: {aggregate_rmse:.6f}")
-    print(f"Test aggregate RRMSE: {aggregate_rrmse:.6f}")
-    if log_grain:
-        print(f"Test aggregate RRMSE (mean grain): {aggregate_rrmse_mean:.6f}")
-    for name in TASK_NAMES:
-        print(
-            f"{name} RMSE: {per_task[f'{name}_RMSE']:.6f}  "
-            f"RRMSE: {per_task[f'{name}_RRMSE']:.6f}"
-        )
-        if log_grain and name == GRAIN_TASK_NAME:
-            print(
-                f"{name} RRMSE (mean): {per_task[f'{name}_RRMSE_mean']:.6f}  "
-                f"RMSE (mean): {per_task[f'{name}_RMSE_mean']:.6f}"
-            )
-        print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
-    print(f"best loss: {best_loss:.4f}  train time: {train_time:.1f}s")
+    print_toa_mtgpr_test_summary(
+        test_eval,
+        log_grain=log_grain,
+        rel_tolerance=rel_tolerance,
+        prediction_time=prediction_time,
+        best_loss=best_loss,
+        train_time=train_time,
+    )
 
     if save_path:
         if save_checkpoint:

@@ -12,9 +12,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PCA_DIR = Path(__file__).resolve().parent
 _RFF_DIR = _ROOT / "experiments_RFF"
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-for p in (_ROOT, _PCA_DIR, _RFF_DIR, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _PCA_DIR)
 
 import gpplus
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
@@ -34,7 +38,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-train", type=int, default=49000)
     parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--n-components", type=int, default=30, help="PCA dimension p")
+    parser.add_argument("--n-components", type=int, default=3, help="PCA dimension p")
     parser.add_argument(
         "--num-rff",
         type=int,
@@ -44,7 +48,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rff-sampling",
         type=str,
-        default="rff",
+        default="orf",
         choices=RFF_SAMPLING_CHOICES,
         help="Spectral sampling: rff, orf, or sorf",
     )
@@ -88,14 +92,16 @@ if __name__ == "__main__":
         "--monitor-validation",
         action="store_true",
         default=True,
-        help="Hold out val_fraction of training for validation callbacks (default: on)",
+        help=(
+            "Use the fixed 4900-sample validation pool for training callbacks "
+            "(default: on). Train/val/test pools are always reserved from the seed."
+        ),
     )
     parser.add_argument(
         "--no-monitor-validation",
         action="store_false",
         dest="monitor_validation",
     )
-    parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument(
         "--plot-posterior",
@@ -184,7 +190,6 @@ if __name__ == "__main__":
         n_jobs=n_jobs,
         predict_chunk_size=args.predict_chunk_size,
         monitor_validation=args.monitor_validation,
-        val_fraction=args.val_fraction,
         plot_validation=not args.no_plot,
         plot_posterior=args.plot_posterior and not args.no_plot,
         rel_tolerance=args.rel_tolerance,

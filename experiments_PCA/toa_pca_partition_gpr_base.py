@@ -32,7 +32,16 @@ def _pin_experiment_paths() -> None:
     sys.path[:] = list(ordered) + [p for p in sys.path if p not in ordered]
 
 
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _GP_DIR, _PCA_DIR)
+
 _pin_experiment_paths()
+
+from experiments_toa.data import load_toa_data
 
 from gpplus.training import GPTrainer, evaluate_gp_model
 from gpplus.training.optimizers import LBFGSScipy
@@ -45,7 +54,6 @@ from gp_experiment_utils import (
     json_safe_optimizer_kwargs,
     save_metrics_json,
 )
-from load_experimental_data import load_toa_data
 from mtgpr_experiment_utils import (
     compute_relative_error_metrics,
     format_relative_error_summary,

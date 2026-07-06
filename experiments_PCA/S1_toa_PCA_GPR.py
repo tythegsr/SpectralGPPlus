@@ -12,9 +12,13 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PCA_DIR = Path(__file__).resolve().parent
 _GP_DIR = _ROOT / "experiments_GP"
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-for p in (_ROOT, _PCA_DIR, _GP_DIR, _MTGPR_DIR):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from experiments_toa.paths import pin_toa_import_paths
+
+pin_toa_import_paths(_MTGPR_DIR, _GP_DIR, _PCA_DIR)
 
 import gpplus
 from toa_pca_partition_gpr_base import run_toa_pca_partition_gpr
