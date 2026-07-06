@@ -27,15 +27,9 @@ _DEFAULT_SAVE_DIRS = {
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from experiments_toa.paths import pin_toa_import_paths
 
-def _pin_experiment_paths() -> None:
-    """Ensure MTGPR helpers resolve before per-folder copies."""
-    from experiments_toa.paths import pin_toa_import_paths
-
-    pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
-
-
-_pin_experiment_paths()
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
 
 from experiments_toa.data import (
     TOA_TEST_POOL_SIZE,

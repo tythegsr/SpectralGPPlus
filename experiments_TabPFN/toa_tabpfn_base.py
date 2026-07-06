@@ -26,19 +26,12 @@ PFN_MODEL_VERSION_CHOICES = ("auto", "v2.5", "v3.0")
 PdfMode = Literal["gaussian", "tabpfn_bar"]
 
 
-def _pin_experiment_paths() -> None:
-    ordered = (str(_MTGPR_DIR), str(_TABPFN_DIR), str(_ROOT))
-    sys.path[:] = list(ordered) + [p for p in sys.path if p not in ordered]
-
-
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
 pin_toa_import_paths(_MTGPR_DIR, _TABPFN_DIR)
-
-_pin_experiment_paths()
 
 from experiments_toa.data import load_toa_data
 from gpplus.utils import compute_metrics, set_seed

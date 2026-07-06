@@ -164,6 +164,10 @@ cython_debug/
 # Ruff
 .ruff_cache/
 
+# Model checkpoints (large binaries; keep local or in results/)
+*.pt
+**/checkpoint_*.pt
+
 results*/
 dixon_price*/
 examples/

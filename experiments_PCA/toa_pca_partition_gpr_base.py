@@ -27,19 +27,12 @@ ENSEMBLE_MODE_NAMES = (
 )
 
 
-def _pin_experiment_paths() -> None:
-    ordered = (str(_MTGPR_DIR), str(_GP_DIR), str(_PCA_DIR), str(_ROOT))
-    sys.path[:] = list(ordered) + [p for p in sys.path if p not in ordered]
-
-
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
 pin_toa_import_paths(_MTGPR_DIR, _GP_DIR, _PCA_DIR)
-
-_pin_experiment_paths()
 
 from experiments_toa.data import load_toa_data
 

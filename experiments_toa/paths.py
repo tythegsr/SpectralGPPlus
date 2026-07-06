@@ -24,8 +24,9 @@ def pin_toa_import_paths(*extra_dirs: str | Path) -> None:
     """
     Pin ``sys.path`` order for TOA runners.
 
-    ``extra_dirs`` are listed first (highest priority), then the repo root.
-    Later entries in ``extra_dirs`` have higher priority than earlier ones.
+    Paths are prepended in order: first ``extra_dirs`` entry has highest import
+    priority, then remaining ``extra_dirs``, then the repo root, then the rest
+    of the existing ``sys.path`` unchanged.
     """
     ensure_repo_on_path()
     ordered = [str(d) for d in extra_dirs] + [str(repo_root())]

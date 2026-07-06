@@ -57,3 +57,6 @@ jobs:
 
       - name: Run Integration Tests with Coverage
         run: pytest --cov=gpplus --cov-report=term-missing test/integration
+
+      - name: Run TOA experiment tests
+        run: pytest experiments_toa/test_data_splits.py experiments_RFFMTGPR/test_log_grain_metrics.py
