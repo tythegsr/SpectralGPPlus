@@ -8,7 +8,6 @@ from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from scipy.special import erf
 
 from plot_validation_curves import sanitize_plot_subdir
@@ -229,58 +228,59 @@ def _resolve_pdf_mode(
     return pdf_mode
 
 
-def _tabpfn_bar_distribution(borders: np.ndarray):
-    from tabpfn.architectures.base.bar_distribution import FullSupportBarDistribution
+def _softmax_logits(logits: np.ndarray) -> np.ndarray:
+    x = np.asarray(logits, dtype=np.float64).ravel()
+    x = x - x.max()
+    exp_x = np.exp(x)
+    return exp_x / exp_x.sum()
 
-    borders_t = torch.as_tensor(borders, dtype=torch.float32)
-    return FullSupportBarDistribution(borders_t)
 
-
-def _tabpfn_bar_pdf_on_grid(
-    grid: np.ndarray,
+def _tabpfn_bar_histogram(
     logits: np.ndarray,
     borders: np.ndarray,
     *,
+    x0: float,
+    x1: float,
     x_min: float,
     x_max: float | None,
     train_scale_log: bool = False,
-) -> np.ndarray:
-    """Evaluate TabPFN bar-distribution PDF on a 1D grid (display units)."""
-    criterion = _tabpfn_bar_distribution(borders)
-    logits_t = torch.as_tensor(logits, dtype=torch.float32).reshape(1, -1)
-    grid = np.asarray(grid, dtype=np.float64)
-    pdf = np.zeros_like(grid, dtype=np.float64)
+) -> tuple[np.ndarray, np.ndarray]:
+    """Piecewise-constant TabPFN bar density on display scale (edges, heights)."""
+    borders = np.asarray(borders, dtype=np.float64).ravel()
+    logits = np.asarray(logits, dtype=np.float64).ravel()
+    if borders.size < 2 or logits.size != borders.size - 1:
+        return np.array([x0, x1], dtype=np.float64), np.array([0.0], dtype=np.float64)
 
-    for i, x_val in enumerate(grid):
-        if not np.isfinite(x_val):
-            continue
-        if train_scale_log:
-            if x_val <= 0.0:
-                continue
-            y_eval = float(np.log(x_val))
-        else:
-            y_eval = float(x_val)
-        y_t = torch.tensor(y_eval, dtype=torch.float32)
-        p = criterion.pdf(logits_t, y_t).squeeze().detach().cpu().numpy()
-        p = float(np.asarray(p).reshape(-1)[0])
-        if not np.isfinite(p):
-            p = 0.0
-        if train_scale_log and x_val > 0.0:
-            p /= x_val
-        pdf[i] = max(p, 0.0)
+    probs = _softmax_logits(logits)
+    if train_scale_log:
+        edges = np.exp(borders)
+    else:
+        edges = borders.copy()
 
-    mask = grid >= x_min
+    left = edges[:-1]
+    right = edges[1:]
+    bucket_widths = right - left
+
+    overlap_plot = (right > x0) & (left < x1)
+    in_support = right > x_min
     if x_max is not None:
-        mask &= grid <= x_max
-    pdf[~mask] = 0.0
-    pdf = np.nan_to_num(pdf, nan=0.0, posinf=0.0, neginf=0.0)
-    if np.any(mask):
-        norm = float(np.trapezoid(pdf[mask], grid[mask]))
-        if np.isfinite(norm) and norm > 1e-12:
-            pdf[mask] /= norm
-        else:
-            pdf[mask] = 0.0
-    return pdf
+        in_support &= left < x_max
+    mask = overlap_plot & in_support & (bucket_widths > 0.0)
+    if not np.any(mask):
+        return np.array([x0, x1], dtype=np.float64), np.array([0.0], dtype=np.float64)
+
+    idx = np.where(mask)[0]
+    i0, i1 = int(idx.min()), int(idx.max())
+    slice_probs = probs[i0 : i1 + 1].copy()
+    slice_probs[~mask[i0 : i1 + 1]] = 0.0
+    mass = float(slice_probs.sum())
+    if mass <= 0.0:
+        return np.array([x0, x1], dtype=np.float64), np.array([0.0], dtype=np.float64)
+    slice_probs /= mass
+    slice_widths = bucket_widths[i0 : i1 + 1]
+    heights = slice_probs / np.maximum(slice_widths, 1e-12)
+    plot_edges = edges[i0 : i1 + 2]
+    return plot_edges, heights
 
 
 def _plot_posterior_density_axis(
@@ -318,11 +318,15 @@ def _plot_posterior_density_axis(
         and tabpfn_logits is not None
         and tabpfn_borders is not None
     )
+    tabpfn_edges: np.ndarray | None = None
+    tabpfn_heights: np.ndarray | None = None
+    pdf: np.ndarray | None = None
     if use_tabpfn:
-        pdf = _tabpfn_bar_pdf_on_grid(
-            grid,
+        tabpfn_edges, tabpfn_heights = _tabpfn_bar_histogram(
             tabpfn_logits,
             tabpfn_borders,
+            x0=x0,
+            x1=x1,
             x_min=x_min,
             x_max=x_max,
             train_scale_log=tabpfn_train_scale_log,
@@ -347,8 +351,26 @@ def _plot_posterior_density_axis(
     else:
         point_label = f"mean = {fmt(y_pred)}"
 
-    ax.fill_between(grid, 0.0, pdf, color="C0", alpha=0.25)
-    ax.plot(grid, pdf, color="C0", linewidth=1.8, label=density_label)
+    if use_tabpfn and tabpfn_edges is not None and tabpfn_heights is not None:
+        ax.stairs(
+            tabpfn_heights,
+            tabpfn_edges,
+            baseline=0.0,
+            fill=True,
+            color="C0",
+            alpha=0.25,
+            label=density_label,
+        )
+        ax.stairs(
+            tabpfn_heights,
+            tabpfn_edges,
+            baseline=0.0,
+            color="C0",
+            linewidth=1.8,
+        )
+    elif pdf is not None:
+        ax.fill_between(grid, 0.0, pdf, color="C0", alpha=0.25)
+        ax.plot(grid, pdf, color="C0", linewidth=1.8, label=density_label)
     ax.axvspan(ci_lo, ci_hi, color="C0", alpha=0.12, label=ci_label)
     ax.axvline(y_true, color="C2", linestyle="--", linewidth=1.5, label=true_label)
     ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
@@ -376,7 +398,12 @@ def _plot_posterior_density_axis(
     ax.axvline(ci_lo, color="C0", linestyle=":", linewidth=1.0)
     ax.axvline(ci_hi, color="C0", linestyle=":", linewidth=1.0)
     ax.set_xlim(x0, x1)
-    ymax = float(np.max(pdf)) if pdf.size else 1.0
+    if use_tabpfn and tabpfn_heights is not None and tabpfn_heights.size:
+        ymax = float(np.max(tabpfn_heights))
+    elif pdf is not None and pdf.size:
+        ymax = float(np.max(pdf))
+    else:
+        ymax = 1.0
     ax.set_ylim(0.0, ymax * 1.08 if ymax > 0 else 1.0)
     ax.set_xlabel(task_label)
     ax.set_ylabel("posterior density")
