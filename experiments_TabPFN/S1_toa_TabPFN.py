@@ -30,7 +30,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="TOA dataset with TabPFN (one regressor per task)")
-    parser.add_argument("--n-train", type=int, default=4000)
+    parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(

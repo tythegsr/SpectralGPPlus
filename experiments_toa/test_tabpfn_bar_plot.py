@@ -13,7 +13,12 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 if str(_MTGPR_DIR) not in sys.path:
     sys.path.insert(0, str(_MTGPR_DIR))
 
-from plot_toa_posterior import _softmax_logits, _tabpfn_bar_histogram
+from plot_toa_posterior import (
+    _format_posterior_value,
+    _softmax_logits,
+    _tabpfn_bar_histogram,
+    _tabpfn_bar_summaries,
+)
 
 
 def _density_at(edges: np.ndarray, heights: np.ndarray, x: float) -> float:
@@ -24,6 +29,26 @@ def _density_at(edges: np.ndarray, heights: np.ndarray, x: float) -> float:
             return float(heights[-1])
         return 0.0
     return float(heights[idx[0]])
+
+
+def test_format_posterior_value_grain_distinguishes_close_values() -> None:
+    median, mean, mode = 150.878, 150.884, 150.868
+    labels = [_format_posterior_value("y_grain", v) for v in (median, mean, mode)]
+    assert len(set(labels)) == 3
+
+
+def test_tabpfn_bar_summaries_peak_bucket() -> None:
+    n_buckets = 50
+    borders = np.linspace(0.0, 1.0, n_buckets + 1)
+    logits = np.full(n_buckets, -10.0)
+    peak_idx = 25
+    logits[peak_idx] = 5.0
+
+    mean, median, mode = _tabpfn_bar_summaries(logits, borders, train_scale_log=False)
+    expected_center = 0.5 * (borders[peak_idx] + borders[peak_idx + 1])
+    assert abs(mode - expected_center) < 1e-6
+    assert abs(mean - expected_center) < 0.02
+    assert abs(median - expected_center) < 0.02
 
 
 def test_tabpfn_bar_histogram_peak_aligns_with_dominant_bucket() -> None:

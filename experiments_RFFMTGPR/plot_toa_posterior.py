@@ -47,7 +47,56 @@ def _pct_str(value: float) -> str:
 def _format_posterior_value(task_key: str, value: float) -> str:
     if task_key == TASK_COS:
         return f"{value:.4f}"
-    return f"{value:.4g}"
+    # Grain (µm): .4g collapses mean/median/mode when they differ by <1 µm.
+    return f"{value:.3f}"
+
+
+def _tabpfn_bucket_centers(
+    borders: np.ndarray,
+    *,
+    train_scale_log: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    borders = np.asarray(borders, dtype=np.float64).ravel()
+    if train_scale_log:
+        left = np.exp(borders[:-1])
+        right = np.exp(borders[1:])
+    else:
+        left = borders[:-1]
+        right = borders[1:]
+    centers = 0.5 * (left + right)
+    return left, right, centers
+
+
+def _tabpfn_bar_summaries(
+    logits: np.ndarray,
+    borders: np.ndarray,
+    *,
+    train_scale_log: bool = False,
+) -> tuple[float, float, float]:
+    """Mean, median, and mode of TabPFN bar distribution on display scale."""
+    logits = np.asarray(logits, dtype=np.float64).ravel()
+    borders = np.asarray(borders, dtype=np.float64).ravel()
+    if borders.size < 2 or logits.size != borders.size - 1:
+        return float("nan"), float("nan"), float("nan")
+
+    probs = _softmax_logits(logits)
+    left, right, centers = _tabpfn_bucket_centers(borders, train_scale_log=train_scale_log)
+
+    mean = float(np.sum(probs * centers))
+    mode = float(centers[int(np.argmax(probs))])
+
+    cdf = np.cumsum(probs)
+    idx = int(np.searchsorted(cdf, 0.5))
+    idx = min(max(idx, 0), len(centers) - 1)
+    if idx == 0:
+        median = float(centers[0])
+    else:
+        p_lo = float(cdf[idx - 1])
+        p_hi = float(cdf[idx])
+        frac = (0.5 - p_lo) / max(p_hi - p_lo, 1e-12)
+        median = float(left[idx] + frac * (right[idx] - left[idx]))
+
+    return mean, median, mode
 
 
 def _metrics_text_for_task(
@@ -346,7 +395,18 @@ def _plot_posterior_density_axis(
     fmt = lambda v: _format_posterior_value(task_key, v)
     ci_label = f"95% CI = [{fmt(lower)}, {fmt(upper)}]"
     true_label = f"true = {fmt(y_true)}"
-    if log_grain and task_key == TASK_GRAIN:
+
+    tabpfn_mean = tabpfn_median = tabpfn_mode = None
+    if use_tabpfn and tabpfn_logits is not None and tabpfn_borders is not None:
+        tabpfn_mean, tabpfn_median, tabpfn_mode = _tabpfn_bar_summaries(
+            tabpfn_logits,
+            tabpfn_borders,
+            train_scale_log=tabpfn_train_scale_log,
+        )
+
+    if use_tabpfn and tabpfn_mean is not None and np.isfinite(tabpfn_mean):
+        point_label = f"mean = {fmt(tabpfn_mean)}"
+    elif log_grain and task_key == TASK_GRAIN:
         point_label = f"median = {fmt(y_pred)}"
     else:
         point_label = f"mean = {fmt(y_pred)}"
@@ -373,7 +433,26 @@ def _plot_posterior_density_axis(
         ax.plot(grid, pdf, color="C0", linewidth=1.8, label=density_label)
     ax.axvspan(ci_lo, ci_hi, color="C0", alpha=0.12, label=ci_label)
     ax.axvline(y_true, color="C2", linestyle="--", linewidth=1.5, label=true_label)
-    ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
+    if use_tabpfn and tabpfn_mean is not None and np.isfinite(tabpfn_mean):
+        ax.axvline(tabpfn_mean, color="C1", linestyle="-", linewidth=1.5, label=point_label)
+        if tabpfn_median is not None and np.isfinite(tabpfn_median):
+            ax.axvline(
+                tabpfn_median,
+                color="C1",
+                linestyle=":",
+                linewidth=1.5,
+                label=f"median = {fmt(tabpfn_median)}",
+            )
+        if tabpfn_mode is not None and np.isfinite(tabpfn_mode):
+            ax.axvline(
+                tabpfn_mode,
+                color="C1",
+                linestyle="-.",
+                linewidth=1.5,
+                label=f"mode = {fmt(tabpfn_mode)}",
+            )
+    else:
+        ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
     if y_pred_mean is not None and log_grain and task_key == TASK_GRAIN:
         ax.axvline(
             y_pred_mean,
@@ -463,7 +542,7 @@ def save_toa_posterior_figure(
     axes[0].plot(wl, spectrum, color="C0", linewidth=1.0)
     axes[0].set_xlabel("Wavelength (nm)")
     axes[0].set_ylabel("Radiance")
-    axes[0].set_title(f"true cos_i={cos_true:.4f}, true grain={grain_true:.4g}")
+    axes[0].set_title(f"true cos_i={cos_true:.4f}, true grain={grain_true:.3f}")
     axes[0].grid(True, alpha=0.3)
 
     train_scales = (

@@ -33,7 +33,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="TOA dataset with GPPlus SORF (Woodbury)")
-    parser.add_argument("--n-train", type=int, default=49000)
+    parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument(
         "--num-rff",
@@ -47,7 +47,7 @@ if __name__ == "__main__":
         default=None,
         help="Alias for --num-rff (backward compatibility)",
     )
-    parser.add_argument("--num-inits", type=int, default=4)
+    parser.add_argument("--num-inits", type=int, default=16)
     parser.add_argument(
         "--num-epochs",
         type=int,
@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = "experiments_SORF/results/toa_sorf"
+        save_path = "experiments_SORF/results/toa_sorf_16inits"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
