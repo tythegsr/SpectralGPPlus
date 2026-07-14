@@ -232,6 +232,7 @@ def run_toa_tabpfn(
     pfn_model_version: str = "auto",
     ignore_pretraining_limits: bool = False,
     posterior_pdf_mode: PdfMode = "tabpfn_bar",
+    train_subset: str = "random",
 ) -> dict:
     """Train independent TabPFN regressors on TOA data and evaluate on held-out test points."""
     if save_path is None:
@@ -255,6 +256,7 @@ def run_toa_tabpfn(
         n_val=0,
         seed=seed,
         data_path=data_path,
+        train_subset=train_subset,
     )
     x_train, y_train, _x_val, _y_val, x_test, y_test, _train_idx, _val_idx, test_idx = (
         unpack_train_val_test(data)
@@ -357,6 +359,7 @@ def run_toa_tabpfn(
         "kept_column_indices": kept_column_indices,
         "n_train": n_train,
         "n_test": n_test,
+        "train_subset": train_subset,
         "num_tasks": NUM_TASKS,
         "task_names": list(TASK_NAMES),
         "model_class": "TabPFNRegressor",

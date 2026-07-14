@@ -521,6 +521,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
 
         num_dims = model.train_inputs[0].shape[-1]
         rff_sampling = rff_kernel.rff_sampling
+        correct_sorf = bool(getattr(rff_kernel, "correct_sorf", False))
 
         from ..utils.rff_utils import init_rbf_weights
 
@@ -532,6 +533,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
                     device=rff_kernel.raw_lengthscale.device,
                     dtype=rff_kernel.raw_lengthscale.dtype,
                     rff_sampling=rff_sampling,
+                    correct_sorf=correct_sorf,
                 )
             )
         weights = self._rff_weight_draws[run_index]

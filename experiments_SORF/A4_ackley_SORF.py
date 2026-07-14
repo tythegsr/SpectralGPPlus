@@ -72,7 +72,9 @@ def run_ackley_40d_sorf(
     monitor_validation: bool = True,
     val_fraction: float = 0.2,
     validation_verbose: bool = True,
+    log_every_n_epochs: int = 1,
     plot_validation: bool = True,
+    correct_sorf: bool = False,
 ) -> dict:
     """
     Train SORF-GP on Ackley and evaluate on held-out Sobol test points.
@@ -100,13 +102,15 @@ def run_ackley_40d_sorf(
     title = (
         f"Ackley_{dimensions}Dx_{train_size}Dn_{list(x_bounds)}_"
         f"sorfD{num_sorf}_noiseTest{noise_test}_noiseTrain{noise_train}"
+        f"_correctSorf{correct_sorf}"
     )
     print("=" * 60)
     print(title)
     feature_dim = 2 * num_sorf
     print(
         f"SORF kernel (Woodbury), D={num_sorf}, m={feature_dim}, ARD={ard}, "
-        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}"
+        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}, "
+        f"correct_sorf={correct_sorf}"
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
@@ -188,10 +192,18 @@ def run_ackley_40d_sorf(
                 num_inits,
                 chunk_size=predict_chunk_size,
                 verbose=validation_verbose,
+                log_every_n_epochs=log_every_n_epochs,
             )
         )
 
-    model = RFFGPR(x_train, y_train, num_rff=num_sorf, ard=ard, rff_sampling="sorf")
+    model = RFFGPR(
+        x_train,
+        y_train,
+        num_rff=num_sorf,
+        ard=ard,
+        rff_sampling="sorf",
+        correct_sorf=correct_sorf,
+    )
 
     trainer = GPTrainer(
         model,
@@ -263,6 +275,7 @@ def run_ackley_40d_sorf(
         "n_test": num_test,
         "num_sorf": num_sorf,
         "rff_sampling": "sorf",
+        "correct_sorf": correct_sorf,
         "feature_dim": 2 * num_sorf,
         "ard": ard,
         "num_epochs": num_epochs,

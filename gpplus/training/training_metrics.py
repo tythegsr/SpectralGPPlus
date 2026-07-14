@@ -897,6 +897,32 @@ def _tensor_summary_stats(x: torch.Tensor, *, dim: int = 0, eps: float = 1e-12) 
     return stats
 
 
+def _collect_lengthscales_list(lengthscale: torch.Tensor) -> list[float]:
+    """Per-input-dimension lengthscales (no aggregation)."""
+    ls = lengthscale.detach().cpu().reshape(-1)
+    return [float(v) for v in ls.tolist()]
+
+
+def _collect_rff_hyperparams(model) -> Dict[str, object]:
+    """Scalars from RFFGPR safe for JSON logging."""
+    out: Dict[str, object] = {}
+    noise = model.likelihood.noise.detach().cpu()
+    out["noise"] = float(noise.reshape(-1)[0].item()) if noise.numel() else float("nan")
+
+    raw_noise = getattr(model.likelihood, "raw_noise", None)
+    if raw_noise is not None:
+        out["raw_noise"] = float(raw_noise.detach().cpu().reshape(-1)[0].item())
+
+    out["outputscale"] = float(model.covar_module.outputscale.detach().cpu().item())
+    out["lengthscales"] = _collect_lengthscales_list(model._rff_kernel.lengthscale)
+
+    mean_module = getattr(model, "mean_module", None)
+    if mean_module is not None and hasattr(mean_module, "constant"):
+        out["mean_constant"] = float(mean_module.constant.detach().cpu().reshape(-1)[0].item())
+
+    return out
+
+
 def _collect_rff_mt_hyperparams(model) -> Dict[str, object]:
     """Scalars from RFFMTGPR safe for JSON logging."""
     out: Dict[str, object] = {}
@@ -909,14 +935,45 @@ def _collect_rff_mt_hyperparams(model) -> Dict[str, object]:
 
     data_covar = model.covar_module.data_covar_module
     out["outputscale"] = float(data_covar.outputscale.detach().cpu().item())
-
-    lengthscale = model._rff_kernel.lengthscale.detach().cpu()
-    if lengthscale.numel() == 1:
-        out["lengthscale_median"] = float(lengthscale.item())
-    else:
-        out["lengthscale_median"] = float(lengthscale.median().item())
+    out["lengthscales"] = _collect_lengthscales_list(model._rff_kernel.lengthscale)
 
     return out
+
+
+def _rff_validation_diagnostics(
+    model,
+    val_y: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    f_var: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+    nll_spike_threshold: float = 10.0,
+) -> Dict[str, object]:
+    """Compact validation diagnostics for single-task RFFGPR."""
+    hyperparams = _collect_rff_hyperparams(model)
+    pred_std_min = float(pred_std.min().item())
+    f_var_flat = f_var.reshape(-1)
+    f_var_zero_frac = float((f_var_flat <= eps).float().mean().item())
+
+    pred_std_2d = pred_std.unsqueeze(-1) if pred_std.dim() == 1 else pred_std
+    f_var_2d = f_var.unsqueeze(-1) if f_var.dim() == 1 else f_var
+    pred_std_stats = _tensor_summary_stats(pred_std_2d, dim=0, eps=eps)
+    f_var_stats = _tensor_summary_stats(f_var_2d.clamp_min(0.0), dim=0, eps=eps)
+
+    point_nll = _gaussian_predictive_nll_per_point(val_y, pred_mean, pred_std, eps=eps)
+    max_point_nll = float(point_nll.max().item()) if point_nll.numel() else float("nan")
+    frac_nll_above = float((point_nll > nll_spike_threshold).float().mean().item())
+
+    return {
+        "pred_std_min": pred_std_min,
+        "f_var_zero_frac": f_var_zero_frac,
+        "pred_std_stats": pred_std_stats,
+        "f_var_stats": f_var_stats,
+        "max_point_nll": max_point_nll,
+        "frac_nll_above_10": frac_nll_above,
+        **hyperparams,
+    }
 
 
 def _rff_mt_validation_diagnostics(
@@ -1009,8 +1066,11 @@ def compute_validation_metrics(
 
                 if hasattr(model, "invalidate_feature_cache"):
                     model.invalidate_feature_cache()
-                pred_mean, _, _, pred_std = evaluate_rff_gp_model(
-                    model, val_x, jitter=jitter, chunk_size=chunk_size
+                pred_mean, _, _, pred_std, f_var = evaluate_rff_gp_model(
+                    model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
+                )
+                val_diag = _rff_validation_diagnostics(
+                    model, val_y, pred_mean, pred_std, f_var
                 )
             else:
                 from .eval import evaluate_gp_model
@@ -1028,6 +1088,6 @@ def compute_validation_metrics(
             model.eval()
 
     out: Dict[str, object] = {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
-    if is_rff_mt:
+    if is_rff_mt or is_rff:
         out["val_diag"] = val_diag
     return out

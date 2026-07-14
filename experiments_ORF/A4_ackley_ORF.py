@@ -72,6 +72,7 @@ def run_ackley_40d_orf(
     monitor_validation: bool = True,
     val_fraction: float = 0.2,
     validation_verbose: bool = True,
+    log_every_n_epochs: int = 1,
     plot_validation: bool = True,
 ) -> dict:
     """
@@ -188,6 +189,7 @@ def run_ackley_40d_orf(
                 num_inits,
                 chunk_size=predict_chunk_size,
                 verbose=validation_verbose,
+                log_every_n_epochs=log_every_n_epochs,
             )
         )
 

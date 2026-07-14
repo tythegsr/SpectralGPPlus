@@ -33,7 +33,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="TOA dataset with GPPlus ORF (Woodbury)")
-    parser.add_argument("--n-train", type=int, default=49000)
+    parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument(
         "--num-rff",
@@ -47,18 +47,18 @@ if __name__ == "__main__":
         default=None,
         help="Alias for --num-rff (backward compatibility)",
     )
-    parser.add_argument("--num-inits", type=int, default=4)
+    parser.add_argument("--num-inits", type=int, default=1)
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=200,
+        default=1000,
         help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
     )
     parser.add_argument(
         "--lr",
         type=float,
         default=1.0,
-        help="Adam learning rate (only when --num-epochs > 1)",
+        help="Adam learning rate (only when --num-epochs > 1; default matches DEFAULT_ADAM_KWARGS)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -140,9 +140,26 @@ if __name__ == "__main__":
         help="Path to toa_data_flattened.npz (default: repo root)",
     )
     parser.add_argument(
+        "--train-subset",
+        type=str,
+        default="maximin",
+        choices=("random", "maximin"),
+        help=(
+            "How to choose training points within the fixed train pool: "
+            "'random' = pool prefix (default); "
+            "'maximin' = greedy farthest-point in (cos, grain)"
+        ),
+    )
+    parser.add_argument(
         "--no-log-grain",
         action="store_true",
         help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
+    )
+    parser.add_argument(
+        "--logit-cos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
     )
     parser.add_argument(
         "--no-save-checkpoint",
@@ -208,7 +225,7 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = "experiments_ORF/results/toa_orf"
+        save_path = "experiments_ORF/results/July13/toa_orf"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
@@ -260,11 +277,13 @@ if __name__ == "__main__":
         posterior_n_examples=args.posterior_n_examples,
         posterior_example_indices=posterior_example_indices,
         data_path=args.data_path,
+        train_subset=args.train_subset,
         parallel_verbose=args.parallel_verbose,
         training_verbose=not args.no_training_log,
         log_every_n_epochs=args.log_every_n_epochs,
         save_checkpoint=not args.no_save_checkpoint,
         log_grain=not args.no_log_grain,
+        logit_cos=args.logit_cos,
         drop_columns=drop_columns,
         response_noise_prior=args.response_noise_prior,
         noise_var_fraction=args.noise_var_fraction,

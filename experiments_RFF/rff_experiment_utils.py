@@ -237,6 +237,8 @@ def make_validation_callback(
 
 def summarize_validation_from_runs(runs: list[dict], best_run: dict) -> dict:
     """Extract per-init validation metrics and best-init summaries from trainer runs."""
+    from gpplus.training.validation_hyperparam_plots import extract_best_init_hyperparams
+
     by_init: dict[int, list[dict]] = {}
     for run in runs:
         run_index = run.get("run_index")
@@ -255,4 +257,8 @@ def summarize_validation_from_runs(runs: list[dict], best_run: dict) -> dict:
         last = by_init[int(best_index)][-1]
         summary["best_val_NLL"] = last.get("val_NLL")
         summary["best_val_RRMSE"] = last.get("val_RRMSE")
+        summary["best_init_hyperparams"] = extract_best_init_hyperparams(
+            {str(k): v for k, v in by_init.items()},
+            int(best_index),
+        )
     return summary

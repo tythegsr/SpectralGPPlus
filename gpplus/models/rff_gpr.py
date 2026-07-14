@@ -40,6 +40,7 @@ class RFFGPR(gpytorch.models.ExactGP):
         num_rff: int = 500,
         ard: bool = False,
         rff_sampling: RffSampling = "rff",
+        correct_sorf: bool = False,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -58,13 +59,16 @@ class RFFGPR(gpytorch.models.ExactGP):
                     num_samples=num_rff,
                     num_dims=input_dim,
                     rff_sampling=rff_sampling,
+                    correct_sorf=correct_sorf,
                     **kernel_kwargs,
                 )
             )
             feature_kind = rff_sampling.upper()
             logger.warning(
                 "No kernel_module provided. Using LogScaleKernel(RFFKernel(...)) "
-                f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim})."
+                f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim}"
+                + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
+                + ")."
             )
 
         if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
@@ -73,6 +77,7 @@ class RFFGPR(gpytorch.models.ExactGP):
         super().__init__(train_x, train_y, likelihood)
         self.num_rff = num_rff
         self.rff_sampling = rff_sampling
+        self.correct_sorf = bool(correct_sorf)
         self.mean_module = mean_module.to(dtype=self.dtype)
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)

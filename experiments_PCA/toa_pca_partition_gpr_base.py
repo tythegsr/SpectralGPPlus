@@ -351,6 +351,7 @@ def run_toa_pca_partition_gpr(
     single_partition_index: int = 0,
     compare_input_dim: bool = False,
     pca_svd_solver: str = "randomized",
+    train_subset: str = "random",
 ) -> dict:
     """PCA + partitioned exact GPR on TOA (independent models per task)."""
     if save_path is None:
@@ -397,6 +398,7 @@ def run_toa_pca_partition_gpr(
             single_partition_index=single_partition_index,
             pca_svd_solver=pca_svd_solver,
             dim_label=dim_label,
+            train_subset=train_subset,
         )
         all_results[dim_label] = metrics
         if dim_label == "270":
@@ -458,6 +460,7 @@ def _run_single_input_dim(
     single_partition_index: int,
     pca_svd_solver: str,
     dim_label: str,
+    train_subset: str = "random",
 ) -> dict:
     set_seed(seed)
 
@@ -483,6 +486,7 @@ def _run_single_input_dim(
         n_val=0,
         seed=seed,
         data_path=data_path,
+        train_subset=train_subset,
     )
     x_train, y_train, _x_val, _y_val, x_test, y_test, train_idx, _val_idx, test_idx = (
         unpack_train_val_test(data)
@@ -835,6 +839,7 @@ def _run_single_input_dim(
         "kept_column_indices": kept_column_indices,
         "n_train": n_train,
         "n_test": n_test,
+        "train_subset": train_subset,
         "num_tasks": len(TASK_NAMES),
         "task_names": list(TASK_NAMES),
         "n_components": pca_fit.n_components,

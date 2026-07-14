@@ -340,10 +340,12 @@ def run_toa_mtgpr(
     log_every_n_epochs: int = 1,
     save_checkpoint: bool = True,
     log_grain: bool = True,
+    logit_cos: bool = True,
     drop_columns: list[int] | None = None,
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
+    train_subset: str = "random",
 ) -> dict:
     """Train joint RFFMTGPR on TOA data and evaluate on held-out test points."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
@@ -374,7 +376,7 @@ def run_toa_mtgpr(
     print(
         f"Joint {sampling_label}-MTGP (Woodbury), D={num_rff}, m={feature_dim}, m*T={joint_width}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={TASK_NAMES}, "
-        f"log_grain={log_grain}"
+        f"log_grain={log_grain}, logit_cos={logit_cos}"
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
@@ -400,6 +402,7 @@ def run_toa_mtgpr(
         n_val=n_val,
         seed=seed,
         data_path=data_path,
+        train_subset=train_subset,
     )
     x_train, y_train, x_val, y_val, x_test, y_test, train_idx, val_idx, test_idx = unpack_train_val_test(data)
 
@@ -449,8 +452,8 @@ def run_toa_mtgpr(
         x_val = x_val.to(dtype=dtype)
     y_val = y_val.to(dtype=dtype)
 
-    y_train_model = forward_y(y_train, log_grain=log_grain)
-    y_test_model = forward_y(y_test, log_grain=log_grain)
+    y_train_model = forward_y(y_train, log_grain=log_grain, logit_cos=logit_cos)
+    y_test_model = forward_y(y_test, log_grain=log_grain, logit_cos=logit_cos)
 
     y_mean, y_std = None, None
     y_scaler = None
@@ -467,7 +470,7 @@ def run_toa_mtgpr(
     x_val_scaled = x_val
     y_val_scaled = y_val
     if y_val.numel() > 0:
-        y_val_model = forward_y(y_val, log_grain=log_grain)
+        y_val_model = forward_y(y_val, log_grain=log_grain, logit_cos=logit_cos)
         if standardize_y and y_scaler is not None:
             y_val_scaled = y_scaler.transform(y_val_model)
         else:
@@ -604,6 +607,7 @@ def run_toa_mtgpr(
         y_scaler=y_scaler,
         standardize_y=standardize_y,
         log_grain=log_grain,
+        logit_cos=logit_cos,
         extended=True,
     )
     pred_mean = inv.point
@@ -625,6 +629,8 @@ def run_toa_mtgpr(
     )
     log_mu_np = inv.log_mu.numpy() if inv.log_mu is not None else None
     log_sigma_np = inv.log_sigma.numpy() if inv.log_sigma is not None else None
+    logit_mu_np = inv.logit_mu.numpy() if inv.logit_mu is not None else None
+    logit_sigma_np = inv.logit_sigma.numpy() if inv.logit_sigma is not None else None
     y_true_np = y_test_eval.numpy()
     test_eval = evaluate_toa_mtgpr_test_predictions(
         y_true_np,
@@ -653,6 +659,7 @@ def run_toa_mtgpr(
         "kept_column_indices": kept_column_indices,
         "n_train": n_train,
         "n_test": n_test,
+        "train_subset": train_subset,
         "num_tasks": NUM_TASKS,
         "task_names": list(TASK_NAMES),
         "num_rff": num_rff,
@@ -670,6 +677,7 @@ def run_toa_mtgpr(
         "x_scaling_type": x_scaling_type,
         "standardize_y": standardize_y,
         "log_grain": log_grain,
+        "logit_cos": logit_cos,
         "response_noise_prior": bool(response_noise_prior),
         "best_train_loss": best_loss,
         "rel_tolerance": rel_tolerance,
@@ -729,6 +737,7 @@ def run_toa_mtgpr(
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
                 log_grain=log_grain,
+                logit_cos=logit_cos,
                 input_column_indices=kept_column_indices_t,
                 model_config={
                     "num_tasks": NUM_TASKS,
@@ -772,10 +781,13 @@ def run_toa_mtgpr(
             example_indices=example_indices,
             wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
             log_grain=log_grain,
-            y_pred_mean=y_pred_mean_np if log_grain else None,
+            logit_cos=logit_cos,
+            y_pred_mean=y_pred_mean_np if (log_grain or logit_cos) else None,
             y_pred_mode=y_pred_mode_np if log_grain else None,
             log_mu=log_mu_np if log_grain else None,
             log_sigma=log_sigma_np if log_grain else None,
+            logit_mu=logit_mu_np if logit_cos else None,
+            logit_sigma=logit_sigma_np if logit_cos else None,
         )
         print(f"Saved predictions to {out_npz}")
         metrics["predictions_npz"] = out_npz
@@ -819,10 +831,13 @@ def run_toa_mtgpr(
                     rel_tolerance=rel_tolerance,
                     wavelength_nm=wavelength_axis(x_test_orig.shape[-1]),
                     log_grain=log_grain,
-                    y_pred_mean=y_pred_mean_np if log_grain else None,
+                    logit_cos=logit_cos,
+                    y_pred_mean=y_pred_mean_np if (log_grain or logit_cos) else None,
                     y_pred_mode=y_pred_mode_np if log_grain else None,
                     log_mu=log_mu_np if log_grain else None,
                     log_sigma=log_sigma_np if log_grain else None,
+                    logit_mu=logit_mu_np if logit_cos else None,
+                    logit_sigma=logit_sigma_np if logit_cos else None,
                 )
                 for plot_path in post_paths:
                     print(f"Saved posterior plot to {plot_path}")

@@ -86,6 +86,7 @@ def evaluate_rff_gp_model(
     test_x: torch.Tensor,
     jitter: float = 1e-6,
     chunk_size: int = 512,
+    return_latent_var: bool = False,
 ):
     """
     Evaluate an :class:`~gpplus.models.RFFGPR` model using Woodbury prediction.
@@ -105,57 +106,62 @@ def evaluate_rff_gp_model(
     n_test = test_x.shape[0]
     if n_test == 0:
         empty = test_x.new_zeros(0)
+        if return_latent_var:
+            return empty, empty, empty, empty, empty
         return empty, empty, empty, empty
 
     with torch.no_grad():
-        if chunk_size <= 0 or n_test <= chunk_size:
-            mean, lower, upper = model.predict(test_x, jitter=jitter)
-            stddev = (upper - lower) / 4.0
-        else:
-            train_x = _drop_singleton_batch(model.train_inputs[0])
-            train_y = _drop_singleton_batch(model.train_targets)
-            z_train = model.train_features()
-            noise = model.likelihood.noise
-            chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
-            mean_train = model.mean_module(train_x)
-            if mean_train.dim() > 1 and mean_train.shape[0] == 1:
-                mean_train = mean_train.squeeze(0)
-            y_centered = train_y - mean_train
+        train_x = _drop_singleton_batch(model.train_inputs[0])
+        train_y = _drop_singleton_batch(model.train_targets)
+        z_train = model.train_features()
+        noise = model.likelihood.noise
+        chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
+        mean_train = model.mean_module(train_x)
+        if mean_train.dim() > 1 and mean_train.shape[0] == 1:
+            mean_train = mean_train.squeeze(0)
+        y_centered = train_y - mean_train
 
-            mean_chunks = []
-            lower_chunks = []
-            upper_chunks = []
-            for start in range(0, n_test, chunk_size):
-                chunk_x = test_x[start : start + chunk_size]
-                z_test = model.scaled_features(chunk_x)
-                f_mean = woodbury_predictive_mean(
-                    noise,
-                    z_train,
-                    z_test,
-                    y_centered,
-                    jitter=jitter,
-                    chol=chol,
-                    noise=noise_clamped,
-                )
-                f_mean = f_mean + model.mean_module(chunk_x)
-                f_var = woodbury_predictive_var_diag(
-                    noise,
-                    z_train,
-                    z_test,
-                    jitter=jitter,
-                    chol=chol,
-                    noise=noise_clamped,
-                )
-                obs_std = woodbury_predictive_obs_std(f_var, noise)
-                mean_chunks.append(f_mean)
-                lower_chunks.append(f_mean - 2 * obs_std)
-                upper_chunks.append(f_mean + 2 * obs_std)
-            mean = torch.cat(mean_chunks, dim=0)
-            lower = torch.cat(lower_chunks, dim=0)
-            upper = torch.cat(upper_chunks, dim=0)
-            stddev = (upper - lower) / 4.0
+        mean_chunks = []
+        lower_chunks = []
+        upper_chunks = []
+        f_var_chunks: list[torch.Tensor] = []
+        step = n_test if chunk_size <= 0 else chunk_size
+        for start in range(0, n_test, step):
+            chunk_x = test_x[start : start + step]
+            z_test = model.scaled_features(chunk_x)
+            f_mean = woodbury_predictive_mean(
+                noise,
+                z_train,
+                z_test,
+                y_centered,
+                jitter=jitter,
+                chol=chol,
+                noise=noise_clamped,
+            )
+            f_mean = f_mean + model.mean_module(chunk_x)
+            f_var = woodbury_predictive_var_diag(
+                noise,
+                z_train,
+                z_test,
+                jitter=jitter,
+                chol=chol,
+                noise=noise_clamped,
+            )
+            obs_std = woodbury_predictive_obs_std(f_var, noise)
+            mean_chunks.append(f_mean)
+            lower_chunks.append(f_mean - 2 * obs_std)
+            upper_chunks.append(f_mean + 2 * obs_std)
+            if return_latent_var:
+                f_var_chunks.append(f_var)
+        mean = torch.cat(mean_chunks, dim=0)
+        lower = torch.cat(lower_chunks, dim=0)
+        upper = torch.cat(upper_chunks, dim=0)
+        stddev = (upper - lower) / 4.0
 
     logger.info("RFF evaluation completed.")
+    if return_latent_var:
+        f_var_out = torch.cat(f_var_chunks, dim=0)
+        return mean, lower, upper, stddev, f_var_out
     return mean, lower, upper, stddev
 
 
@@ -197,11 +203,12 @@ def evaluate_rff_mt_gp_model(
         train_x = _drop_singleton_batch(model.train_inputs[0])
         train_y = _drop_singleton_batch(model.train_targets)
         n_train = train_x.shape[0]
-        omega_train = model.train_joint_features()
+        phi_train = model.train_spatial_features()
+        r_b = model.task_psd_factor()
         mean_train = model.mean_module(train_x)
         y_centered = flatten_multitask_targets(train_y - mean_train)
         task_noises = model.task_noises()
-        chol, noise = woodbury_factor_mt(task_noises, omega_train, n_train, jitter=jitter)
+        chol, noise = woodbury_factor_mt(task_noises, phi_train, r_b, jitter=jitter)
 
         step = n_test if chunk_size <= 0 else chunk_size
         mean_chunks: list[torch.Tensor] = []
@@ -210,11 +217,12 @@ def evaluate_rff_mt_gp_model(
         f_var_chunks: list[torch.Tensor] = []
         for start in range(0, n_test, step):
             chunk_x = test_x[start : start + step]
-            omega_test = model.joint_features(chunk_x)
+            phi_test = model.scaled_spatial_features(chunk_x)
             f_mean = woodbury_predictive_mean_mt(
                 task_noises,
-                omega_train,
-                omega_test,
+                phi_train,
+                phi_test,
+                r_b,
                 n_train,
                 y_centered,
                 jitter=jitter,
@@ -225,8 +233,9 @@ def evaluate_rff_mt_gp_model(
             f_var = unflatten_multitask_targets(
                 woodbury_predictive_var_diag_mt(
                     task_noises,
-                    omega_train,
-                    omega_test,
+                    phi_train,
+                    phi_test,
+                    r_b,
                     n_train,
                     jitter=jitter,
                     chol=chol,

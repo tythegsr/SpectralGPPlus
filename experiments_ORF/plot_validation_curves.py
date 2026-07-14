@@ -287,6 +287,13 @@ def plot_run(metrics: dict, save_dir: Path) -> list[Path]:
         _plot_best_init(metrics, by_init, best_init, best_path)
         written.append(best_path)
 
+        from gpplus.training.validation_hyperparam_plots import plot_hyperparameter_curves
+
+        hyper_path = save_dir / f"{stem}_hyperparams_best_init.png"
+        plotted = plot_hyperparameter_curves(metrics, by_init, best_init, hyper_path)
+        if plotted is not None:
+            written.append(plotted)
+
     return written
 
 

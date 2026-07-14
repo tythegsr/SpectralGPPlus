@@ -18,6 +18,7 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
 
     Target covariance (centered): Sigma = Lambda + Omega Omega^T with
     Lambda = I_n kron diag(task_noises) and Omega = Phi kron R_B.
+    Hot path forms M = I + (Phi^T Phi) kron (R_B^T D^{-1} R_B) without materializing Omega.
     """
 
     def __init__(
@@ -46,7 +47,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
         model: RFFMTGPR = self.model
         train_x = _drop_singleton_batch(model.train_inputs[0])
         n_train = train_x.shape[0]
-        omega = model.train_joint_features()
+        phi = model.train_spatial_features()
+        r_b = model.task_psd_factor()
         mean = model.mean_module(train_x)
         target_mt = _drop_singleton_batch(target)
         if target_mt.dim() == 1:
@@ -55,7 +57,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
         task_noises = model.task_noises()
         res = woodbury_marginal_log_likelihood_mt(
             task_noises,
-            omega,
+            phi,
+            r_b,
             n_train,
             y_centered,
             jitter=self.jitter,

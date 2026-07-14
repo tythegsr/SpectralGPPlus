@@ -98,8 +98,8 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)
         align_registered_priors(self)
-        self._train_omega_cache: torch.Tensor | None = None
-        self._train_omega_cache_key: tuple | None = None
+        self._train_phi_cache: torch.Tensor | None = None
+        self._train_phi_cache_key: tuple | None = None
 
     def to(self, *args, **kwargs):
         out = super().to(*args, **kwargs)
@@ -124,32 +124,38 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         return (id(x), tuple(ls), os_, tuple(map(tuple, task_key)), ver)
 
     def invalidate_feature_cache(self) -> None:
-        self._train_omega_cache = None
-        self._train_omega_cache_key = None
+        self._train_phi_cache = None
+        self._train_phi_cache_key = None
 
     def scaled_spatial_features(self, x: torch.Tensor) -> torch.Tensor:
         z = self._rff_kernel.featurize(x)
         z = _drop_singleton_batch(z)
         return z * self._output_scale()
 
+    def train_spatial_features(self) -> torch.Tensor:
+        """Cached train Φ for eval-mode Woodbury (never materializes Omega)."""
+        train_x = _drop_singleton_batch(self.train_inputs[0])
+        key = self._feature_cache_key(train_x)
+        if not self.training and self._train_phi_cache is not None and self._train_phi_cache_key == key:
+            return self._train_phi_cache
+        phi = self.scaled_spatial_features(train_x)
+        if not self.training:
+            self._train_phi_cache = phi
+            self._train_phi_cache_key = key
+        return phi
+
     def task_psd_factor(self) -> torch.Tensor:
         return task_psd_factor(self.covar_module.task_covar_module.covar_matrix)
 
     def joint_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Materialize Omega = Phi kron R_B (debug / tests only)."""
         phi = self.scaled_spatial_features(x)
         r_b = self.task_psd_factor()
         return build_icm_joint_features(phi, r_b)
 
     def train_joint_features(self) -> torch.Tensor:
-        train_x = _drop_singleton_batch(self.train_inputs[0])
-        key = self._feature_cache_key(train_x)
-        if not self.training and self._train_omega_cache is not None and self._train_omega_cache_key == key:
-            return self._train_omega_cache
-        omega = self.joint_features(train_x)
-        if not self.training:
-            self._train_omega_cache = omega
-            self._train_omega_cache_key = key
-        return omega
+        """Materialize train Omega (debug / tests only)."""
+        return self.joint_features(_drop_singleton_batch(self.train_inputs[0]))
 
     def task_noises(self) -> torch.Tensor:
         return self.likelihood.task_noises.clamp_min(1e-12)
@@ -170,16 +176,18 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         train_x = _drop_singleton_batch(self.train_inputs[0])
         train_y = _drop_singleton_batch(self.train_targets)
         n_train = train_x.shape[0]
-        omega_train = self.train_joint_features()
-        omega_test = self.joint_features(test_x)
+        phi_train = self.train_spatial_features()
+        phi_test = self.scaled_spatial_features(test_x)
+        r_b = self.task_psd_factor()
         mean_train = self.mean_module(train_x)
         y_centered = flatten_multitask_targets(train_y - mean_train)
         task_noises = self.task_noises()
 
         f_mean, f_var = woodbury_predict_mt(
             task_noises,
-            omega_train,
-            omega_test,
+            phi_train,
+            phi_test,
+            r_b,
             n_train,
             self.num_tasks,
             y_centered,

@@ -4109,16 +4109,31 @@ class ValidationMetricsCallback(Callback):
 
     @staticmethod
     def _format_compact_diag(val_diag: dict) -> str:
-        task_noises = val_diag.get("task_noises")
-        pred_std_min = val_diag.get("pred_std_min")
-        f_var_zero_frac = val_diag.get("f_var_zero_frac")
         parts: list[str] = []
+        task_noises = val_diag.get("task_noises")
         if task_noises is not None:
             parts.append(f"task_noises={task_noises}")
+        noise = val_diag.get("noise")
+        if noise is not None:
+            parts.append(f"noise={noise:.4g}")
+        pred_std_min = val_diag.get("pred_std_min")
         if pred_std_min is not None:
             parts.append(f"pred_std_min={pred_std_min}")
+        f_var_zero_frac = val_diag.get("f_var_zero_frac")
         if f_var_zero_frac is not None:
             parts.append(f"f_var_zero_frac={f_var_zero_frac:.4f}")
+        outputscale = val_diag.get("outputscale")
+        if outputscale is not None:
+            parts.append(f"outputscale={outputscale:.4g}")
+        lengthscales = val_diag.get("lengthscales")
+        if isinstance(lengthscales, (list, tuple)) and lengthscales:
+            if len(lengthscales) <= 4:
+                parts.append(f"lengthscales={lengthscales}")
+            else:
+                parts.append(
+                    f"lengthscales(n={len(lengthscales)})="
+                    f"[{float(lengthscales[0]):.4g},...,{float(lengthscales[-1]):.4g}]"
+                )
         return " ".join(parts)
 
     @staticmethod
@@ -4186,7 +4201,7 @@ class ValidationMetricsCallback(Callback):
         lines.append(
             f"  f_var_zero_frac={val_diag.get('f_var_zero_frac'):.4f}  "
             f"outputscale={val_diag.get('outputscale')}  "
-            f"lengthscale_median={val_diag.get('lengthscale_median')}"
+            f"lengthscales={val_diag.get('lengthscales')}"
         )
         lines.append(
             f"  max_point_nll={val_diag.get('max_point_nll')}  "

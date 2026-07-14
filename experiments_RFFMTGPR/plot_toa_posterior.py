@@ -209,6 +209,30 @@ def _truncated_lognormal_pdf(
     return pdf
 
 
+def _logit_normal_pdf(
+    x: np.ndarray,
+    mu_logit: float,
+    sigma_logit: float,
+    *,
+    x_min: float,
+    x_max: float | None,
+) -> np.ndarray:
+    """Logit-normal density on original scale for cos_i in [0, 1]."""
+    sigma_logit = max(float(sigma_logit), _PDF_STD_EPS)
+    pdf = np.zeros_like(x, dtype=np.float64)
+    mask = x >= x_min
+    if x_max is not None:
+        mask &= x <= x_max
+    c = x[mask]
+    c_safe = np.clip(c, 1e-12, 1.0 - 1e-12)
+    z = np.log(c_safe / (1.0 - c_safe))
+    z_score = (z - mu_logit) / sigma_logit
+    pdf[mask] = np.exp(-0.5 * z_score * z_score) / (
+        sigma_logit * math.sqrt(2.0 * math.pi) * c_safe * (1.0 - c_safe)
+    )
+    return pdf
+
+
 def _validate_original_scale_targets(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -345,10 +369,13 @@ def _plot_posterior_density_axis(
     rel_metrics: dict[str, float | int] | None,
     rel_tolerance: float,
     log_grain: bool = False,
+    logit_cos: bool = False,
     y_pred_mean: float | None = None,
     y_pred_mode: float | None = None,
     log_mu: float | None = None,
     log_sigma: float | None = None,
+    logit_mu: float | None = None,
+    logit_sigma: float | None = None,
     pdf_mode: Literal["gaussian", "tabpfn_bar"] = "gaussian",
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -381,6 +408,19 @@ def _plot_posterior_density_axis(
             train_scale_log=tabpfn_train_scale_log,
         )
         density_label = "TabPFN posterior"
+    elif logit_cos and task_key == TASK_COS:
+        if (
+            logit_mu is not None
+            and logit_sigma is not None
+            and np.isfinite(logit_mu)
+            and np.isfinite(logit_sigma)
+        ):
+            mu_logit, sigma_logit = float(logit_mu), max(float(logit_sigma), _PDF_STD_EPS)
+        else:
+            mu_logit = math.log(max(y_pred, 1e-12) / max(1.0 - y_pred, 1e-12))
+            sigma_logit = max((upper - lower) / (4.0 * max(y_pred * (1.0 - y_pred), 1e-12)), _PDF_STD_EPS)
+        pdf = _logit_normal_pdf(grid, mu_logit, sigma_logit, x_min=x_min, x_max=x_max)
+        density_label = "posterior"
     elif log_grain and task_key == TASK_GRAIN:
         if log_mu is not None and log_sigma is not None and np.isfinite(log_mu) and np.isfinite(log_sigma):
             mu_log, sigma_log = float(log_mu), max(float(log_sigma), _PDF_STD_EPS)
@@ -393,7 +433,7 @@ def _plot_posterior_density_axis(
         density_label = "posterior"
 
     fmt = lambda v: _format_posterior_value(task_key, v)
-    ci_label = f"95% CI = [{fmt(lower)}, {fmt(upper)}]"
+    ci_label = f"95% CI = [{fmt(ci_lo)}, {fmt(ci_hi)}]"
     true_label = f"true = {fmt(y_true)}"
 
     tabpfn_mean = tabpfn_median = tabpfn_mode = None
@@ -406,6 +446,8 @@ def _plot_posterior_density_axis(
 
     if use_tabpfn and tabpfn_mean is not None and np.isfinite(tabpfn_mean):
         point_label = f"mean = {fmt(tabpfn_mean)}"
+    elif logit_cos and task_key == TASK_COS:
+        point_label = f"median = {fmt(y_pred)}"
     elif log_grain and task_key == TASK_GRAIN:
         point_label = f"median = {fmt(y_pred)}"
     else:
@@ -453,6 +495,14 @@ def _plot_posterior_density_axis(
             )
     else:
         ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
+    if y_pred_mean is not None and logit_cos and task_key == TASK_COS:
+        ax.axvline(
+            y_pred_mean,
+            color="C1",
+            linestyle=":",
+            linewidth=1.5,
+            label=f"mean = {fmt(y_pred_mean)}",
+        )
     if y_pred_mean is not None and log_grain and task_key == TASK_GRAIN:
         ax.axvline(
             y_pred_mean,
@@ -515,10 +565,13 @@ def save_toa_posterior_figure(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    logit_cos: bool = False,
     y_pred_mean: np.ndarray | None = None,
     y_pred_mode: np.ndarray | None = None,
     log_mu: np.ndarray | None = None,
     log_sigma: np.ndarray | None = None,
+    logit_mu: np.ndarray | None = None,
+    logit_sigma: np.ndarray | None = None,
     pdf_mode: PdfMode = "gaussian",
     tabpfn_logits_row: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -568,6 +621,10 @@ def save_toa_posterior_figure(
         upper=float(upper[0]),
         rel_metrics=rel_cos,
         rel_tolerance=rel_tolerance,
+        logit_cos=logit_cos,
+        y_pred_mean=float(y_pred_mean[0]) if y_pred_mean is not None else None,
+        logit_mu=float(logit_mu[0]) if logit_mu is not None else None,
+        logit_sigma=float(logit_sigma[0]) if logit_sigma is not None else None,
         pdf_mode=cos_pdf_mode,
         tabpfn_logits=tabpfn_logits_row[0] if tabpfn_logits_row is not None else None,
         tabpfn_borders=tabpfn_borders[0] if tabpfn_borders is not None else None,
@@ -642,10 +699,13 @@ def plot_toa_posterior_figures(
     rel_tolerance: float = 0.01,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    logit_cos: bool = False,
     y_pred_mean: np.ndarray | None = None,
     y_pred_mode: np.ndarray | None = None,
     log_mu: np.ndarray | None = None,
     log_sigma: np.ndarray | None = None,
+    logit_mu: np.ndarray | None = None,
+    logit_sigma: np.ndarray | None = None,
     pdf_mode: PdfMode = "gaussian",
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -676,10 +736,13 @@ def plot_toa_posterior_figures(
                 rel_tolerance=rel_tolerance,
                 wavelength_nm=wl,
                 log_grain=log_grain,
+                logit_cos=logit_cos,
                 y_pred_mean=y_pred_mean[i] if y_pred_mean is not None else None,
                 y_pred_mode=y_pred_mode[i] if y_pred_mode is not None else None,
                 log_mu=log_mu[i] if log_mu is not None else None,
                 log_sigma=log_sigma[i] if log_sigma is not None else None,
+                logit_mu=logit_mu[i] if logit_mu is not None else None,
+                logit_sigma=logit_sigma[i] if logit_sigma is not None else None,
                 pdf_mode=pdf_mode,
                 tabpfn_logits_row=logits_row,
                 tabpfn_borders=tabpfn_borders,
@@ -707,10 +770,13 @@ def save_predictions_npz(
     example_indices: list[int] | None = None,
     wavelength_nm: np.ndarray | None = None,
     log_grain: bool = False,
+    logit_cos: bool = False,
     y_pred_mean: np.ndarray | None = None,
     y_pred_mode: np.ndarray | None = None,
     log_mu: np.ndarray | None = None,
     log_sigma: np.ndarray | None = None,
+    logit_mu: np.ndarray | None = None,
+    logit_sigma: np.ndarray | None = None,
     posterior_pdf_mode: str | None = None,
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -737,6 +803,7 @@ def save_predictions_npz(
         wavelength_nm=wavelength_nm,
         example_indices=np.array(example_indices if example_indices is not None else [], dtype=np.int64),
         log_grain=np.array(log_grain),
+        logit_cos=np.array(logit_cos),
     )
     if y_pred_mean is not None:
         npz_kwargs["y_pred_mean"] = y_pred_mean
@@ -746,6 +813,10 @@ def save_predictions_npz(
         npz_kwargs["log_mu"] = log_mu
     if log_sigma is not None:
         npz_kwargs["log_sigma"] = log_sigma
+    if logit_mu is not None:
+        npz_kwargs["logit_mu"] = logit_mu
+    if logit_sigma is not None:
+        npz_kwargs["logit_sigma"] = logit_sigma
     if posterior_pdf_mode is not None:
         npz_kwargs["posterior_pdf_mode"] = np.array(posterior_pdf_mode)
     if tabpfn_logits is not None:
@@ -779,6 +850,7 @@ def plot_posterior_from_npz(
     tol = float(rel_tolerance if rel_tolerance is not None else data.get("rel_tolerance", 0.01))
     wl = data["wavelength_nm"] if "wavelength_nm" in data else wavelength_axis(x_test_orig.shape[-1])
     log_grain = bool(data["log_grain"].item()) if "log_grain" in data else False
+    logit_cos = bool(data["logit_cos"].item()) if "logit_cos" in data else False
     posterior_pdf_mode = (
         str(data["posterior_pdf_mode"].item()) if "posterior_pdf_mode" in data else None
     )
@@ -789,6 +861,8 @@ def plot_posterior_from_npz(
     y_pred_mode = data["y_pred_mode"] if "y_pred_mode" in data else None
     log_mu = data["log_mu"] if "log_mu" in data else None
     log_sigma = data["log_sigma"] if "log_sigma" in data else None
+    logit_mu = data["logit_mu"] if "logit_mu" in data else None
+    logit_sigma = data["logit_sigma"] if "logit_sigma" in data else None
 
     from mtgpr_experiment_utils import compute_relative_error_metrics
 
@@ -822,10 +896,13 @@ def plot_posterior_from_npz(
         rel_tolerance=tol,
         wavelength_nm=wl,
         log_grain=log_grain,
+        logit_cos=logit_cos,
         y_pred_mean=y_pred_mean,
         y_pred_mode=y_pred_mode,
         log_mu=log_mu,
         log_sigma=log_sigma,
+        logit_mu=logit_mu,
+        logit_sigma=logit_sigma,
         pdf_mode=pdf_mode,
         tabpfn_logits=tabpfn_logits,
         tabpfn_borders=tabpfn_borders,

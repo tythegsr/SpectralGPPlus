@@ -1,4 +1,4 @@
-"""TOA benchmark with joint GPPlus RFFMTGPR (Woodbury inference)."""
+"""TOA benchmark with GPPlus exact GP (dense inference)."""
 
 from __future__ import annotations
 
@@ -9,69 +9,62 @@ from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_MTGPR_DIR = Path(__file__).resolve().parent
+_GP_DIR = Path(__file__).resolve().parent
+_MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _GP_DIR)
 
 import gpplus
-from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
-from toa_mtgpr_base import run_toa_mtgpr
+from gp_experiment_utils import DEFAULT_ADAM_KWARGS
+from toa_gp_base import run_toa_gp
+
+
+def run_toa_gp_entry(**kwargs) -> dict:
+    return run_toa_gp(**kwargs)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="TOA dataset with joint GPPlus RFFMTGPR (Woodbury)")
-    parser.add_argument("--n-train", type=int, default=16000)
-    parser.add_argument("--n-test", type=int, default=5000)
+    parser = argparse.ArgumentParser(description="TOA dataset with GPPlus exact GP (dense)")
     parser.add_argument(
-        "--rff-sampling",
-        type=str,
-        default="sorf",
-        choices=("rff", "orf", "sorf"),
-        help="Spectral feature sampling: RFF, ORF, or SORF",
-    )
-    parser.add_argument(
-        "--num-rff",
+        "--n-train",
         type=int,
-        default=800,
-        help="D (RFF/ORF/SORF frequencies); default min(512, n_train//3)",
+        default=1600,
+        help="Training points (exact GP is O(n^3); default 2000)",
     )
-    parser.add_argument("--num-inits", type=int, default=1)
+    parser.add_argument("--n-test", type=int, default=5000)
+    parser.add_argument("--num-inits", type=int, default=4)
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=2000,
+        default=1,
         help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.1,
-        help="Adam learning rate (only when --num-epochs > 1; default matches DEFAULT_ADAM_KWARGS)",
+        default=0.01,
+        help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float32",
+        default="float64",
         choices=("float32", "float64"),
-        help=(
-            "Tensor dtype for model parameters and features (default: float64). "
-            "Woodbury Cholesky/solve runs in float64 when this is float32."
-        ),
     )
     parser.add_argument(
         "--predict-chunk-size",
         type=int,
         default=512,
-        help="Test points per Woodbury predict chunk (0 = single batch)",
+        help="Validation points per predict chunk during training callbacks",
     )
     parser.add_argument(
         "--n-jobs",
@@ -85,7 +78,7 @@ if __name__ == "__main__":
         "--save-path",
         type=str,
         default=None,
-        help="Results directory (default: experiments_RFFMTGPR/results/toa_{rff_sampling})",
+        help="Results directory (default: experiments_GP/results/toa_gp)",
     )
     parser.add_argument(
         "--monitor-validation",
@@ -114,7 +107,6 @@ if __name__ == "__main__":
         dest="plot_posterior",
         help="Generate posterior diagnostic plots (default: True)",
     )
-
     parser.add_argument(
         "--rel-tolerance",
         type=float,
@@ -142,7 +134,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--train-subset",
         type=str,
-        default="maximin",
+        default="random",
         choices=("random", "maximin"),
         help=(
             "How to choose training points within the fixed train pool: "
@@ -156,15 +148,9 @@ if __name__ == "__main__":
         help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
     )
     parser.add_argument(
-        "--logit-cos",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
-    )
-    parser.add_argument(
-        "--no-save-checkpoint",
+        "--no-logit-cos",
         action="store_true",
-        help="Skip saving checkpoint_*.pt (includes scaled training data; can be ~100MB+)",
+        help="Disable logit(cos_i) target transform (default: logit cos_i on [0,1] before Y standardization)",
     )
     parser.add_argument(
         "--drop-columns",
@@ -183,7 +169,7 @@ if __name__ == "__main__":
         "--noise-var-fraction",
         type=float,
         default=0.25,
-        help="Scale empirical per-task y variance for noise prior center (default: 0.01)",
+        help="Scale empirical per-task y variance for noise prior center",
     )
     parser.add_argument(
         "--noise-prior-log-scale",
@@ -217,15 +203,6 @@ if __name__ == "__main__":
         help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
     )
     parser.add_argument(
-        "--correct-sorf",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Use true FWHT for SORF (--correct-sorf) vs legacy aliased FWHT "
-            "(default / --no-correct-sorf; matches July9 TOA wins)"
-        ),
-    )
-    parser.add_argument(
         "--no-training-log",
         action="store_true",
         help="Disable per-epoch train loss logging (Adam only)",
@@ -234,7 +211,7 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = f"experiments_RFFMTGPR/results/July13/toa_{args.rff_sampling}"
+        save_path = "experiments_GP/results/toa_gp"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
@@ -264,11 +241,9 @@ if __name__ == "__main__":
     if args.drop_columns:
         drop_columns = [int(x.strip()) for x in args.drop_columns.split(",") if x.strip()]
 
-    run_toa_mtgpr(
+    run_toa_gp(
         n_train=args.n_train,
         n_test=args.n_test,
-        num_rff=args.num_rff,
-        rff_sampling=args.rff_sampling,
         num_inits=args.num_inits,
         num_epochs=args.num_epochs,
         optimizer_kwargs=optimizer_kwargs,
@@ -290,9 +265,8 @@ if __name__ == "__main__":
         parallel_verbose=args.parallel_verbose,
         training_verbose=not args.no_training_log,
         log_every_n_epochs=args.log_every_n_epochs,
-        save_checkpoint=not args.no_save_checkpoint,
         log_grain=not args.no_log_grain,
-        logit_cos=args.logit_cos,
+        logit_cos=not args.no_logit_cos,
         drop_columns=drop_columns,
         response_noise_prior=args.response_noise_prior,
         noise_var_fraction=args.noise_var_fraction,

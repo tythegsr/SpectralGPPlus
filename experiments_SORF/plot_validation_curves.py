@@ -270,6 +270,8 @@ def _plot_best_init(
 
 def plot_run(metrics: dict, save_dir: Path) -> list[Path]:
     """Generate validation curve PNGs for one result JSON dict."""
+    from gpplus.training.validation_hyperparam_plots import plot_hyperparameter_curves
+
     by_init = _extract_validation_block(metrics)
     if not by_init:
         return []
@@ -286,6 +288,11 @@ def plot_run(metrics: dict, save_dir: Path) -> list[Path]:
         best_path = save_dir / f"{stem}_val_best_init.png"
         _plot_best_init(metrics, by_init, best_init, best_path)
         written.append(best_path)
+
+        hyper_path = save_dir / f"{stem}_hyperparams_best_init.png"
+        plotted = plot_hyperparameter_curves(metrics, by_init, best_init, hyper_path)
+        if plotted is not None:
+            written.append(plotted)
 
     return written
 

@@ -38,21 +38,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-train", type=int, default=49000)
     parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--n-components", type=int, default=3, help="PCA dimension p")
+    parser.add_argument("--n-components", type=int, default=20, help="PCA dimension p")
     parser.add_argument(
         "--num-rff",
         type=int,
-        default=1600,
+        default=800,
         help="D (RFF frequencies); default: 1600",
     )
     parser.add_argument(
         "--rff-sampling",
         type=str,
-        default="orf",
+        default="sorf",
         choices=RFF_SAMPLING_CHOICES,
         help="Spectral sampling: rff, orf, or sorf",
     )
-    parser.add_argument("--num-inits", type=int, default=4)
+    parser.add_argument("--num-inits", type=int, default=1)
     parser.add_argument(
         "--num-epochs",
         type=int,
@@ -79,14 +79,19 @@ if __name__ == "__main__":
         default=512,
         help="Test points per Woodbury predict chunk (0 = single batch)",
     )
-    parser.add_argument("--n-jobs", type=int, default=1)
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Parallel hyperparameter inits (-1 = all cores)",
+    )
     parser.add_argument("--ard", action="store_true", default=True)
     parser.add_argument("--no-ard", action="store_false", dest="ard")
     parser.add_argument(
         "--save-path",
         type=str,
         default=None,
-        help="Results directory (default: experiments_PCA/results/toa_pca_{rff|orf|sorf})",
+        help="Results directory (default: experiments_PCA/results/July13/toa_pca_{rff|orf|sorf})",
     )
     parser.add_argument(
         "--monitor-validation",
@@ -101,20 +106,80 @@ if __name__ == "__main__":
         "--no-monitor-validation",
         action="store_false",
         dest="monitor_validation",
+        help="Disable validation monitoring during training",
     )
-    parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip validation curve and posterior plots after saving JSON",
+    )
     parser.add_argument(
         "--plot-posterior",
         action="store_true",
         default=True,
         dest="plot_posterior",
+        help="Generate posterior diagnostic plots (default: True)",
     )
-    parser.add_argument("--rel-tolerance", type=float, default=0.01)
-    parser.add_argument("--posterior-n-examples", type=int, default=20)
-    parser.add_argument("--posterior-example-indices", type=str, default=None)
-    parser.add_argument("--data-path", type=str, default=None)
-    parser.add_argument("--no-log-grain", action="store_true")
-    parser.add_argument("--no-save-checkpoint", action="store_true")
+    parser.add_argument(
+        "--rel-tolerance",
+        type=float,
+        default=0.01,
+        help="Relative error tolerance for pct_within metric (default: 0.01 = 1%%)",
+    )
+    parser.add_argument(
+        "--posterior-n-examples",
+        type=int,
+        default=20,
+        help="Number of test spectra to plot as 3-panel posterior figures",
+    )
+    parser.add_argument(
+        "--posterior-example-indices",
+        type=str,
+        default=None,
+        help="Comma-separated test row indices to plot (overrides --posterior-n-examples)",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        help="Path to toa_data_flattened.npz (default: repo root)",
+    )
+    parser.add_argument(
+        "--train-subset",
+        type=str,
+        default="maximin",
+        choices=("random", "maximin"),
+        help=(
+            "How to choose training points within the fixed train pool: "
+            "'random' = pool prefix; "
+            "'maximin' = greedy farthest-point in (cos, grain)"
+        ),
+    )
+    parser.add_argument(
+        "--no-log-grain",
+        action="store_true",
+        help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
+    )
+    parser.add_argument(
+        "--logit-cos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
+    )
+    parser.add_argument(
+        "--correct-sorf",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use true FWHT for SORF (--correct-sorf) vs legacy aliased FWHT "
+            "(default / --no-correct-sorf; only applies when --rff-sampling=sorf)"
+        ),
+    )
+    parser.add_argument(
+        "--no-save-checkpoint",
+        action="store_true",
+        help="Skip saving checkpoint_*.pt (includes scaled training data; can be ~100MB+)",
+    )
     parser.add_argument(
         "--drop-columns",
         type=str,
@@ -127,19 +192,55 @@ if __name__ == "__main__":
         default="randomized",
         choices=("auto", "full", "randomized", "arpack"),
     )
-    parser.add_argument("--response-noise-prior", action="store_true", default=False)
-    parser.add_argument("--noise-var-fraction", type=float, default=0.25)
-    parser.add_argument("--noise-prior-log-scale", type=float, default=0.5)
+    parser.add_argument(
+        "--response-noise-prior",
+        action="store_true",
+        default=False,
+        dest="response_noise_prior",
+        help="Enable LogNormal per-task noise prior from training response columns",
+    )
+    parser.add_argument(
+        "--noise-var-fraction",
+        type=float,
+        default=0.25,
+        help="Scale empirical per-task y variance for noise prior center",
+    )
+    parser.add_argument(
+        "--noise-prior-log-scale",
+        type=float,
+        default=0.5,
+        help="LogNormal log-scale spread per task for response noise prior (default: 0.5)",
+    )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        help="gpplus log level (default: INFO)",
     )
-    parser.add_argument("--log-file", type=str, default=None)
-    parser.add_argument("--parallel-verbose", type=int, default=10)
-    parser.add_argument("--log-every-n-epochs", type=int, default=10)
-    parser.add_argument("--no-training-log", action="store_true")
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Write gpplus logs to this file in addition to console",
+    )
+    parser.add_argument(
+        "--parallel-verbose",
+        type=int,
+        default=10,
+        help="joblib parallel progress verbosity (0=quiet, 10=status updates; default: 10)",
+    )
+    parser.add_argument(
+        "--log-every-n-epochs",
+        type=int,
+        default=10,
+        help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
+    )
+    parser.add_argument(
+        "--no-training-log",
+        action="store_true",
+        help="Disable per-epoch train loss logging (Adam only)",
+    )
     args = parser.parse_args()
 
     save_path = args.save_path
@@ -196,11 +297,14 @@ if __name__ == "__main__":
         posterior_n_examples=args.posterior_n_examples,
         posterior_example_indices=posterior_example_indices,
         data_path=args.data_path,
+        train_subset=args.train_subset,
         parallel_verbose=args.parallel_verbose,
         training_verbose=not args.no_training_log,
         log_every_n_epochs=args.log_every_n_epochs,
         save_checkpoint=not args.no_save_checkpoint,
         log_grain=not args.no_log_grain,
+        logit_cos=args.logit_cos,
+        correct_sorf=args.correct_sorf,
         drop_columns=drop_columns,
         pca_svd_solver=args.pca_svd_solver,
         response_noise_prior=args.response_noise_prior,

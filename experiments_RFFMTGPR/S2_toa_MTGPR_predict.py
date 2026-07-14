@@ -63,6 +63,8 @@ def predict_from_checkpoint(
     np.ndarray | None,
     np.ndarray | None,
     np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray | None,
     float,
 ]:
     """Load test data from checkpoint split metadata, predict, return original-scale arrays."""
@@ -115,6 +117,7 @@ def predict_from_checkpoint(
         y_scaler=bundle.y_scaler,
         standardize_y=bundle.standardize_y,
         log_grain=bundle.log_grain,
+        logit_cos=bundle.logit_cos,
         extended=True,
     )
     y_test_eval = y_test.cpu()
@@ -129,6 +132,8 @@ def predict_from_checkpoint(
     )
     log_mu_np = inv.log_mu.numpy() if inv.log_mu is not None else None
     log_sigma_np = inv.log_sigma.numpy() if inv.log_sigma is not None else None
+    logit_mu_np = inv.logit_mu.numpy() if inv.logit_mu is not None else None
+    logit_sigma_np = inv.logit_sigma.numpy() if inv.logit_sigma is not None else None
 
     return (
         y_true_np,
@@ -142,6 +147,8 @@ def predict_from_checkpoint(
         y_pred_mode_np,
         log_mu_np,
         log_sigma_np,
+        logit_mu_np,
+        logit_sigma_np,
         pred_time,
     )
 
@@ -201,7 +208,7 @@ def main() -> None:
     print(f"Loaded checkpoint: {bundle.title}")
     print(f"  n_train={bundle.n_train}, n_test={bundle.n_test}, n_val={bundle.n_val}")
     print(f"  best_train_loss={bundle.best_train_loss:.4f}")
-    print(f"  log_grain={bundle.log_grain}")
+    print(f"  log_grain={bundle.log_grain}, logit_cos={bundle.logit_cos}")
 
     (
         y_true_np,
@@ -215,6 +222,8 @@ def main() -> None:
         y_pred_mode_np,
         log_mu_np,
         log_sigma_np,
+        logit_mu_np,
+        logit_sigma_np,
         pred_time,
     ) = predict_from_checkpoint(bundle, predict_chunk_size=args.predict_chunk_size)
 
@@ -249,6 +258,7 @@ def main() -> None:
             "n_val": bundle.n_val,
             "task_names": list(TASK_NAMES),
             "log_grain": bundle.log_grain,
+            "logit_cos": bundle.logit_cos,
             "rel_tolerance": bundle.rel_tolerance,
             "best_train_loss": bundle.best_train_loss,
             "Prediction_Time": pred_time,
@@ -292,10 +302,13 @@ def main() -> None:
                 example_indices=example_indices,
                 wavelength_nm=wavelength_axis(x_test_orig_np.shape[-1]),
                 log_grain=bundle.log_grain,
-                y_pred_mean=y_pred_mean_np if bundle.log_grain else None,
+                logit_cos=bundle.logit_cos,
+                y_pred_mean=y_pred_mean_np if (bundle.log_grain or bundle.logit_cos) else None,
                 y_pred_mode=y_pred_mode_np if bundle.log_grain else None,
                 log_mu=log_mu_np if bundle.log_grain else None,
                 log_sigma=log_sigma_np if bundle.log_grain else None,
+                logit_mu=logit_mu_np if bundle.logit_cos else None,
+                logit_sigma=logit_sigma_np if bundle.logit_cos else None,
             )
             print(f"Saved predictions to {out_npz}")
 
@@ -330,10 +343,13 @@ def main() -> None:
                 rel_tolerance=bundle.rel_tolerance,
                 wavelength_nm=wavelength_axis(x_test_orig_np.shape[-1]),
                 log_grain=bundle.log_grain,
-                y_pred_mean=y_pred_mean_np if bundle.log_grain else None,
+                logit_cos=bundle.logit_cos,
+                y_pred_mean=y_pred_mean_np if (bundle.log_grain or bundle.logit_cos) else None,
                 y_pred_mode=y_pred_mode_np if bundle.log_grain else None,
                 log_mu=log_mu_np if bundle.log_grain else None,
                 log_sigma=log_sigma_np if bundle.log_grain else None,
+                logit_mu=logit_mu_np if bundle.logit_cos else None,
+                logit_sigma=logit_sigma_np if bundle.logit_cos else None,
             )
             for plot_path in post_paths:
                 print(f"Saved posterior plot to {plot_path}")

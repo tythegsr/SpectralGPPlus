@@ -84,6 +84,7 @@ class ToaMtgprBundle:
     rel_tolerance: float
     dtype: torch.dtype
     log_grain: bool = False
+    logit_cos: bool = True
     input_column_indices: torch.Tensor | None = None
 
 
@@ -112,6 +113,7 @@ def save_toa_mtgpr_checkpoint(
     dtype: torch.dtype,
     model_config: dict[str, Any],
     log_grain: bool = False,
+    logit_cos: bool = True,
     input_column_indices: torch.Tensor | None = None,
 ) -> Path:
     path = Path(path)
@@ -134,6 +136,7 @@ def save_toa_mtgpr_checkpoint(
         "x_standardize_method": x_standardize_method,
         "standardize_y": standardize_y,
         "log_grain": log_grain,
+        "logit_cos": logit_cos,
         "input_column_indices": input_column_indices.detach().cpu().to(torch.int64),
         "x_scaler": scaler_to_dict(x_scaler),
         "y_scaler": scaler_to_dict(y_scaler),
@@ -204,6 +207,7 @@ def load_toa_mtgpr_checkpoint(path: str | Path, device: str = "cpu") -> ToaMtgpr
         rel_tolerance=float(payload.get("rel_tolerance", 0.01)),
         dtype=dtype,
         log_grain=bool(payload.get("log_grain", False)),
+        logit_cos=bool(payload.get("logit_cos", True)),
         input_column_indices=input_column_indices,
     )
 

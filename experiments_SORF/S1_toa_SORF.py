@@ -47,17 +47,17 @@ if __name__ == "__main__":
         default=None,
         help="Alias for --num-rff (backward compatibility)",
     )
-    parser.add_argument("--num-inits", type=int, default=16)
+    parser.add_argument("--num-inits", type=int, default=1)
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=200,
+        default=1000,
         help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=1.0,
+        default=0.1,
         help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -140,9 +140,35 @@ if __name__ == "__main__":
         help="Path to toa_data_flattened.npz (default: repo root)",
     )
     parser.add_argument(
+        "--train-subset",
+        type=str,
+        default="maximin",
+        choices=("random", "maximin"),
+        help=(
+            "How to choose training points within the fixed train pool: "
+            "'random' = pool prefix (default); "
+            "'maximin' = greedy farthest-point in (cos, grain)"
+        ),
+    )
+    parser.add_argument(
         "--no-log-grain",
         action="store_true",
         help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
+    )
+    parser.add_argument(
+        "--logit-cos",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
+    )
+    parser.add_argument(
+        "--correct-sorf",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use true FWHT for SORF (--correct-sorf) vs legacy aliased FWHT "
+            "(default / --no-correct-sorf; matches July9 TOA wins)"
+        ),
     )
     parser.add_argument(
         "--no-save-checkpoint",
@@ -208,7 +234,7 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = "experiments_SORF/results/toa_sorf_16inits"
+        save_path = f"experiments_SORF/results/July11_monitoring_maximin/toa_sorf_{args.num_inits}inits_no_logit_cos_m1_std1_ls"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
@@ -260,11 +286,14 @@ if __name__ == "__main__":
         posterior_n_examples=args.posterior_n_examples,
         posterior_example_indices=posterior_example_indices,
         data_path=args.data_path,
+        train_subset=args.train_subset,
         parallel_verbose=args.parallel_verbose,
         training_verbose=not args.no_training_log,
         log_every_n_epochs=args.log_every_n_epochs,
         save_checkpoint=not args.no_save_checkpoint,
         log_grain=not args.no_log_grain,
+        logit_cos=args.logit_cos,
+        correct_sorf=args.correct_sorf,
         drop_columns=drop_columns,
         response_noise_prior=args.response_noise_prior,
         noise_var_fraction=args.noise_var_fraction,
