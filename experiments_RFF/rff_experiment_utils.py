@@ -220,6 +220,8 @@ def make_validation_callback(
     log_every_n_epochs: int = 1,
     log_every_n_iters: int = 10,
     chunk_size: int = 512,
+    woodbury_form: str | None = None,
+    woodbury_mt_method: str | None = None,
 ):
     """Build ValidationMetricsCallback. Set verbose=False to silence per-epoch val prints."""
     from gpplus.training.callbacks import ValidationMetricsCallback
@@ -232,6 +234,8 @@ def make_validation_callback(
         log_every_n_iters=log_every_n_iters,
         num_inits=num_inits,
         chunk_size=chunk_size,
+        woodbury_form=woodbury_form,
+        woodbury_mt_method=woodbury_mt_method,
     )
 
 

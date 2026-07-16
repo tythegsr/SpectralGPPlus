@@ -923,6 +923,63 @@ def _collect_rff_hyperparams(model) -> Dict[str, object]:
     return out
 
 
+def _collect_lrnn_hyperparams(model) -> Dict[str, object]:
+    """Scalars from LRNNGPR safe for JSON logging (no lengthscale / outputscale)."""
+    out: Dict[str, object] = {}
+    noise = model.likelihood.noise.detach().cpu()
+    out["noise"] = float(noise.reshape(-1)[0].item()) if noise.numel() else float("nan")
+
+    raw_noise = getattr(model.likelihood, "raw_noise", None)
+    if raw_noise is not None:
+        out["raw_noise"] = float(raw_noise.detach().cpu().reshape(-1)[0].item())
+
+    out["feature_rank"] = int(getattr(model, "feature_rank", 0))
+    out["hidden_dims"] = list(getattr(model, "hidden_dims", ()))
+    out["variance_correction"] = bool(getattr(model, "variance_correction", True))
+
+    mean_module = getattr(model, "mean_module", None)
+    if mean_module is not None and hasattr(mean_module, "constant"):
+        out["mean_constant"] = float(mean_module.constant.detach().cpu().reshape(-1)[0].item())
+
+    return out
+
+
+def _lrnn_validation_diagnostics(
+    model,
+    val_y: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    f_var: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+    nll_spike_threshold: float = 10.0,
+) -> Dict[str, object]:
+    """Compact validation diagnostics for single-task LRNNGPR."""
+    hyperparams = _collect_lrnn_hyperparams(model)
+    pred_std_min = float(pred_std.min().item())
+    f_var_flat = f_var.reshape(-1)
+    f_var_zero_frac = float((f_var_flat <= eps).float().mean().item())
+
+    pred_std_2d = pred_std.unsqueeze(-1) if pred_std.dim() == 1 else pred_std
+    f_var_2d = f_var.unsqueeze(-1) if f_var.dim() == 1 else f_var
+    pred_std_stats = _tensor_summary_stats(pred_std_2d, dim=0, eps=eps)
+    f_var_stats = _tensor_summary_stats(f_var_2d.clamp_min(0.0), dim=0, eps=eps)
+
+    point_nll = _gaussian_predictive_nll_per_point(val_y, pred_mean, pred_std, eps=eps)
+    max_point_nll = float(point_nll.max().item()) if point_nll.numel() else float("nan")
+    frac_nll_above = float((point_nll > nll_spike_threshold).float().mean().item())
+
+    return {
+        "pred_std_min": pred_std_min,
+        "f_var_zero_frac": f_var_zero_frac,
+        "pred_std_stats": pred_std_stats,
+        "f_var_stats": f_var_stats,
+        "max_point_nll": max_point_nll,
+        "frac_nll_above_10": frac_nll_above,
+        **hyperparams,
+    }
+
+
 def _collect_rff_mt_hyperparams(model) -> Dict[str, object]:
     """Scalars from RFFMTGPR safe for JSON logging."""
     out: Dict[str, object] = {}
@@ -1023,6 +1080,8 @@ def compute_validation_metrics(
     *,
     cholesky_jitter: Optional[float] = None,
     chunk_size: int = 512,
+    woodbury_form: Optional[str] = None,
+    woodbury_mt_method: Optional[str] = None,
 ) -> Dict[str, object]:
     """
     Compute validation metrics on held-out points (not used for training).
@@ -1041,12 +1100,15 @@ def compute_validation_metrics(
     try:
         from ..models.rff_gpr import RFFGPR
         from ..models.rff_mtgpr import RFFMTGPR
+        from ..models.lrnn_gpr import LRNNGPR
 
         is_rff = isinstance(model, RFFGPR)
         is_rff_mt = isinstance(model, RFFMTGPR)
+        is_lrnn = isinstance(model, LRNNGPR)
     except ImportError:
         is_rff = False
         is_rff_mt = False
+        is_lrnn = False
 
     try:
         with torch.no_grad():
@@ -1055,10 +1117,24 @@ def compute_validation_metrics(
 
                 if hasattr(model, "invalidate_feature_cache"):
                     model.invalidate_feature_cache()
+                eval_kwargs = {"jitter": jitter, "chunk_size": chunk_size, "return_latent_var": True}
+                if woodbury_mt_method is not None:
+                    eval_kwargs["method"] = woodbury_mt_method
                 pred_mean, _, _, pred_std, f_var = evaluate_rff_mt_gp_model(
-                    model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
+                    model, val_x, **eval_kwargs
                 )
                 val_diag = _rff_mt_validation_diagnostics(
+                    model, val_y, pred_mean, pred_std, f_var
+                )
+            elif is_lrnn:
+                from .eval import evaluate_lrnn_gp_model
+
+                if hasattr(model, "invalidate_feature_cache"):
+                    model.invalidate_feature_cache()
+                pred_mean, _, _, pred_std, f_var = evaluate_lrnn_gp_model(
+                    model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
+                )
+                val_diag = _lrnn_validation_diagnostics(
                     model, val_y, pred_mean, pred_std, f_var
                 )
             elif is_rff:
@@ -1066,8 +1142,11 @@ def compute_validation_metrics(
 
                 if hasattr(model, "invalidate_feature_cache"):
                     model.invalidate_feature_cache()
+                eval_kwargs = {"jitter": jitter, "chunk_size": chunk_size, "return_latent_var": True}
+                if woodbury_form is not None:
+                    eval_kwargs["woodbury_form"] = woodbury_form
                 pred_mean, _, _, pred_std, f_var = evaluate_rff_gp_model(
-                    model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
+                    model, val_x, **eval_kwargs
                 )
                 val_diag = _rff_validation_diagnostics(
                     model, val_y, pred_mean, pred_std, f_var
@@ -1088,6 +1167,6 @@ def compute_validation_metrics(
             model.eval()
 
     out: Dict[str, object] = {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
-    if is_rff_mt or is_rff:
+    if is_rff_mt or is_rff or is_lrnn:
         out["val_diag"] = val_diag
     return out

@@ -230,7 +230,7 @@ def initialize_parameter(
         return
 
     if method == "uniform":
-        lower = config.get("lower", -6.0)
+        lower = config.get("lower", -7.0)
         upper = config.get("upper", 3.0)
         raw_value = lower + (upper - lower) * sample
         param.data = raw_value.to(dtype=param.dtype)

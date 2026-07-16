@@ -1,6 +1,6 @@
 import inspect
 import os
-from typing import Any, Callable, Optional, TypedDict
+from typing import Any, Callable, NotRequired, Optional, TypedDict
 
 import torch
 from joblib import Parallel, delayed
@@ -8,10 +8,75 @@ from joblib import Parallel, delayed
 from ..config import logger
 from .optimizers import LBFGSScipy
 
+_WOODBURY_MATMUL_PRECISION_LOGGED = False
+
+
+def configure_woodbury_matmul_precision(
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> None:
+    """
+    Force full float32 matmul precision for Woodbury / RFF training.
+
+    TF32 on ``Phi^T Phi`` can corrupt eigenvalues / MLL grads enough to let
+    train loss decrease while validation collapses. Keep TF32 opt-in only via
+    :func:`enable_fast_float32_matmul` for speed experiments — not the default.
+
+    Always re-applies the CUDA flags (safe if TF32 was toggled elsewhere).
+    """
+    global _WOODBURY_MATMUL_PRECISION_LOGGED
+    if dtype is not None and dtype != torch.float32:
+        return
+    dev = torch.device(device) if device is not None else None
+    if dev is not None and dev.type != "cuda":
+        return
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("highest")
+    if not _WOODBURY_MATMUL_PRECISION_LOGGED:
+        _WOODBURY_MATMUL_PRECISION_LOGGED = True
+        logger.info(
+            "Woodbury training: TF32 disabled (float32_matmul_precision=highest) "
+            "for Gram / MLL numerical stability."
+        )
+
+
+def enable_fast_float32_matmul(
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> bool:
+    """
+    Opt-in TF32 / high float32 matmul throughput (speed experiments only).
+
+    Not used by default for Woodbury training — see
+    :func:`configure_woodbury_matmul_precision`.
+    """
+    if dtype is not None and dtype != torch.float32:
+        return False
+    dev = torch.device(device) if device is not None else None
+    if dev is not None and dev.type != "cuda":
+        return False
+    if not torch.cuda.is_available():
+        return False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+    logger.warning(
+        "Enabled fast float32 matmul (TF32). Can degrade Woodbury MLL / "
+        "validation; use only for throughput experiments."
+    )
+    return True
+
 
 class SingleRunResult(TypedDict):
     loss: float
     state_dict: dict[str, Any]
+    callback_data: NotRequired[dict[str, Any]]
+    final_lr: NotRequired[float]
 
 
 class RunResult(TypedDict, total=False):

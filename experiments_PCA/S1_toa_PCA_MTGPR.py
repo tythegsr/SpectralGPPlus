@@ -1,4 +1,4 @@
-"""TOA benchmark with PCA + partitioned exact GPR."""
+"""TOA benchmark with PCA + partitioned exact multitask GPR."""
 
 from __future__ import annotations
 
@@ -21,23 +21,23 @@ from experiments_toa.paths import pin_toa_import_paths
 pin_toa_import_paths(_MTGPR_DIR, _GP_DIR, _PCA_DIR)
 
 import gpplus
-from toa_pca_partition_gpr_base import run_toa_pca_partition_gpr
+from toa_pca_partition_mtgpr_base import run_toa_pca_partition_mtgpr
 
 
-def run_toa_pca_gpr_entry(**kwargs) -> dict:
-    return run_toa_pca_partition_gpr(**kwargs)
+def run_toa_pca_mtgpr_entry(**kwargs) -> dict:
+    return run_toa_pca_partition_mtgpr(**kwargs)
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="TOA dataset with PCA + partitioned exact GPR (GPPlus GPR)"
+        description="TOA dataset with PCA + partitioned exact MTGPR (GPPlus MTGPR)"
     )
     parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument("--n-components", type=int, default=30, help="PCA dimension p")
-    parser.add_argument("--partition-size", type=int, default=2000, help="Training points per GP partition")
+    parser.add_argument("--partition-size", type=int, default=2000, help="Training points per MTGP partition")
     parser.add_argument("--num-inits", type=int, default=4)
     parser.add_argument(
         "--num-epochs",
@@ -57,7 +57,7 @@ if __name__ == "__main__":
         "--predict-chunk-size",
         type=int,
         default=512,
-        help="Reserved for API parity (exact GP uses full test batch in evaluate_gp_model)",
+        help="Reserved for API parity (exact MTGP uses full test batch in evaluate_gp_model)",
     )
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel hyperparameter inits per partition")
     parser.add_argument("--ard", action="store_true", default=True)
@@ -66,7 +66,18 @@ if __name__ == "__main__":
         "--save-path",
         type=str,
         default=None,
-        help="Results directory (default: experiments_PCA/results/toa_pca)",
+        help="Results directory (default: experiments_PCA/results/toa_pca_mtgpr)",
+    )
+    parser.add_argument(
+        "--train-subset",
+        type=str,
+        default="maximin",
+        choices=("random", "maximin"),
+        help=(
+            "How to choose training points within the fixed train pool: "
+            "'random' = pool prefix; "
+            "'maximin' = greedy farthest-point in (cos, grain)"
+        ),
     )
     parser.add_argument(
         "--no-plot",
@@ -97,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--compare-input-dim",
         action="store_true",
-        help="Also run PCA+GP on full 285-dim (no drop) and log input_dim_ablation in JSON",
+        help="Also run PCA+MTGP on full 285-dim (no drop) and log input_dim_ablation in JSON",
     )
     parser.add_argument(
         "--no-partition-shuffle",
@@ -110,6 +121,18 @@ if __name__ == "__main__":
         "--no-log-grain",
         action="store_true",
         help="Disable log(grain) target transform",
+    )
+    parser.add_argument(
+        "--rank-kernel",
+        type=int,
+        default=1,
+        help="Rank of the multitask ICM kernel (MultitaskKernel)",
+    )
+    parser.add_argument(
+        "--rank-likelihood",
+        type=int,
+        default=0,
+        help="Rank of MultitaskGaussianLikelihood noise correlation",
     )
     parser.add_argument(
         "--pca-svd-solver",
@@ -142,7 +165,7 @@ if __name__ == "__main__":
             int(x.strip()) for x in args.posterior_example_indices.split(",") if x.strip()
         ]
 
-    run_toa_pca_gpr_entry(
+    run_toa_pca_mtgpr_entry(
         n_train=args.n_train,
         n_test=args.n_test,
         n_components=args.n_components,
@@ -168,4 +191,7 @@ if __name__ == "__main__":
         single_partition_index=args.single_partition_index,
         compare_input_dim=args.compare_input_dim,
         pca_svd_solver=args.pca_svd_solver,
+        train_subset=args.train_subset,
+        rank_kernel=args.rank_kernel,
+        rank_likelihood=args.rank_likelihood,
     )

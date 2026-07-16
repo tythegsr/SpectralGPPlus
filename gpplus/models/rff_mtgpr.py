@@ -14,6 +14,7 @@ from ..kernels import LogScaleKernel, RFFKernel
 from ..priors.response_noise import align_registered_priors, build_multitask_noise_likelihood
 from ..utils.rff_utils import (
     RffSampling,
+    WoodburyMtMethod,
     build_icm_joint_features,
     flatten_multitask_targets,
     task_psd_factor,
@@ -41,9 +42,12 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         num_rff: int = 500,
         ard: bool = False,
         rff_sampling: RffSampling = "rff",
+        correct_sorf: bool = False,
         rank_kernel: int = 1,
         rank_likelihood: int = 0,
         noise_prior: Prior | None = None,
+        outputscale_prior: Prior | None = None,
+        lengthscale_prior: Prior | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -55,6 +59,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.rank_likelihood = rank_likelihood
         self.num_rff = num_rff
         self.rff_sampling = rff_sampling
+        self.correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
 
         if likelihood is None:
             likelihood = build_multitask_noise_likelihood(
@@ -72,13 +77,24 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         if kernel_module is None:
             input_dim = train_x.shape[-1]
             kernel_kwargs = {"ard_num_dims": input_dim} if ard else {}
+            if lengthscale_prior is not None:
+                kernel_kwargs["lengthscale_prior"] = lengthscale_prior
             base = LogScaleKernel(
                 RFFKernel(
                     num_samples=num_rff,
                     num_dims=input_dim,
                     rff_sampling=rff_sampling,
+                    correct_sorf=self.correct_sorf,
                     **kernel_kwargs,
-                )
+                ),
+                outputscale_prior=outputscale_prior,
+            )
+            feature_kind = rff_sampling.upper()
+            logger.warning(
+                "No kernel_module provided. Using MultitaskKernel(LogScaleKernel(RFFKernel(...))) "
+                f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim}"
+                + (f", correct_sorf={self.correct_sorf}" if rff_sampling == "sorf" else "")
+                + ")."
             )
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 base,
@@ -133,15 +149,20 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         return z * self._output_scale()
 
     def train_spatial_features(self) -> torch.Tensor:
-        """Cached train Φ for eval-mode Woodbury (never materializes Omega)."""
+        """Cached train Φ for eval-mode Woodbury (never materializes Omega).
+
+        In train mode, hypers change every step so caching is skipped — and the
+        cache key is not built (avoids per-step CPU sync / ``to_dense`` of ``B``).
+        """
         train_x = _drop_singleton_batch(self.train_inputs[0])
+        if self.training:
+            return self.scaled_spatial_features(train_x)
         key = self._feature_cache_key(train_x)
-        if not self.training and self._train_phi_cache is not None and self._train_phi_cache_key == key:
+        if self._train_phi_cache is not None and self._train_phi_cache_key == key:
             return self._train_phi_cache
         phi = self.scaled_spatial_features(train_x)
-        if not self.training:
-            self._train_phi_cache = phi
-            self._train_phi_cache_key = key
+        self._train_phi_cache = phi
+        self._train_phi_cache_key = key
         return phi
 
     def task_psd_factor(self) -> torch.Tensor:
@@ -172,6 +193,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         test_x: torch.Tensor,
         jitter: float = 1e-6,
         return_latent: bool = False,
+        method: WoodburyMtMethod = "eigen",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         train_x = _drop_singleton_batch(self.train_inputs[0])
         train_y = _drop_singleton_batch(self.train_targets)
@@ -192,6 +214,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
             self.num_tasks,
             y_centered,
             jitter=jitter,
+            method=method,
         )
         f_mean = f_mean + self.mean_module(test_x)
         out_dtype = test_x.dtype

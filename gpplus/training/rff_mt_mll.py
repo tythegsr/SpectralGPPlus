@@ -6,7 +6,11 @@ import gpytorch
 import torch
 from typing import TYPE_CHECKING
 
-from ..utils.rff_utils import flatten_multitask_targets, woodbury_marginal_log_likelihood_mt
+from ..utils.rff_utils import (
+    WoodburyMtMethod,
+    flatten_multitask_targets,
+    woodbury_marginal_log_likelihood_mt,
+)
 
 if TYPE_CHECKING:
     from ..models.rff_mtgpr import RFFMTGPR
@@ -18,7 +22,14 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
 
     Target covariance (centered): Sigma = Lambda + Omega Omega^T with
     Lambda = I_n kron diag(task_noises) and Omega = Phi kron R_B.
-    Hot path forms M = I + (Phi^T Phi) kron (R_B^T D^{-1} R_B) without materializing Omega.
+    Hot path forms ``G = Phi^T Phi`` without materializing Omega. Default
+    ``method="eigen"`` (alias of ``primal_eigen``) factors
+    ``M = I + G ⊗ (R_Bᵀ D⁻¹ R_B)``. Use ``method="dual_eigen"`` for the dual
+    product eigenbasis ``Λ = G ⊗ (R_Bᵀ R_B) + task_noise``.
+
+    By default the spatial Gram uses mixed precision (float32 ``Phi^T Phi``, float64
+    eigen of small ``G``/``S``). Set ``promote_features=True`` to cast full ``Phi``
+    to float64 before the Gram (legacy path).
     """
 
     def __init__(
@@ -26,6 +37,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
         likelihood: gpytorch.likelihoods.Likelihood,
         model: RFFMTGPR,
         jitter: float = 1e-6,
+        method: WoodburyMtMethod = "eigen",
+        promote_features: bool = False,
     ):
         from ..models.rff_mtgpr import RFFMTGPR as _RFFMTGPR
 
@@ -33,6 +46,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
             raise TypeError("RFFMTWoodburyMarginalLogLikelihood requires an RFFMTGPR model.")
         super().__init__(likelihood, model)
         self.jitter = jitter
+        self.method = method
+        self.promote_features = bool(promote_features)
 
     def forward(
         self,
@@ -62,9 +77,8 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
             n_train,
             y_centered,
             jitter=self.jitter,
+            method=self.method,
+            promote_features=self.promote_features,
         )
-        from ..priors.response_noise import align_registered_priors
-
-        align_registered_priors(model)
         res = self._add_other_terms(res, args)
         return res.div(target.numel())

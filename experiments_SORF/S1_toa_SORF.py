@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.1,
+        default=0.01,
         help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float32",
+        default="float64",
         choices=("float32", "float64"),
     )
     parser.add_argument(
@@ -184,14 +184,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--response-noise-prior",
         action="store_true",
-        default=False,
+        default=True,
         dest="response_noise_prior",
         help="Enable LogNormal per-task noise prior from training response columns",
     )
     parser.add_argument(
         "--noise-var-fraction",
         type=float,
-        default=0.25,
+        default=0.001,
         help="Scale empirical per-task y variance for noise prior center",
     )
     parser.add_argument(
@@ -222,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--log-every-n-epochs",
         type=int,
-        default=10,
+        default=50,
         help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
     )
     parser.add_argument(
@@ -234,7 +234,12 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = f"experiments_SORF/results/July11_monitoring_maximin/toa_sorf_{args.num_inits}inits_no_logit_cos_m1_std1_ls"
+        save_path = (
+            f"experiments_SORF/results/July16/toa_sorf_{args.num_inits}inits_numrff{args.num_rff}"
+            f"_lr{args.lr}_noisevarfrac{args.noise_var_fraction}"
+            f"_noisepriorlogscale{args.noise_prior_log_scale}"
+            f"_dtype{args.dtype}"
+        )
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):

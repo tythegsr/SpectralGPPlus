@@ -1,35 +1,33 @@
 """
-Shared TOA benchmark runner using independent RFFGPR models (Woodbury inference).
+Shared TOA benchmark runner using independent LRNNGPR models (Woodbury + DBK).
 
-Trains two separate RFFGPR models on y_cos and y_grain with shared scaled inputs.
-Sampling mode (RFF, ORF, SORF) is selected via rff_sampling.
+Trains two separate LRNNGPR models on y_cos and y_grain with shared scaled inputs.
+Aligned with Zhu et al. 2025 (Deep Basis Kernel / arxiv:2505.18526).
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 _ROOT = Path(__file__).resolve().parents[1]
-_RFF_DIR = Path(__file__).resolve().parent
+_LRNN_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-_DEFAULT_SAVE_DIRS = {
-    "rff": "experiments_RFF/results/toa_rff",
-    "orf": "experiments_ORF/results/toa_orf",
-    "sorf": "experiments_SORF/results/toa_sorf",
-}
+_RFF_DIR = _ROOT / "experiments_RFF"
+_DEFAULT_SAVE_PATH = "experiments_LRNN/results/toa_lrnn"
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _LRNN_DIR)
 
 from experiments_toa.data import (
     TOA_TEST_POOL_SIZE,
@@ -38,29 +36,20 @@ from experiments_toa.data import (
     load_toa_data,
 )
 
-from gpplus.models import RFFGPR
+from gpplus.models import LRNNGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
+    DefaultParameterInitializer,
     GPTrainer,
+    LRNNWoodburyMarginalLogLikelihood,
     MinLossChangeStopCondition,
-    RFFParameterInitializer,
-    evaluate_rff_gp_model,
+    evaluate_lrnn_gp_model,
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from experiments_RFF.rff_gp_defaults import (
-    DEFAULT_WOODBURY_FORM,
-    build_rff_scalar_noise_likelihood,
-    merge_rff_noise_initializer_kwargs,
-    rff_eval_kwargs,
-    rff_mll_class,
-    woodbury_jitter_for_dtype,
-)
+from gpplus.utils.lrnn_utils import woodbury_jitter_for_lrnn
 from mtgpr_experiment_utils import (
-    DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
-    DEFAULT_TOA_ADAM_LR,
-    DEFAULT_TOA_ADAM_STOP_PATIENCE,
     compute_relative_error_metrics,
     format_relative_error_summary,
     json_safe_optimizer_kwargs,
@@ -78,6 +67,7 @@ from plot_toa_posterior import (
     wavelength_axis,
 )
 from rff_experiment_utils import extract_learned_likelihood_noise
+from toa_lrnn_checkpoint import checkpoint_path_for_run, save_toa_lrnn_checkpoint
 from toa_mtgpr_base import (
     TASK_NAMES,
     TOA_INPUT_DIM,
@@ -85,11 +75,35 @@ from toa_mtgpr_base import (
     drop_input_columns,
     normalize_columns_to_drop,
 )
-from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
-from toa_y_transform import COS_TASK_NAME, GRAIN_TASK_NAME, forward_y_single, inverse_y_single
+from toa_y_transform import GRAIN_TASK_NAME, forward_y_single, inverse_y_single
 
 NUM_TASKS = 2
-RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
+
+# Paper §4 Adam hyperparameters (do not inherit DEFAULT_ADAM_KWARGS lr=0.1 from RFF/MTGPR).
+DEFAULT_LRNN_ADAM_KWARGS = {
+    "lr": 1e-3,
+    "betas": (0.9, 0.999),
+    "eps": 1e-8,
+    "weight_decay": 1e-4,
+    "amsgrad": False,
+}
+DEFAULT_LRNN_ADAM_STOP_PATIENCE = 50
+
+_ACTIVATION_MAP = {
+    "tanh": nn.Tanh,
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "identity": nn.Identity,
+}
+
+
+def resolve_activation(name: str | type[nn.Module]) -> type[nn.Module]:
+    if isinstance(name, type) and issubclass(name, nn.Module):
+        return name
+    key = str(name).lower()
+    if key not in _ACTIVATION_MAP:
+        raise ValueError(f"Unknown activation {name!r}; choose from {sorted(_ACTIVATION_MAP)}")
+    return _ACTIVATION_MAP[key]
 
 
 def _plot_task_validation_curves(
@@ -98,7 +112,6 @@ def _plot_task_validation_curves(
     task_name: str,
     json_path: str | None = None,
 ) -> list[str]:
-    """Plot validation curves for one task using prefixed validation_metrics_by_init."""
     block_key = f"{task_name}_validation_metrics_by_init"
     if block_key not in metrics:
         return []
@@ -126,11 +139,17 @@ def _plot_task_validation_curves(
         return []
 
 
-def run_toa_stgp(
+def _hidden_dims_tag(hidden_dims: Sequence[int]) -> str:
+    return "x".join(str(int(h)) for h in hidden_dims)
+
+
+def run_toa_lrnn(
     n_train: int = 10000,
     n_test: int = 5000,
-    num_rff: int | None = None,
-    rff_sampling: Literal["rff", "orf", "sorf"] = "rff",
+    hidden_dims: Sequence[int] = (128, 128),
+    feature_rank: int = 128,
+    activation: str | type[nn.Module] = "tanh",
+    variance_correction: bool = True,
     seed: int = 42,
     num_inits: int = 8,
     num_epochs: int = 1,
@@ -140,7 +159,6 @@ def run_toa_stgp(
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
-    ard: bool = True,
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
@@ -162,23 +180,18 @@ def run_toa_stgp(
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
-    n_pca_components: int | None = None,
-    pca_svd_solver: str = "randomized",
     train_subset: str = "random",
-    correct_sorf: bool = False,
     param_groups_fn=None,
 ) -> dict:
-    """Train independent RFFGPR models on TOA data and evaluate on held-out test points."""
-    if rff_sampling not in RFF_SAMPLING_CHOICES:
-        raise ValueError(f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}")
-    correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
-
+    """Train independent LRNNGPR models on TOA data and evaluate on held-out test points."""
     if save_path is None:
-        save_path = _DEFAULT_SAVE_DIRS[rff_sampling]
+        save_path = _DEFAULT_SAVE_PATH
 
     set_seed(seed)
-    if num_rff is None:
-        num_rff = min(512, max(64, n_train // 3))
+    hidden_dims = tuple(int(h) for h in hidden_dims)
+    feature_rank = int(feature_rank)
+    act_cls = resolve_activation(activation)
+    act_name = act_cls.__name__
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -189,37 +202,30 @@ def run_toa_stgp(
         ]
     else:
         optimizer_class = torch.optim.Adam
-        default_optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": DEFAULT_TOA_ADAM_LR}
+        default_optimizer_kwargs = dict(DEFAULT_LRNN_ADAM_KWARGS)
         stop_conditions = [
-            ConvergencePatienceStopCondition(patience=DEFAULT_TOA_ADAM_STOP_PATIENCE),
+            ConvergencePatienceStopCondition(patience=DEFAULT_LRNN_ADAM_STOP_PATIENCE),
         ]
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
-    title = f"TOA_nTrain{n_train}_nTest{n_test}_{rff_sampling}D{num_rff}"
-    if n_pca_components is not None:
-        title = f"TOA_nTrain{n_train}_nTest{n_test}_pcaP{n_pca_components}_{rff_sampling}D{num_rff}"
-    feature_dim = 2 * num_rff
-    sampling_label = rff_sampling.upper()
+    h_tag = _hidden_dims_tag(hidden_dims)
+    title = f"TOA_nTrain{n_train}_nTest{n_test}_lrnnR{feature_rank}_h{h_tag}"
     print("=" * 60)
     print(title)
     print(
-        f"Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
-        f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, "
-        f"tasks={TASK_NAMES}, log_grain={log_grain}, logit_cos={logit_cos}"
-        + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
-        + (f", pca={n_pca_components}" if n_pca_components is not None else "")
+        f"Independent LRNN-GP / DBK (Woodbury), r={feature_rank}, hidden={hidden_dims}, "
+        f"act={act_name}, variance_correction={variance_correction}, dtype={dtype}, "
+        f"inits={num_inits}, epochs={num_epochs}, tasks={TASK_NAMES}, "
+        f"log_grain={log_grain}, logit_cos={logit_cos}"
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
-    if param_groups_fn is not None:
-        print(f"Adam param_groups_fn: {getattr(param_groups_fn, '__name__', param_groups_fn)}")
     print(f"Device: {device}")
-    print(f"Woodbury: n_train={n_train}, m/n={feature_dim / n_train:.4f}")
-    if feature_dim >= n_train:
+    print(f"Woodbury: n_train={n_train}, r/n={feature_rank / n_train:.4f}")
+    if feature_rank >= n_train:
         print(
-            f"WARNING: m={feature_dim} >= n_train={n_train}; Woodbury may not beat dense GP. "
-            f"Consider num_rff <= {max(1, n_train // 2 - 1)}."
+            f"WARNING: r={feature_rank} >= n_train={n_train}; Woodbury may not beat dense GP."
         )
     print("=" * 60)
 
@@ -259,33 +265,8 @@ def run_toa_stgp(
             f"-> input_dim={input_dim}"
         )
 
-    pca_meta: dict | None = None
-    input_dim_before_pca = input_dim
-    if n_pca_components is not None:
-        _pca_dir = _ROOT / "experiments_PCA"
-        if str(_pca_dir) not in sys.path:
-            sys.path.insert(0, str(_pca_dir))
-        from toa_pca_utils import fit_pca_on_train, transform_pca
-
-        pca_fit = fit_pca_on_train(
-            x_train,
-            n_components=n_pca_components,
-            svd_solver=pca_svd_solver,
-            random_state=seed,
-        )
-        x_train = transform_pca(pca_fit, x_train, dtype=dtype)
-        x_test = transform_pca(pca_fit, x_test, dtype=dtype)
-        if x_val.numel() > 0:
-            x_val = transform_pca(pca_fit, x_val, dtype=dtype)
-        input_dim = pca_fit.n_components
-        pca_meta = pca_fit.to_dict()
-        print(
-            f"PCA: {input_dim_before_pca} -> {input_dim} components, "
-            f"variance explained={pca_fit.total_variance_explained:.4f}"
-        )
-    else:
-        x_train = x_train.to(dtype=dtype)
-        x_test = x_test.to(dtype=dtype)
+    x_train = x_train.to(dtype=dtype)
+    x_test = x_test.to(dtype=dtype)
     y_train = y_train.to(dtype=dtype)
     y_test = y_test.to(dtype=dtype)
 
@@ -375,7 +356,6 @@ def run_toa_stgp(
                     chunk_size=predict_chunk_size,
                     verbose=validation_verbose,
                     log_every_n_epochs=log_every_n_epochs,
-                    woodbury_form=DEFAULT_WOODBURY_FORM,
                 )
             )
 
@@ -384,6 +364,7 @@ def run_toa_stgp(
         noise_prior_meta: dict | None = None
         if response_noise_prior:
             from gpplus.priors.response_noise import (
+                build_scalar_noise_likelihood,
                 empirical_scalar_noise_variance,
                 log_normal_scalar_noise_prior_from_responses,
                 scalar_noise_raw_init_from_variance,
@@ -397,7 +378,7 @@ def run_toa_stgp(
                 dtype=dtype,
                 device=y_tr_fit.device,
             )
-            likelihood = build_rff_scalar_noise_likelihood(noise_prior=noise_prior)
+            likelihood = build_scalar_noise_likelihood(noise_prior=noise_prior)
             raw_init = scalar_noise_raw_init_from_variance(
                 likelihood, target_var.to(dtype=dtype)
             )
@@ -414,22 +395,19 @@ def run_toa_stgp(
                 f"Response noise prior ({task_name}): LogNormal, fraction={noise_var_fraction}, "
                 f"log_scale={noise_prior_log_scale}, target_var={noise_prior_meta['noise_prior_target_var']}"
             )
-        else:
-            likelihood = build_rff_scalar_noise_likelihood()
 
-        initializer_kwargs = merge_rff_noise_initializer_kwargs(initializer_kwargs)
-        model = RFFGPR(
+        model = LRNNGPR(
             x_train,
             y_tr_fit,
             likelihood=likelihood,
-            num_rff=num_rff,
-            ard=ard,
-            rff_sampling=rff_sampling,
-            correct_sorf=correct_sorf,
+            hidden_dims=hidden_dims,
+            feature_rank=feature_rank,
+            activation=act_cls,
+            variance_correction=variance_correction,
         )
         trainer = GPTrainer(
             model,
-            mll_class=rff_mll_class(),
+            mll_class=LRNNWoodburyMarginalLogLikelihood,
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -438,11 +416,11 @@ def run_toa_stgp(
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
             param_groups_fn=param_groups_fn,
-            initializer_class=RFFParameterInitializer,
+            initializer_class=DefaultParameterInitializer,
             initializer_kwargs=initializer_kwargs,
             n_jobs=n_jobs,
             inner_max_num_threads=1,
-            cholesky_jitter=woodbury_jitter_for_dtype(dtype),
+            cholesky_jitter=woodbury_jitter_for_lrnn(dtype),
             callbacks=callbacks,
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
@@ -466,7 +444,7 @@ def run_toa_stgp(
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
 
         if save_checkpoint and save_path:
-            ckpt_path = save_toa_stgp_checkpoint(
+            ckpt_path = save_toa_lrnn_checkpoint(
                 checkpoint_path_for_run(save_path, title, task_name),
                 model=model,
                 task_name=task_name,
@@ -493,10 +471,10 @@ def run_toa_stgp(
                 logit_cos=logit_cos,
                 input_column_indices=kept_column_indices_t,
                 model_config={
-                    "num_rff": num_rff,
-                    "ard": ard,
-                    "rff_sampling": rff_sampling,
-                    "correct_sorf": correct_sorf,
+                    "hidden_dims": list(hidden_dims),
+                    "feature_rank": feature_rank,
+                    "activation": act_name,
+                    "variance_correction": variance_correction,
                 },
             )
             learned_noise["checkpoint_path"] = str(ckpt_path)
@@ -505,8 +483,11 @@ def run_toa_stgp(
         model.eval()
         model.invalidate_feature_cache()
         t_pred = time.time()
-        pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-            model, x_test, chunk_size=predict_chunk_size, **rff_eval_kwargs(dtype)
+        pred_mean, lower, upper, pred_std = evaluate_lrnn_gp_model(
+            model,
+            x_test,
+            chunk_size=predict_chunk_size,
+            variance_correction=variance_correction,
         )
         prediction_time = time.time() - t_pred
         total_prediction_time += prediction_time
@@ -637,12 +618,11 @@ def run_toa_stgp(
         "train_subset": train_subset,
         "num_tasks": NUM_TASKS,
         "task_names": list(TASK_NAMES),
-        "num_rff": num_rff,
-        "rff_sampling": rff_sampling,
-        "correct_sorf": correct_sorf,
-        "feature_dim": feature_dim,
-        "ard": ard,
-        "model_class": "RFFGPR",
+        "hidden_dims": list(hidden_dims),
+        "feature_rank": feature_rank,
+        "activation": act_name,
+        "variance_correction": variance_correction,
+        "model_class": "LRNNGPR",
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
@@ -670,10 +650,6 @@ def run_toa_stgp(
         "RMSE": aggregate_rmse,
         **per_task,
     }
-    if pca_meta is not None:
-        metrics["pca"] = pca_meta
-        metrics["input_dim_before_pca"] = input_dim_before_pca
-        metrics["n_pca_components"] = n_pca_components
 
     for task_name in TASK_NAMES:
         tm = task_metrics[task_name]
@@ -808,8 +784,3 @@ def run_toa_stgp(
                 logging.getLogger(__name__).warning("Posterior plot generation failed: %s", exc)
 
     return metrics
-
-
-def run_toa_rff(**kwargs) -> dict:
-    """Train independent RFF-GP models on TOA (rff_sampling='rff')."""
-    return run_toa_stgp(rff_sampling="rff", **kwargs)

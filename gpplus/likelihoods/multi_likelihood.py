@@ -207,7 +207,7 @@ class LogScaleMultiNoise(_HomoskedasticNoiseBase):
     """
 
     def __init__(self, noise_prior=None, noise_constraint=None, batch_shape=torch.Size(), num_noises=1):
-        # Default constraint for log noise (allows noise from 0.0000001 to 1000)
+        # Default constraint for log noise (allows noise from 1e-7 to 1000)
         if noise_constraint is None:
             noise_constraint = SoftClamp(lower_bound=-7.0, upper_bound=3.0)
 

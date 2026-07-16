@@ -4068,6 +4068,8 @@ class ValidationMetricsCallback(Callback):
         num_inits: Optional[int] = None,
         cholesky_jitter: Optional[float] = None,
         chunk_size: int = 512,
+        woodbury_form: Optional[str] = None,
+        woodbury_mt_method: Optional[str] = None,
     ):
         self.val_x = val_x
         self.val_y = val_y
@@ -4077,6 +4079,8 @@ class ValidationMetricsCallback(Callback):
         self.num_inits = num_inits
         self.cholesky_jitter = cholesky_jitter
         self.chunk_size = chunk_size
+        self.woodbury_form = woodbury_form
+        self.woodbury_mt_method = woodbury_mt_method
         self._run_index: Optional[int] = None
         self._fold_index: Optional[int] = None
         self._records: list[dict] = []
@@ -4138,17 +4142,25 @@ class ValidationMetricsCallback(Callback):
 
     @staticmethod
     def _is_val_nll_spike(val_nll: float, prev: Optional[float]) -> bool:
+        """True only when val_NLL *worsens* enough vs the previous log.
+
+        Note: a bare ``val_nll > 0`` check is *not* used — healthy TOA fits often
+        sit at positive NLL after init, and that would spam spike diagnostics on
+        every validation log (even when NLL is improving).
+        """
         if not math.isfinite(val_nll):
             return False
-        if val_nll > 0:
+        if prev is None or not math.isfinite(prev):
+            return False
+        # Large absolute jump (same sign or crossing zero)
+        if val_nll - prev > 50.0:
             return True
-        if prev is not None and math.isfinite(prev):
-            if val_nll - prev > 50.0:
-                return True
-            if prev > 0 and val_nll > 10.0 * prev:
-                return True
-            if prev < 0 and val_nll > prev / 10.0:
-                return True
+        # Large relative blow-up from a positive previous NLL
+        if prev > 0 and val_nll > 10.0 * prev:
+            return True
+        # Collapse from a good (negative) NLL toward zero / positive
+        if prev < 0 and val_nll > prev / 10.0:
+            return True
         return False
 
     def _maybe_log_spike_diagnostics(
@@ -4232,6 +4244,8 @@ class ValidationMetricsCallback(Callback):
             self.val_y,
             cholesky_jitter=jitter,
             chunk_size=self.chunk_size,
+            woodbury_form=self.woodbury_form,
+            woodbury_mt_method=self.woodbury_mt_method,
         )
         record = {
             "run_index": context.get("run_index", self._run_index),

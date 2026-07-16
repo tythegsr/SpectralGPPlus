@@ -1,8 +1,10 @@
 import copy
+from collections.abc import Callable
 from typing import List, Optional
 
 import gpytorch
 import torch
+from torch import nn
 
 from ..config import logger
 from .callbacks import Callback
@@ -27,6 +29,7 @@ class GPTrainer:
         optimizer_kwargs: dict = None,
         scheduler_class: torch.optim.lr_scheduler.LRScheduler = None,
         scheduler_kwargs: dict = None,
+        param_groups_fn: Callable[[nn.Module], list[dict]] | None = None,
         num_epochs: int = 1000,
         seed: int = None,
         num_inits: int = 64,
@@ -53,6 +56,9 @@ class GPTrainer:
             optimizer_kwargs: Optimizer kwargs (without `params`).
             scheduler_class: Optional learning-rate scheduler class.
             scheduler_kwargs: Optional scheduler kwargs.
+            param_groups_fn: Optional callable ``model -> Adam param_groups``.
+                When set, each run builds the optimizer from groups instead of
+                ``model.parameters()`` + ``optimizer_kwargs``.
             num_epochs: Number of epochs per run.
             seed: Random seed for parameter initialization.
             num_inits: Number of initialization runs to evaluate.
@@ -87,6 +93,7 @@ class GPTrainer:
         self.cholesky_jitter = cholesky_jitter
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs or {}
+        self.param_groups_fn = param_groups_fn
         self.min_epochs = min_epochs
         self.n_jobs = n_jobs
         self.inner_max_num_threads = inner_max_num_threads
@@ -211,6 +218,7 @@ class GPTrainer:
             device=target_device,
             scheduler_class=self.scheduler_class,
             scheduler_kwargs=self.scheduler_kwargs,
+            param_groups_fn=self.param_groups_fn,
             stop_conditions=stop_conditions_copy,
             min_epochs=self.min_epochs,
             dtype=self.dtype,

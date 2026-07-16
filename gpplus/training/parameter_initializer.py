@@ -126,7 +126,7 @@ class DefaultParameterInitializer(ParameterInitializer):
             is_ard = param.dim() == 2 and param.shape[1] > 1
             return {
                 "method": "normal",
-                "mean": -2.0,
+                "mean": -4.0,
                 "std": 2.0,
                 "description": f"Lengthscale parameter {'(ARD)' if is_ard else '(single)'} - log scale",
             }

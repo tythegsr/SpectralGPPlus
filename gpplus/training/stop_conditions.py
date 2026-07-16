@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional, TypedDict
+from typing import Any, NotRequired, Optional, TypedDict
 
 
 class StopConditionContext(TypedDict):
@@ -13,6 +13,7 @@ class StopConditionContext(TypedDict):
     best_loss: float
     no_improvement_epochs: int
     device: str
+    current_lr: NotRequired[Optional[float]]
 
 
 class StopCondition(ABC):

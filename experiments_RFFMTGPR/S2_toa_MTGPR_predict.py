@@ -24,6 +24,7 @@ pin_toa_import_paths(_MTGPR_DIR)
 
 import gpplus
 from gpplus.training import evaluate_rff_mt_gp_model
+from experiments_RFF.rff_gp_defaults import mt_eval_kwargs
 from experiments_toa.data import load_toa_data
 from mtgpr_experiment_utils import (
     json_default,
@@ -101,6 +102,7 @@ def predict_from_checkpoint(
         bundle.model,
         x_test.to(device=bundle.model.train_inputs[0].device),
         chunk_size=predict_chunk_size,
+        **mt_eval_kwargs(dtype),
     )
     pred_time = time.time() - t0
 

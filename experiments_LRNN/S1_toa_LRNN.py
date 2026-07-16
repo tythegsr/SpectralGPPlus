@@ -1,4 +1,4 @@
-"""TOA benchmark with GPPlus ORF kernel (Woodbury inference)."""
+"""TOA benchmark with GPPlus LRNN / Deep Basis Kernel (Woodbury inference)."""
 
 from __future__ import annotations
 
@@ -9,43 +9,58 @@ from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_ORF_DIR = Path(__file__).resolve().parent
-_RFF_DIR = _ROOT / "experiments_RFF"
+_LRNN_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
+_RFF_DIR = _ROOT / "experiments_RFF"
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _ORF_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _LRNN_DIR)
 
 import gpplus
-from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
-from toa_orf_base import run_toa_orf
+from toa_lrnn_base import DEFAULT_LRNN_ADAM_KWARGS, run_toa_lrnn
 
 
-def run_toa_orf_entry(**kwargs) -> dict:
-    return run_toa_orf(**kwargs)
+def run_toa_lrnn_entry(**kwargs) -> dict:
+    return run_toa_lrnn(**kwargs)
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="TOA dataset with GPPlus ORF (Woodbury)")
+    parser = argparse.ArgumentParser(
+        description="TOA dataset with GPPlus LRNN / DBK (Woodbury + variance correction)"
+    )
     parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument(
-        "--num-rff",
+        "--hidden-dims",
         type=int,
-        default=1600,
-        help="D (ORF frequencies); default: 1600 (min(512, n_train//3) when omitted programmatically)",
+        nargs="+",
+        default=[128, 256, 512, 1024, 512, 256],
+        help="MLP hidden layer widths (default: 128 128)",
     )
     parser.add_argument(
-        "--num-orf",
+        "--feature-rank",
         type=int,
-        default=None,
-        help="Alias for --num-rff (backward compatibility)",
+        default=128,
+        help="Neural basis rank r (default: 128)",
+    )
+    parser.add_argument(
+        "--activation",
+        type=str,
+        default="tanh",
+        choices=("tanh", "relu", "gelu", "identity"),
+        help="Hidden-layer activation (default: tanh, paper §4)",
+    )
+    parser.add_argument(
+        "--variance-correction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="DBK variance correction (default: on; use --no-variance-correction for DBK-c)",
     )
     parser.add_argument("--num-inits", type=int, default=1)
     parser.add_argument(
@@ -57,15 +72,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.01,
-        help="Adam learning rate (only when --num-epochs > 1; default matches DEFAULT_ADAM_KWARGS)",
+        default=1e-4,
+        help="Adam learning rate (only when --num-epochs > 1; paper default 1e-3)",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1e-4,
+        help="Adam weight decay on parameters (paper default 1e-4)",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float64",
+        default="float32",
         choices=("float32", "float64"),
     )
     parser.add_argument(
@@ -80,13 +101,11 @@ if __name__ == "__main__":
         default=1,
         help="Parallel hyperparameter inits (-1 = all cores)",
     )
-    parser.add_argument("--ard", action="store_true", default=True)
-    parser.add_argument("--no-ard", action="store_false", dest="ard")
     parser.add_argument(
         "--save-path",
         type=str,
         default=None,
-        help="Results directory (default: experiments_ORF/results/toa_orf)",
+        help="Results directory (default: experiments_LRNN/results/toa_lrnn)",
     )
     parser.add_argument(
         "--monitor-validation",
@@ -146,50 +165,48 @@ if __name__ == "__main__":
         choices=("random", "maximin"),
         help=(
             "How to choose training points within the fixed train pool: "
-            "'random' = pool prefix (default); "
-            "'maximin' = greedy farthest-point in (cos, grain)"
+            "'random' = pool prefix; 'maximin' = greedy farthest-point in (cos, grain)"
         ),
     )
     parser.add_argument(
         "--no-log-grain",
         action="store_true",
-        help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
+        help="Disable log(grain) target transform",
     )
     parser.add_argument(
-        "--logit-cos",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
+        "--no-logit-cos",
+        action="store_true",
+        help="Disable logit(cos_i) target transform",
     )
     parser.add_argument(
         "--no-save-checkpoint",
         action="store_true",
-        help="Skip saving checkpoint_*.pt (includes scaled training data; can be ~100MB+)",
+        help="Skip saving checkpoint_*.pt",
     )
     parser.add_argument(
         "--drop-columns",
         type=str,
         default="132,195,196,197,198,199,200,201,202,203,204,205,206,207,208",
-        help="Comma-separated 0-based input column indices to remove (e.g. '0,1,284')",
+        help="Comma-separated 0-based input column indices to remove",
     )
     parser.add_argument(
         "--response-noise-prior",
-        action="store_true",
-        default=True,
+        action=argparse.BooleanOptionalAction,
+        default=False,
         dest="response_noise_prior",
-        help="Enable LogNormal per-task noise prior from training response columns",
+        help="LogNormal noise prior from training response variance (default: on)",
     )
     parser.add_argument(
         "--noise-var-fraction",
         type=float,
-        default=0.001,
+        default=0.01,
         help="Scale empirical per-task y variance for noise prior center",
     )
     parser.add_argument(
         "--noise-prior-log-scale",
         type=float,
-        default=0.5,
-        help="LogNormal log-scale spread per task for response noise prior (default: 0.5)",
+        default=0.01,
+        help="LogNormal log-scale spread per task for response noise prior",
     )
     parser.add_argument(
         "--log-level",
@@ -208,13 +225,13 @@ if __name__ == "__main__":
         "--parallel-verbose",
         type=int,
         default=10,
-        help="joblib parallel progress verbosity (0=quiet, 10=status updates; default: 10)",
+        help="joblib parallel progress verbosity (0=quiet, 10=status updates)",
     )
     parser.add_argument(
         "--log-every-n-epochs",
         type=int,
         default=50,
-        help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
+        help="Log Adam train loss (and val metrics if monitoring) every N epochs",
     )
     parser.add_argument(
         "--no-training-log",
@@ -225,7 +242,7 @@ if __name__ == "__main__":
 
     save_path = args.save_path
     if save_path is None:
-        save_path = f"experiments_ORF/results/July16/toa_orf_{args.num_inits}inits_numorf{args.num_orf}_lr{args.lr}_noisevarfrac{args.noise_var_fraction}_noisepriorlogscale{args.noise_prior_log_scale}"
+        save_path = f"experiments_LRNN/results/toa_lrnn_{args.num_inits}inits_hiddims{args.hidden_dims}_featr{args.feature_rank}"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
@@ -240,11 +257,14 @@ if __name__ == "__main__":
 
     dtype = torch.float32 if args.dtype == "float32" else torch.float64
     n_jobs = None if args.n_jobs < 0 else args.n_jobs
-    num_rff = args.num_orf if args.num_orf is not None else args.num_rff
 
     optimizer_kwargs = None
-    if args.num_epochs > 1 and args.lr is not None:
-        optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
+    if args.num_epochs > 1:
+        optimizer_kwargs = {
+            **DEFAULT_LRNN_ADAM_KWARGS,
+            "lr": args.lr,
+            "weight_decay": args.weight_decay,
+        }
 
     posterior_example_indices = None
     if args.posterior_example_indices:
@@ -256,17 +276,19 @@ if __name__ == "__main__":
     if args.drop_columns:
         drop_columns = [int(x.strip()) for x in args.drop_columns.split(",") if x.strip()]
 
-    run_toa_orf(
+    run_toa_lrnn(
         n_train=args.n_train,
         n_test=args.n_test,
-        num_orf=num_rff,
+        hidden_dims=tuple(args.hidden_dims),
+        feature_rank=args.feature_rank,
+        activation=args.activation,
+        variance_correction=args.variance_correction,
         num_inits=args.num_inits,
         num_epochs=args.num_epochs,
         optimizer_kwargs=optimizer_kwargs,
         seed=args.seed,
         device=args.device,
         dtype=dtype,
-        ard=args.ard,
         save_path=save_path,
         n_jobs=n_jobs,
         predict_chunk_size=args.predict_chunk_size,
@@ -283,7 +305,7 @@ if __name__ == "__main__":
         log_every_n_epochs=args.log_every_n_epochs,
         save_checkpoint=not args.no_save_checkpoint,
         log_grain=not args.no_log_grain,
-        logit_cos=args.logit_cos,
+        logit_cos=not args.no_logit_cos,
         drop_columns=drop_columns,
         response_noise_prior=args.response_noise_prior,
         noise_var_fraction=args.noise_var_fraction,

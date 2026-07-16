@@ -1,10 +1,12 @@
 import copy
+from collections.abc import Callable
 from functools import partial
 from typing import List, Optional
 
 import gpytorch
 import linear_operator
 import torch
+from torch import nn
 
 from ..config import logger
 from .callbacks import Callback
@@ -14,9 +16,29 @@ from .stop_conditions import (
     MinLossChangeStopCondition,
     StopCondition,
 )
+from .lrnn_mll import LRNNWoodburyMarginalLogLikelihood
 from .rff_mll import RFFWoodburyMarginalLogLikelihood
 from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
-from .trainer_utils import SingleRunResult, check_early_stop, select_epoch_train_fn
+
+_WOODBURY_MLL_TYPES = (
+    RFFWoodburyMarginalLogLikelihood,
+    RFFMTWoodburyMarginalLogLikelihood,
+    LRNNWoodburyMarginalLogLikelihood,
+)
+from .trainer_utils import (
+    SingleRunResult,
+    check_early_stop,
+    configure_woodbury_matmul_precision,
+    select_epoch_train_fn,
+)
+
+
+def _optimizer_lr(optimizer) -> float | None:
+    groups = getattr(optimizer, "param_groups", None)
+    if not groups:
+        return None
+    lr = groups[0].get("lr")
+    return float(lr) if lr is not None else None
 
 
 class GPTrainerSingleProcess:
@@ -32,6 +54,7 @@ class GPTrainerSingleProcess:
         device: str | torch.device | None = None,
         scheduler_class: type[torch.optim.lr_scheduler.LRScheduler] | None = None,
         scheduler_kwargs: Optional[dict] = None,
+        param_groups_fn: Callable[[nn.Module], list[dict]] | None = None,
         stop_conditions: Optional[List[StopCondition]] = None,
         dtype: torch.dtype = torch.float64,
         min_epochs: int = 0,
@@ -52,6 +75,8 @@ class GPTrainerSingleProcess:
             device: Torch device (or device string) for this run.
             scheduler_class: Optional learning-rate scheduler class.
             scheduler_kwargs: Optional scheduler kwargs.
+            param_groups_fn: Optional callable ``model -> Adam param_groups``.
+                When set, ignores ``optimizer_kwargs`` for param construction.
             stop_conditions: Optional early-stop conditions for this run.
             dtype: Tensor dtype used in forward/loss computations.
             min_epochs: Minimum epochs before stop conditions can terminate training.
@@ -67,6 +92,7 @@ class GPTrainerSingleProcess:
         self.device = torch.device(device) if device is not None else torch.device("cpu")
         self.scheduler_class = scheduler_class
         self.scheduler_kwargs = scheduler_kwargs or {}
+        self.param_groups_fn = param_groups_fn
         self.scheduler = None
         self.dtype = dtype
         self.run_index = run_index
@@ -94,7 +120,7 @@ class GPTrainerSingleProcess:
 
     def _negative_mll_loss(self, mll, train_x: torch.Tensor, train_y: torch.Tensor) -> torch.Tensor:
         """MLL loss; skips ExactGP forward when using Woodbury MLL."""
-        if isinstance(mll, (RFFWoodburyMarginalLogLikelihood, RFFMTWoodburyMarginalLogLikelihood)):
+        if isinstance(mll, _WOODBURY_MLL_TYPES):
             return -mll(None, train_y)
         output = self.model(train_x)
         return -mll(output, train_y)
@@ -106,8 +132,21 @@ class GPTrainerSingleProcess:
             if callable(register):
                 register(optimizer, model=self.model, trainer=self)
 
+    def _step_scheduler(self, loss: float) -> None:
+        """Step LR scheduler if one was configured."""
+        if self.scheduler is None:
+            return
+        self.scheduler.step()
+
     def train(self) -> SingleRunResult:
-        optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
+        # Disable TF32 for float32 CUDA Woodbury runs: TF32 Phi^T Phi can
+        # corrupt MLL grads and collapse validation while train loss improves.
+        if isinstance(self.mll_class, type) and issubclass(self.mll_class, _WOODBURY_MLL_TYPES):
+            configure_woodbury_matmul_precision(device=self.device, dtype=self.dtype)
+        if self.param_groups_fn is not None:
+            optimizer = self.optimizer_class(self.param_groups_fn(self.model))
+        else:
+            optimizer = self.optimizer_class(self.model.parameters(), **self.optimizer_kwargs)
         if isinstance(optimizer, LBFGSScipy) and self.num_epochs > 1:
             logger.warning(
                 "LBFGSScipy performs internal iterations per optimizer step; "
@@ -118,13 +157,7 @@ class GPTrainerSingleProcess:
         else:
             self.scheduler = None
 
-        if isinstance(
-            self.mll_class,
-            type,
-        ) and issubclass(
-            self.mll_class,
-            (RFFWoodburyMarginalLogLikelihood, RFFMTWoodburyMarginalLogLikelihood),
-        ):
+        if isinstance(self.mll_class, type) and issubclass(self.mll_class, _WOODBURY_MLL_TYPES):
             mll = self.mll_class(
                 self.model.likelihood, self.model, jitter=self.cholesky_jitter
             )
@@ -188,6 +221,7 @@ class GPTrainerSingleProcess:
                     "best_loss": best_loss,
                     "no_improvement_epochs": no_improvement_epochs,
                     "device": self.device,
+                    "current_lr": _optimizer_lr(optimizer),
                 }
                 if check_early_stop(
                     self.stop_conditions,
@@ -199,8 +233,11 @@ class GPTrainerSingleProcess:
                     break
                 previous_loss = loss
 
+        final_lr = _optimizer_lr(optimizer)
         logger.info("Training completed. Best loss: %.6f", best_loss)
         logger.info("Total epochs trained: %s", epochs_trained)
+        if final_lr is not None:
+            logger.info("Final learning rate: %g", final_lr)
         if best_state_dict is None:
             logger.warning("No model state was captured during training; verify epoch count and optimizer behavior.")
 
@@ -223,11 +260,14 @@ class GPTrainerSingleProcess:
                 if stored_params:
                     callback_data[cb.__class__.__name__] = stored_params
 
-        return {
+        result: SingleRunResult = {
             "loss": best_loss,
             "state_dict": best_state_dict,
             "callback_data": callback_data,
         }
+        if final_lr is not None:
+            result["final_lr"] = final_lr
+        return result
 
     def _train_standard_epoch(self, optimizer, mll) -> float:
         optimizer.zero_grad()
@@ -236,24 +276,24 @@ class GPTrainerSingleProcess:
         loss = self._negative_mll_loss(mll, train_x, train_y)
         loss.backward()
         optimizer.step()
-        if self.scheduler is not None:
-            self.scheduler.step()
-        return loss.item()
+        loss_value = float(loss.item())
+        self._step_scheduler(loss_value)
+        return loss_value
 
     def _train_lbfgs_epoch(self, optimizer, mll) -> float:
         closure = partial(self._lbfgs_step, optimizer=optimizer, mll=mll)
         loss = optimizer.step(closure)
-        if self.scheduler is not None:
-            self.scheduler.step()
-        return loss.item()
+        loss_value = float(loss.item())
+        self._step_scheduler(loss_value)
+        return loss_value
 
     def _train_scipy_lbfgs_epoch(self, optimizer, mll) -> float:
         closure = partial(self._lbfgs_step, optimizer=optimizer, mll=mll)
         optimizer.step(closure)
         loss = optimizer._last_loss  # pylint: disable=protected-access
-        if self.scheduler is not None:
-            self.scheduler.step()
-        return float(loss.detach().item()) if hasattr(loss, "detach") else float(loss)
+        loss_value = float(loss.detach().item()) if hasattr(loss, "detach") else float(loss)
+        self._step_scheduler(loss_value)
+        return loss_value
 
     def _lbfgs_step(self, optimizer, mll):
         optimizer.zero_grad()

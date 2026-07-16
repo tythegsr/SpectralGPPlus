@@ -191,9 +191,20 @@ def scalar_noise_raw_init_from_variance(
     variance: Tensor,
 ) -> Tensor:
     """Map target noise variance σ² to ``raw_noise`` (log10 constraint inverse)."""
-    if not hasattr(likelihood, "raw_noise_constraint"):
-        raise TypeError("likelihood must expose raw_noise_constraint (LogGaussianLikelihood).")
-    ref = likelihood.raw_noise
+    noise_module = getattr(likelihood, "noise_covar", likelihood)
+    constraint = getattr(noise_module, "raw_noise_constraint", None)
+    if constraint is None:
+        constraint = getattr(likelihood, "raw_noise_constraint", None)
+    if constraint is None:
+        raise TypeError(
+            "likelihood must expose raw_noise_constraint "
+            "(LogGaussianLikelihood.noise_covar or lik.raw_noise_constraint)."
+        )
+    ref = getattr(likelihood, "raw_noise", None)
+    if ref is None:
+        ref = noise_module.raw_noise
     v = variance.reshape(()).to(device=ref.device, dtype=ref.dtype)
     log_value = torch.log10(v)
-    return likelihood.raw_noise_constraint.inverse_transform(log_value)
+    raw = constraint.inverse_transform(log_value)
+    # ParameterInitializer constant init requires an exact shape match.
+    return raw.reshape(ref.shape).to(device=ref.device, dtype=ref.dtype)

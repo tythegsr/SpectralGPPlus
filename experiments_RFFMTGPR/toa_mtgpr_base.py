@@ -38,15 +38,23 @@ from gpplus.training import (
     GPTrainer,
     MinLossChangeStopCondition,
     RFFMTParameterInitializer,
-    RFFMTWoodburyMarginalLogLikelihood,
     evaluate_rff_mt_gp_model,
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from gpplus.utils.rff_utils import woodbury_jitter_for_dtype
+from experiments_RFF.rff_gp_defaults import (
+    DEFAULT_MT_WOODBURY_METHOD,
+    build_rff_multitask_noise_likelihood,
+    merge_mt_noise_initializer_kwargs,
+    mt_eval_kwargs,
+    mt_mll_class,
+    woodbury_jitter_for_dtype,
+)
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
+    DEFAULT_TOA_ADAM_LR,
+    DEFAULT_TOA_ADAM_STOP_PATIENCE,
     compute_relative_error_metrics,
     format_relative_error_summary,
     json_safe_optimizer_kwargs,
@@ -345,11 +353,20 @@ def run_toa_mtgpr(
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
+    outputscale_prior: bool = False,
+    outputscale_prior_loc: float = 0.0,
+    outputscale_prior_scale: float = 1.0,
+    lengthscale_prior: bool = False,
+    lengthscale_prior_loc: float = -2.0,
+    lengthscale_prior_scale: float = 2.0,
     train_subset: str = "random",
+    correct_sorf: bool = False,
+    param_groups_fn=None,
 ) -> dict:
     """Train joint RFFMTGPR on TOA data and evaluate on held-out test points."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
         raise ValueError(f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}")
+    correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
 
     if save_path is None:
         save_path = f"experiments_RFFMTGPR/results/toa_{rff_sampling}"
@@ -361,13 +378,22 @@ def run_toa_mtgpr(
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
         default_optimizer_kwargs = DEFAULT_LBFGS_KWARGS
+        stop_conditions = [
+            ConvergencePatienceStopCondition(patience=10),
+            MinLossChangeStopCondition(min_loss_change=1e-7),
+        ]
     else:
         optimizer_class = torch.optim.Adam
-        default_optimizer_kwargs = DEFAULT_ADAM_KWARGS
+        default_optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": DEFAULT_TOA_ADAM_LR}
+        stop_conditions = [
+            ConvergencePatienceStopCondition(patience=DEFAULT_TOA_ADAM_STOP_PATIENCE),
+        ]
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
     title = f"TOA_nTrain{n_train}_nTest{n_test}_{rff_sampling}D{num_rff}_mt"
+    if rff_sampling == "sorf":
+        title = f"{title}_correctSorf{correct_sorf}"
     feature_dim = 2 * num_rff
     joint_width = feature_dim * NUM_TASKS
     sampling_label = rff_sampling.upper()
@@ -377,9 +403,12 @@ def run_toa_mtgpr(
         f"Joint {sampling_label}-MTGP (Woodbury), D={num_rff}, m={feature_dim}, m*T={joint_width}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={TASK_NAMES}, "
         f"log_grain={log_grain}, logit_cos={logit_cos}"
+        + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
+    if param_groups_fn is not None:
+        print(f"Adam param_groups_fn: {getattr(param_groups_fn, '__name__', param_groups_fn)}")
     print(f"Device: {device}")
     print(f"Woodbury: n_train={n_train}, nT={n_train * NUM_TASKS}, joint cols={joint_width}")
     if joint_width >= n_train * NUM_TASKS:
@@ -496,15 +525,20 @@ def run_toa_mtgpr(
                 chunk_size=predict_chunk_size,
                 verbose=validation_verbose,
                 log_every_n_epochs=log_every_n_epochs,
+                woodbury_mt_method=DEFAULT_MT_WOODBURY_METHOD,
             )
         )
 
     noise_prior = None
+    os_prior = None
     initializer_kwargs: dict | None = None
+    parameter_configs: dict = {}
     noise_prior_meta: dict | None = None
+    outputscale_prior_meta: dict | None = None
+    lengthscale_prior_meta: dict | None = None
+    ls_prior = None
     if response_noise_prior:
         from gpplus.priors.response_noise import (
-            build_multitask_noise_likelihood,
             empirical_task_noise_variances,
             log_normal_noise_prior_from_responses,
             task_noise_raw_init_from_variances,
@@ -518,13 +552,9 @@ def run_toa_mtgpr(
             dtype=dtype,
             device=y_train_fit.device,
         )
-        temp_lik = build_multitask_noise_likelihood(NUM_TASKS, rank=0)
+        temp_lik = build_rff_multitask_noise_likelihood(NUM_TASKS, rank=0)
         raw_init = task_noise_raw_init_from_variances(temp_lik, target_vars.to(dtype=dtype))
-        initializer_kwargs = {
-            "parameter_configs": {
-                "raw_task_noises": {"method": "constant", "value": raw_init},
-            }
-        }
+        parameter_configs["raw_task_noises"] = {"method": "constant", "value": raw_init}
         noise_prior_meta = {
             "response_noise_prior": True,
             "noise_var_fraction": float(noise_var_fraction),
@@ -537,6 +567,66 @@ def run_toa_mtgpr(
             f"log_scale={noise_prior_log_scale}, target_var={noise_prior_meta['noise_prior_target_var']}"
         )
 
+    if outputscale_prior:
+        from gpytorch.priors import NormalPrior
+
+        if outputscale_prior_scale <= 0:
+            raise ValueError(
+                f"outputscale_prior_scale must be positive, got {outputscale_prior_scale}"
+            )
+        os_prior = NormalPrior(
+            loc=float(outputscale_prior_loc),
+            scale=float(outputscale_prior_scale),
+        )
+        # Match init to prior center (default initializer uses N(-2, 0.5)).
+        parameter_configs["raw_outputscale"] = {
+            "method": "normal",
+            "mean": float(outputscale_prior_loc),
+            "std": min(0.5, float(outputscale_prior_scale)),
+        }
+        outputscale_prior_meta = {
+            "outputscale_prior": True,
+            "outputscale_prior_loc": float(outputscale_prior_loc),
+            "outputscale_prior_scale": float(outputscale_prior_scale),
+        }
+        print(
+            f"Outputscale prior: Normal(loc={outputscale_prior_loc}, "
+            f"scale={outputscale_prior_scale}) on log10 outputscale"
+        )
+
+    if lengthscale_prior:
+        from gpytorch.priors import NormalPrior
+
+        if lengthscale_prior_scale <= 0:
+            raise ValueError(
+                f"lengthscale_prior_scale must be positive, got {lengthscale_prior_scale}"
+            )
+        ls_prior = NormalPrior(
+            loc=float(lengthscale_prior_loc),
+            scale=float(lengthscale_prior_scale),
+        )
+        # Match init to prior center (default initializer uses N(-2, 2)).
+        parameter_configs["raw_lengthscale"] = {
+            "method": "normal",
+            "mean": float(lengthscale_prior_loc),
+            "std": min(2.0, float(lengthscale_prior_scale)),
+        }
+        lengthscale_prior_meta = {
+            "lengthscale_prior": True,
+            "lengthscale_prior_loc": float(lengthscale_prior_loc),
+            "lengthscale_prior_scale": float(lengthscale_prior_scale),
+        }
+        print(
+            f"Lengthscale prior: Normal(loc={lengthscale_prior_loc}, "
+            f"scale={lengthscale_prior_scale}) on log10 lengthscale"
+            + (" (ARD, shared loc/scale per dim)" if ard else "")
+        )
+
+    if parameter_configs:
+        initializer_kwargs = {"parameter_configs": parameter_configs}
+    initializer_kwargs = merge_mt_noise_initializer_kwargs(initializer_kwargs)
+
+    likelihood = build_rff_multitask_noise_likelihood(NUM_TASKS, noise_prior=noise_prior)
     model = RFFMTGPR(
         x_train,
         y_train_fit,
@@ -544,13 +634,16 @@ def run_toa_mtgpr(
         num_rff=num_rff,
         ard=ard,
         rff_sampling=rff_sampling,
+        correct_sorf=correct_sorf,
         rank_kernel=rank_kernel,
         rank_likelihood=0,
-        noise_prior=noise_prior,
+        likelihood=likelihood,
+        outputscale_prior=os_prior,
+        lengthscale_prior=ls_prior,
     )
     trainer = GPTrainer(
         model,
-        mll_class=RFFMTWoodburyMarginalLogLikelihood,
+        mll_class=mt_mll_class(),
         num_epochs=num_epochs,
         num_inits=num_inits,
         seed=seed,
@@ -558,16 +651,14 @@ def run_toa_mtgpr(
         dtype=dtype,
         optimizer_class=optimizer_class,
         optimizer_kwargs=optimizer_kwargs,
+        param_groups_fn=param_groups_fn,
         initializer_class=RFFMTParameterInitializer,
         initializer_kwargs=initializer_kwargs,
         n_jobs=n_jobs,
         inner_max_num_threads=1,
         cholesky_jitter=woodbury_jitter_for_dtype(dtype),
         callbacks=callbacks,
-        stop_conditions=[
-            ConvergencePatienceStopCondition(patience=10),
-            MinLossChangeStopCondition(min_loss_change=1e-7),
-        ],
+        stop_conditions=stop_conditions,
         parallel_verbose=parallel_verbose,
     )
     t_train = time.time()
@@ -585,12 +676,13 @@ def run_toa_mtgpr(
     model.load_state_dict(best_run["state_dict"])
     best_loss = float(best_run["loss"])
     learned_noise = extract_mt_learned_noise(model)
+    final_lr = float(best_run["final_lr"]) if best_run.get("final_lr") is not None else None
 
     model.eval()
     model.invalidate_feature_cache()
     t_pred = time.time()
     pred_mean, lower, upper, pred_std = evaluate_rff_mt_gp_model(
-        model, x_test, chunk_size=predict_chunk_size
+        model, x_test, chunk_size=predict_chunk_size, **mt_eval_kwargs(dtype)
     )
     prediction_time = time.time() - t_pred
 
@@ -664,6 +756,7 @@ def run_toa_mtgpr(
         "task_names": list(TASK_NAMES),
         "num_rff": num_rff,
         "rff_sampling": rff_sampling,
+        "correct_sorf": correct_sorf,
         "feature_dim": feature_dim,
         "joint_feature_dim": joint_width,
         "rank_kernel": rank_kernel,
@@ -672,6 +765,15 @@ def run_toa_mtgpr(
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
+        "initial_lr": float(optimizer_kwargs.get("lr")) if "lr" in optimizer_kwargs else None,
+        "final_lr": final_lr,
+        "scheduler": None,
+        "scheduler_kwargs": None,
+        "param_groups_fn": (
+            getattr(param_groups_fn, "__name__", str(param_groups_fn))
+            if param_groups_fn is not None
+            else None
+        ),
         "standardize_x": standardize_x,
         "x_standardize_method": x_standardize_method,
         "x_scaling_type": x_scaling_type,
@@ -679,6 +781,8 @@ def run_toa_mtgpr(
         "log_grain": log_grain,
         "logit_cos": logit_cos,
         "response_noise_prior": bool(response_noise_prior),
+        "outputscale_prior_enabled": bool(outputscale_prior),
+        "lengthscale_prior_enabled": bool(lengthscale_prior),
         "best_train_loss": best_loss,
         "rel_tolerance": rel_tolerance,
         **learned_noise,
@@ -692,6 +796,10 @@ def run_toa_mtgpr(
     }
     if noise_prior_meta is not None:
         metrics.update(noise_prior_meta)
+    if outputscale_prior_meta is not None:
+        metrics.update(outputscale_prior_meta)
+    if lengthscale_prior_meta is not None:
+        metrics.update(lengthscale_prior_meta)
     metrics.update(test_eval.prob_metrics)
 
     if monitor_validation and n_val > 0:
@@ -744,6 +852,7 @@ def run_toa_mtgpr(
                     "num_rff": num_rff,
                     "ard": ard,
                     "rff_sampling": rff_sampling,
+                    "correct_sorf": correct_sorf,
                     "rank_kernel": rank_kernel,
                     "rank_likelihood": 0,
                 },

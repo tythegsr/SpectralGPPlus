@@ -36,13 +36,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="TOA dataset with PCA + GPPlus RFF/ORF/SORF (Woodbury)"
     )
-    parser.add_argument("--n-train", type=int, default=49000)
+    parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--n-components", type=int, default=20, help="PCA dimension p")
+    parser.add_argument("--n-components", type=int, default=100, help="PCA dimension p")
     parser.add_argument(
         "--num-rff",
         type=int,
-        default=800,
+        default=1600,
         help="D (RFF frequencies); default: 1600",
     )
     parser.add_argument(
@@ -56,13 +56,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=200,
+        default=2000,
         help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
     )
     parser.add_argument(
         "--lr",
         type=float,
-        default=1.0,
+        default=0.01,
         help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -194,22 +194,28 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--response-noise-prior",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         dest="response_noise_prior",
-        help="Enable LogNormal per-task noise prior from training response columns",
+        help=(
+            "LogNormal noise prior from training response variance "
+            "(default: on; use --no-response-noise-prior to disable)"
+        ),
     )
     parser.add_argument(
         "--noise-var-fraction",
         type=float,
-        default=0.25,
-        help="Scale empirical per-task y variance for noise prior center",
+        default=0.01,
+        help=(
+            "Prior center = fraction * Var(y_train) after transforms "
+            "(default: 0.01; raise to keep a stronger noise floor)"
+        ),
     )
     parser.add_argument(
         "--noise-prior-log-scale",
         type=float,
         default=0.5,
-        help="LogNormal log-scale spread per task for response noise prior (default: 0.5)",
+        help="LogNormal log-scale spread for response noise prior (default: 0.5)",
     )
     parser.add_argument(
         "--log-level",
@@ -233,7 +239,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--log-every-n-epochs",
         type=int,
-        default=10,
+        default=50,
         help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
     )
     parser.add_argument(
@@ -241,9 +247,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable per-epoch train loss logging (Adam only)",
     )
+    parser.add_argument(
+        "--save-root",
+        type=str,
+        default=None,
+        help="Results directory (default: experiments_PCA/results/July15/toa_pca_{args.rff_sampling}_{args.num_inits}inits_p{args.n_components})",
+    )
     args = parser.parse_args()
 
     save_path = args.save_path
+    if save_path is None:
+        save_path = f"experiments_PCA/results/July15/toa_pca_{args.rff_sampling}_{args.num_inits}inits_p{args.n_components}"
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda") and save_path:
         import os

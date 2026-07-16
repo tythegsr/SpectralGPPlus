@@ -11,14 +11,19 @@ if TYPE_CHECKING:
 from ..likelihoods import MultiLikelihood
 from ..models.rff_gpr import _drop_singleton_batch
 from ..utils.rff_utils import (
+    WoodburyForm,
+    WoodburyMtMethod,
     flatten_multitask_targets,
     unflatten_multitask_targets,
     woodbury_factor,
+    woodbury_factor_dual,
     woodbury_factor_mt,
     woodbury_predictive_mean,
+    woodbury_predictive_mean_dual,
     woodbury_predictive_mean_mt,
     woodbury_predictive_obs_std,
     woodbury_predictive_var_diag,
+    woodbury_predictive_var_diag_dual,
     woodbury_predictive_var_diag_mt,
 )
 
@@ -87,12 +92,16 @@ def evaluate_rff_gp_model(
     jitter: float = 1e-6,
     chunk_size: int = 512,
     return_latent_var: bool = False,
+    woodbury_form: WoodburyForm = "primal",
 ):
     """
     Evaluate an :class:`~gpplus.models.RFFGPR` model using Woodbury prediction.
 
     Predictions are computed in chunks of ``chunk_size`` test points so the
     Woodbury solve RHS stays ``(n_train, chunk_size)`` instead of ``(n_train, n_test)``.
+
+    Default ``woodbury_form="primal"`` uses ``M = I + ΦᵀΦ/σ²``.
+    ``woodbury_form="dual"`` factors ``Λ = ΦᵀΦ + σ² I`` (stable for small ``σ²``).
 
     Prefer this over :func:`evaluate_gp_model` for RFF models so inference avoids
     dense n x n linear algebra.
@@ -115,11 +124,17 @@ def evaluate_rff_gp_model(
         train_y = _drop_singleton_batch(model.train_targets)
         z_train = model.train_features()
         noise = model.likelihood.noise
-        chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
         mean_train = model.mean_module(train_x)
         if mean_train.dim() > 1 and mean_train.shape[0] == 1:
             mean_train = mean_train.squeeze(0)
         y_centered = train_y - mean_train
+
+        use_dual = woodbury_form == "dual"
+        if use_dual:
+            chol, noise_clamped, z_lin = woodbury_factor_dual(noise, z_train, jitter=jitter)
+        else:
+            chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
+            z_lin = z_train
 
         mean_chunks = []
         lower_chunks = []
@@ -129,24 +144,30 @@ def evaluate_rff_gp_model(
         for start in range(0, n_test, step):
             chunk_x = test_x[start : start + step]
             z_test = model.scaled_features(chunk_x)
-            f_mean = woodbury_predictive_mean(
-                noise,
-                z_train,
-                z_test,
-                y_centered,
-                jitter=jitter,
-                chol=chol,
-                noise=noise_clamped,
-            )
+            if use_dual:
+                f_mean = woodbury_predictive_mean_dual(
+                    noise_clamped, z_lin, z_test, y_centered, chol=chol
+                )
+                f_var = woodbury_predictive_var_diag_dual(noise_clamped, z_test, chol=chol)
+            else:
+                f_mean = woodbury_predictive_mean(
+                    noise,
+                    z_train,
+                    z_test,
+                    y_centered,
+                    jitter=jitter,
+                    chol=chol,
+                    noise=noise_clamped,
+                )
+                f_var = woodbury_predictive_var_diag(
+                    noise,
+                    z_train,
+                    z_test,
+                    jitter=jitter,
+                    chol=chol,
+                    noise=noise_clamped,
+                )
             f_mean = f_mean + model.mean_module(chunk_x)
-            f_var = woodbury_predictive_var_diag(
-                noise,
-                z_train,
-                z_test,
-                jitter=jitter,
-                chol=chol,
-                noise=noise_clamped,
-            )
             obs_std = woodbury_predictive_obs_std(f_var, noise)
             mean_chunks.append(f_mean)
             lower_chunks.append(f_mean - 2 * obs_std)
@@ -165,17 +186,95 @@ def evaluate_rff_gp_model(
     return mean, lower, upper, stddev
 
 
+def evaluate_lrnn_gp_model(
+    model,
+    test_x: torch.Tensor,
+    jitter: float = 1e-6,
+    chunk_size: int = 512,
+    return_latent_var: bool = False,
+    variance_correction: bool | None = None,
+):
+    """
+    Evaluate an :class:`~gpplus.models.LRNNGPR` model using Woodbury prediction.
+
+    Supports DBK variance correction (diagonal correction) when enabled on the model
+    or passed explicitly via ``variance_correction``.
+    """
+    from ..utils.lrnn_utils import woodbury_predict_lrnn
+
+    model.eval()
+    if variance_correction is None:
+        variance_correction = bool(getattr(model, "variance_correction", True))
+
+    train_inputs = getattr(model, "train_inputs", None)
+    if train_inputs and len(train_inputs) > 0:
+        reference = train_inputs[0]
+        test_x = test_x.to(device=reference.device, dtype=reference.dtype)
+
+    n_test = test_x.shape[0]
+    if n_test == 0:
+        empty = test_x.new_zeros(0)
+        if return_latent_var:
+            return empty, empty, empty, empty, empty
+        return empty, empty, empty, empty
+
+    with torch.no_grad():
+        train_x = _drop_singleton_batch(model.train_inputs[0])
+        train_y = _drop_singleton_batch(model.train_targets)
+        z_train = model.train_features()
+        noise = model.likelihood.noise
+        mean_train = model.mean_module(train_x)
+        if mean_train.dim() > 1 and mean_train.shape[0] == 1:
+            mean_train = mean_train.squeeze(0)
+        y_centered = train_y - mean_train
+
+        mean_chunks = []
+        lower_chunks = []
+        upper_chunks = []
+        f_var_chunks: list[torch.Tensor] = []
+        step = n_test if chunk_size <= 0 else chunk_size
+        for start in range(0, n_test, step):
+            chunk_x = test_x[start : start + step]
+            z_test = model.scaled_features(chunk_x)
+            f_mean, f_var, obs_std = woodbury_predict_lrnn(
+                noise,
+                z_train,
+                z_test,
+                y_centered,
+                jitter=jitter,
+                variance_correction=variance_correction,
+            )
+            f_mean = f_mean + model.mean_module(chunk_x)
+            mean_chunks.append(f_mean)
+            lower_chunks.append(f_mean - 2 * obs_std)
+            upper_chunks.append(f_mean + 2 * obs_std)
+            if return_latent_var:
+                f_var_chunks.append(f_var)
+        mean = torch.cat(mean_chunks, dim=0)
+        lower = torch.cat(lower_chunks, dim=0)
+        upper = torch.cat(upper_chunks, dim=0)
+        stddev = (upper - lower) / 4.0
+
+    logger.info("LRNN evaluation completed.")
+    if return_latent_var:
+        f_var_out = torch.cat(f_var_chunks, dim=0)
+        return mean, lower, upper, stddev, f_var_out
+    return mean, lower, upper, stddev
+
+
 def evaluate_rff_mt_gp_model(
     model,
     test_x: torch.Tensor,
     jitter: float = 1e-6,
     chunk_size: int = 512,
     return_latent_var: bool = False,
+    method: WoodburyMtMethod = "eigen",
 ):
     """
     Evaluate an :class:`~gpplus.models.RFFMTGPR` model using multitask Woodbury prediction.
 
-    Factors the Woodbury middle matrix once per call and reuses it across test chunks.
+    Default ``method="eigen"`` (alias of ``primal_eigen``). Factors the Woodbury
+    middle matrix once per call and reuses it across test chunks.
 
     Returns mean, lower, upper, stddev each of shape ``(n_test, T)``.
     If ``return_latent_var`` is True, also returns latent ``f_var`` (before adding noise).
@@ -208,7 +307,9 @@ def evaluate_rff_mt_gp_model(
         mean_train = model.mean_module(train_x)
         y_centered = flatten_multitask_targets(train_y - mean_train)
         task_noises = model.task_noises()
-        chol, noise = woodbury_factor_mt(task_noises, phi_train, r_b, jitter=jitter)
+        factor, noise = woodbury_factor_mt(
+            task_noises, phi_train, r_b, jitter=jitter, method=method
+        )
 
         step = n_test if chunk_size <= 0 else chunk_size
         mean_chunks: list[torch.Tensor] = []
@@ -226,8 +327,9 @@ def evaluate_rff_mt_gp_model(
                 n_train,
                 y_centered,
                 jitter=jitter,
-                chol=chol,
+                factor=factor,
                 noise=noise,
+                method=method,
             )
             f_mean = unflatten_multitask_targets(f_mean, num_tasks) + model.mean_module(chunk_x)
             f_var = unflatten_multitask_targets(
@@ -238,8 +340,9 @@ def evaluate_rff_mt_gp_model(
                     r_b,
                     n_train,
                     jitter=jitter,
-                    chol=chol,
+                    factor=factor,
                     noise=noise,
+                    method=method,
                 ),
                 num_tasks,
             )

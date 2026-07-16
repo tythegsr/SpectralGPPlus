@@ -28,7 +28,7 @@ class LogScaleHomoskedasticNoise(_HomoskedasticNoiseBase):
         batch_shape: torch.Size = torch.Size(),
         **kwargs: Any,
     ) -> None:
-        # Default constraint for log noise (allows noise from 0.0000001 to 1000)
+        # Default constraint for log noise (allows noise from 1e-7 to 1000)
         if noise_constraint is None:
             noise_constraint = SoftClamp(lower_bound=-7.0, upper_bound=3.0)
 
@@ -87,7 +87,7 @@ class LogGaussianLikelihood(_GaussianLikelihoodBase):
     Args:
         noise_prior: Prior for noise parameter :math:`\sigma^2`.
         noise_constraint: Constraint for raw_noise parameter. Default: `SoftClamp(-7.0, 3.0)`
-                         (log scale from 0.0000001 to 1000).
+                         (log scale from 1e-7 to 1000).
         batch_shape: The batch shape of the learned noise parameter (default: []).
 
     Attributes:

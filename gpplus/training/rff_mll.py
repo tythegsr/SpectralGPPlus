@@ -1,4 +1,4 @@
-"""Woodbury marginal log-likelihood for RFFGPR."""
+"""Woodbury marginal log-likelihood for RFFGPR (and duck-typed Woodbury models)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,15 @@ import gpytorch
 import torch
 from typing import TYPE_CHECKING
 
-from ..utils.rff_utils import woodbury_marginal_log_likelihood
+from ..utils.rff_utils import WoodburyForm, woodbury_marginal_log_likelihood
 
 if TYPE_CHECKING:
     from ..models.rff_gpr import RFFGPR
+
+
+def _is_woodbury_feature_model(model) -> bool:
+    """True if model exposes ``scaled_features`` for Woodbury MLL."""
+    return callable(getattr(model, "scaled_features", None))
 
 
 class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood):
@@ -20,14 +25,10 @@ class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood)
 
         Sigma = noise * I_n + Phi Phi^T,
 
-    with ``Phi = scaled_features(train_x)`` of shape ``(n, m)``. The Woodbury inverse is
+    with ``Phi = scaled_features(train_x)`` of shape ``(n, m)``.
 
-        Sigma^{-1} = (noise I)^{-1}
-                     - (noise I)^{-1} Phi (I + Phi^T (noise I)^{-1} Phi)^{-1}
-                       Phi^T (noise I)^{-1}.
-
-    Training evaluates ``log p(y | X)`` via :func:`~gpplus.utils.rff_utils.woodbury_marginal_log_likelihood`
-    using an ``m x m`` Cholesky of ``M = I + Phi^T Phi / noise`` only (no ``n x n`` Cholesky of ``Sigma``).
+    Default ``woodbury_form="primal"`` factors ``M = I + ΦᵀΦ/σ²``.
+    Set ``woodbury_form="dual"`` to use ``Λ = ΦᵀΦ + σ² I_m`` (stable for small ``σ²``).
 
     Subclasses :class:`~gpytorch.mlls.ExactMarginalLogLikelihood` for GPyTorch MLL API and prior terms
     (``_add_other_terms``); ``forward`` does **not** use the parent exact ``n x n`` covariance path.
@@ -37,7 +38,9 @@ class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood)
 
     See ``docs/overleaf/rff_woodbury_derivation.tex`` for notation (``Phi`` vs features-as-columns ``Z``).
 
-    Requires an :class:`~gpplus.models.RFFGPR` model.
+    Requires a model with ``scaled_features`` (typically :class:`~gpplus.models.RFFGPR`).
+    For LRNN / DBK with variance correction, use
+    :class:`~gpplus.training.lrnn_mll.LRNNWoodburyMarginalLogLikelihood` instead.
     """
 
     def __init__(
@@ -45,13 +48,19 @@ class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood)
         likelihood: gpytorch.likelihoods.Likelihood,
         model: RFFGPR,
         jitter: float = 1e-6,
+        woodbury_form: WoodburyForm = "primal",
     ):
         from ..models.rff_gpr import RFFGPR as _RFFGPR
+        from ..models.lrnn_gpr import LRNNGPR as _LRNNGPR
 
-        if not isinstance(model, _RFFGPR):
-            raise TypeError("RFFWoodburyMarginalLogLikelihood requires an RFFGPR model.")
+        if not (_is_woodbury_feature_model(model) or isinstance(model, (_RFFGPR, _LRNNGPR))):
+            raise TypeError(
+                "RFFWoodburyMarginalLogLikelihood requires a model with scaled_features "
+                "(e.g. RFFGPR)."
+            )
         super().__init__(likelihood, model)
         self.jitter = jitter
+        self.woodbury_form: WoodburyForm = woodbury_form
 
     def forward(
         self,
@@ -62,7 +71,7 @@ class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood)
     ) -> torch.Tensor:
         from ..models.rff_gpr import _drop_singleton_batch
 
-        model: RFFGPR = self.model
+        model = self.model
         train_x = _drop_singleton_batch(model.train_inputs[0])
         # Phi in Sigma = noise I + Phi Phi^T (n x m)
         phi_train = model.scaled_features(train_x)
@@ -77,7 +86,12 @@ class RFFWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood)
             phi_train,
             y_centered,
             jitter=self.jitter,
+            woodbury_form=self.woodbury_form,
         )
         res = self._add_other_terms(res, args)
         num_data = target.numel()
         return res.div(num_data)
+
+
+# Backward-compatible alias for the generic Woodbury MLL surface.
+WoodburyMarginalLogLikelihood = RFFWoodburyMarginalLogLikelihood

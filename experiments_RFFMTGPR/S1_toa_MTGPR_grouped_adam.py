@@ -1,9 +1,10 @@
-"""TOA benchmark with joint GPPlus RFFMTGPR (Woodbury inference)."""
+"""TOA RFFMTGPR with Adam noise-vs-other learning-rate groups (no scheduler)."""
 
 from __future__ import annotations
 
 import logging
 import sys
+from functools import partial
 from pathlib import Path
 
 import torch
@@ -19,6 +20,7 @@ from experiments_toa.paths import pin_toa_import_paths
 pin_toa_import_paths(_MTGPR_DIR)
 
 import gpplus
+from gpplus.training.optimizer_param_groups import adam_noise_vs_other_param_groups
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
 from toa_mtgpr_base import run_toa_mtgpr
 
@@ -26,7 +28,12 @@ from toa_mtgpr_base import run_toa_mtgpr
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="TOA dataset with joint GPPlus RFFMTGPR (Woodbury)")
+    parser = argparse.ArgumentParser(
+        description=(
+            "TOA joint RFFMTGPR with Adam param groups: "
+            "noise LR vs other hypers (no LR scheduler)"
+        )
+    )
     parser.add_argument("--n-train", type=int, default=16000)
     parser.add_argument("--n-test", type=int, default=5000)
     parser.add_argument(
@@ -39,21 +46,27 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-rff",
         type=int,
-        default=1600,
+        default=800,
         help="D (RFF/ORF/SORF frequencies); default min(512, n_train//3)",
     )
     parser.add_argument("--num-inits", type=int, default=1)
     parser.add_argument(
         "--num-epochs",
         type=int,
-        default=200,
-        help="Epochs per init: 1 uses LBFGSScipy; >1 uses torch.optim.Adam",
+        default=2000,
+        help="Epochs per init (must be >1 for Adam grouped LRs)",
     )
     parser.add_argument(
-        "--lr",
+        "--noise-lr",
         type=float,
-        default=0.1,
-        help="Adam LR (only when --num-epochs > 1; no scheduler)",
+        default=0.01,
+        help="Adam LR for raw_noise / raw_task_noises",
+    )
+    parser.add_argument(
+        "--other-lr",
+        type=float,
+        default=0.01,
+        help="Adam LR for all other trainable parameters",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cuda")
@@ -62,135 +75,60 @@ if __name__ == "__main__":
         type=str,
         default="float32",
         choices=("float32", "float64"),
-        help=(
-            "Tensor dtype for model parameters and features (default: float64). "
-            "Woodbury Cholesky/solve runs in float64 when this is float32."
-        ),
     )
-    parser.add_argument(
-        "--predict-chunk-size",
-        type=int,
-        default=512,
-        help="Test points per Woodbury predict chunk (0 = single batch)",
-    )
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=1,
-        help="Parallel hyperparameter inits (-1 = all cores)",
-    )
+    parser.add_argument("--predict-chunk-size", type=int, default=512)
+    parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--ard", action="store_true", default=True)
     parser.add_argument("--no-ard", action="store_false", dest="ard")
     parser.add_argument(
         "--save-path",
         type=str,
         default=None,
-        help="Results directory (default: experiments_RFFMTGPR/results/toa_{rff_sampling})",
+        help="Results directory (default: .../toa_mt_grouped_adam_{rff_sampling})",
     )
-    parser.add_argument(
-        "--monitor-validation",
-        action="store_true",
-        default=True,
-        help=(
-            "Use the fixed 4900-sample validation pool for training callbacks "
-            "(default: on). Train/val/test pools are always reserved from the seed."
-        ),
-    )
+    parser.add_argument("--monitor-validation", action="store_true", default=True)
     parser.add_argument(
         "--no-monitor-validation",
         action="store_false",
         dest="monitor_validation",
-        help="Disable validation monitoring during training",
     )
-    parser.add_argument(
-        "--no-plot",
-        action="store_true",
-        help="Skip validation curve and posterior plots after saving JSON",
-    )
+    parser.add_argument("--no-plot", action="store_true")
     parser.add_argument(
         "--plot-posterior",
         action="store_true",
         default=True,
         dest="plot_posterior",
-        help="Generate posterior diagnostic plots (default: True)",
     )
-
-    parser.add_argument(
-        "--rel-tolerance",
-        type=float,
-        default=0.01,
-        help="Relative error tolerance for pct_within metric (default: 0.01 = 1%%)",
-    )
-    parser.add_argument(
-        "--posterior-n-examples",
-        type=int,
-        default=20,
-        help="Number of test spectra to plot as 3-panel posterior figures",
-    )
-    parser.add_argument(
-        "--posterior-example-indices",
-        type=str,
-        default=None,
-        help="Comma-separated test row indices to plot (overrides --posterior-n-examples)",
-    )
-    parser.add_argument(
-        "--data-path",
-        type=str,
-        default=None,
-        help="Path to toa_data_flattened.npz (default: repo root)",
-    )
+    parser.add_argument("--rel-tolerance", type=float, default=0.01)
+    parser.add_argument("--posterior-n-examples", type=int, default=20)
+    parser.add_argument("--posterior-example-indices", type=str, default=None)
+    parser.add_argument("--data-path", type=str, default=None)
     parser.add_argument(
         "--train-subset",
         type=str,
         default="maximin",
         choices=("random", "maximin"),
-        help=(
-            "How to choose training points within the fixed train pool: "
-            "'random' = pool prefix (default); "
-            "'maximin' = greedy farthest-point in (cos, grain)"
-        ),
     )
-    parser.add_argument(
-        "--no-log-grain",
-        action="store_true",
-        help="Disable log(grain) target transform (default: log-scale grain before Y standardization)",
-    )
+    parser.add_argument("--no-log-grain", action="store_true")
     parser.add_argument(
         "--logit-cos",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Apply logit(cos_i) before Y standardization (default: off; use --logit-cos to enable)",
     )
-    parser.add_argument(
-        "--no-save-checkpoint",
-        action="store_true",
-        help="Skip saving checkpoint_*.pt (includes scaled training data; can be ~100MB+)",
-    )
+    parser.add_argument("--no-save-checkpoint", action="store_true")
     parser.add_argument(
         "--drop-columns",
         type=str,
         default="132,195,196,197,198,199,200,201,202,203,204,205,206,207,208",
-        help="Comma-separated 0-based input column indices to remove (e.g. '0,1,284')",
     )
     parser.add_argument(
         "--response-noise-prior",
         action="store_true",
         default=True,
-        dest="response_noise_prior",
         help="Enable LogNormal per-task noise prior from training response columns",
     )
-    parser.add_argument(
-        "--noise-var-fraction",
-        type=float,
-        default=0.01,
-        help="Scale empirical per-task y variance for noise prior center (default: 0.25)",
-    )
-    parser.add_argument(
-        "--noise-prior-log-scale",
-        type=float,
-        default=0.01,
-        help="LogNormal log-scale spread per task for response noise prior (default: 0.5)",
-    )
+    parser.add_argument("--noise-var-fraction", type=float, default=1e-3)
+    parser.add_argument("--noise-prior-log-scale", type=float, default=0.5)
     parser.add_argument(
         "--outputscale-prior",
         action="store_true",
@@ -200,7 +138,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--outputscale-prior-loc",
         type=float,
-        default=0.0,
+        default=1.0,
         help="Normal prior mean for log10 outputscale (default: 0.0)",
     )
     parser.add_argument(
@@ -212,13 +150,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lengthscale-prior",
         action="store_true",
-        default=False,
+        default=True,
         help="Enable Normal prior on log10 lengthscale (MAP; shared loc/scale for ARD)",
     )
     parser.add_argument(
         "--lengthscale-prior-loc",
         type=float,
-        default=-2.0,
+        default=0.6,
         help=(
             "Normal prior mean for log10 lengthscale (default: -2.0, matches init). "
             "For correct_sorf, try ~0.6 (~+2.6 vs legacy W scale)"
@@ -235,45 +173,24 @@ if __name__ == "__main__":
         type=str,
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
-        help="gpplus log level (default: INFO)",
     )
-    parser.add_argument(
-        "--log-file",
-        type=str,
-        default=None,
-        help="Write gpplus logs to this file in addition to console",
-    )
-    parser.add_argument(
-        "--parallel-verbose",
-        type=int,
-        default=10,
-        help="joblib parallel progress verbosity (0=quiet, 10=status updates; default: 10)",
-    )
-    parser.add_argument(
-        "--log-every-n-epochs",
-        type=int,
-        default=50,
-        help="Log Adam train loss (and val metrics if --monitor-validation) every N epochs",
-    )
+    parser.add_argument("--log-file", type=str, default=None)
+    parser.add_argument("--parallel-verbose", type=int, default=10)
+    parser.add_argument("--log-every-n-epochs", type=int, default=50)
     parser.add_argument(
         "--correct-sorf",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help=(
-            "SORF only: use true FWHT (default) vs legacy aliased FWHT "
-            "(--no-correct-sorf; July9 TOA-compatible)"
-        ),
     )
-    parser.add_argument(
-        "--no-training-log",
-        action="store_true",
-        help="Disable per-epoch train loss logging (Adam only)",
-    )
+    parser.add_argument("--no-training-log", action="store_true")
     args = parser.parse_args()
+
+    if args.num_epochs <= 1:
+        raise SystemExit("Grouped Adam requires --num-epochs > 1.")
 
     save_path = args.save_path
     if save_path is None:
-        save_path = f"experiments_RFFMTGPR/results/July16/toa_{args.rff_sampling}_{args.num_inits}inits_numrff{args.num_rff}_lr{args.lr}_noisevarfrac{args.noise_var_fraction}_noisepriorlogscale{args.noise_prior_log_scale}"
+        save_path = f"experiments_RFFMTGPR/results/july15/toa_mt_grouped_adam_{args.rff_sampling}_lr2_{args.other_lr}"
 
     log_file = args.log_file
     if log_file is None and args.device.startswith("cuda"):
@@ -289,9 +206,19 @@ if __name__ == "__main__":
     dtype = torch.float32 if args.dtype == "float32" else torch.float64
     n_jobs = None if args.n_jobs < 0 else args.n_jobs
 
-    optimizer_kwargs = None
-    if args.num_epochs > 1 and args.lr is not None:
-        optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
+    shared_adam = {k: v for k, v in DEFAULT_ADAM_KWARGS.items() if k != "lr"}
+    param_groups_fn = partial(
+        adam_noise_vs_other_param_groups,
+        noise_lr=args.noise_lr,
+        other_lr=args.other_lr,
+        **shared_adam,
+    )
+    # Flat kwargs for metrics/fallback; per-group LRs come from param_groups_fn.
+    optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.other_lr}
+    print(
+        f"Grouped Adam LRs: noise_lr={args.noise_lr}, other_lr={args.other_lr} "
+        f"(no scheduler)"
+    )
 
     posterior_example_indices = None
     if args.posterior_example_indices:
@@ -311,6 +238,7 @@ if __name__ == "__main__":
         num_inits=args.num_inits,
         num_epochs=args.num_epochs,
         optimizer_kwargs=optimizer_kwargs,
+        param_groups_fn=param_groups_fn,
         seed=args.seed,
         device=args.device,
         dtype=dtype,
