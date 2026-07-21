@@ -14,9 +14,44 @@ _ORF_DIR = Path(__file__).resolve().parent
 _RFF_DIR = _ROOT / "experiments_RFF"
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 
-# IDE RUN CONFIGURATION
-# None trains all 11 QoIs. Example: QOI = ["algae", "fsnow"]
-QOI: list[str] | None = None
+# ---------------------------------------------------------------------------
+# IDE RUN CONFIGURATION — edit these, then press Run.
+# ---------------------------------------------------------------------------
+QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
+N_TRAIN = 16000
+N_TEST = 5000
+NUM_RFF = 1600
+NUM_INITS = 1
+NUM_EPOCHS = 1000
+LR = 0.1
+SEED = 42
+DEVICE = "cuda"
+DTYPE = "float64"  # "float32" | "float64"
+PREDICT_CHUNK_SIZE = 512
+N_JOBS = 1
+ARD = True
+SAVE_PATH: str | None = None
+MONITOR_VALIDATION = True
+PLOT = True
+PLOT_POSTERIOR = True
+REL_TOLERANCE = 0.01
+POSTERIOR_N_EXAMPLES = 20
+POSTERIOR_EXAMPLE_INDICES: str | None = None  # e.g. "0,3,7" or None
+SAVE_CHECKPOINT = True
+RESPONSE_NOISE_PRIOR = True
+NOISE_VAR_FRACTION = 0.001
+NOISE_PRIOR_LOG_SCALE = 0.5
+LOG_LEVEL = "INFO"
+LOG_FILE: str | None = None
+PARALLEL_VERBOSE = 10
+LOG_EVERY_N_EPOCHS = 50
+TRAINING_LOG = True
+DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
+INPUT_VARIABLE = "toa_radiance"
+TASK_BAND_CONFIG: str | None = (
+    "experiments_toa/configs/s2_task_bands_from_corr.json"
+)  # None = s2_task_bands_default.json
+# ---------------------------------------------------------------------------
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -26,7 +61,7 @@ from experiments_toa.paths import pin_toa_import_paths
 pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _ORF_DIR)
 
 import gpplus
-from experiments_toa.s2_cli import add_s2_common_args, parse_example_indices, selected_task_names
+from experiments_toa.s2_cli import parse_example_indices, parse_task_names
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
 from toa_s2_orf_base import run_s2_toa_orf
 
@@ -36,86 +71,50 @@ def run_s2_toa_orf_entry(**kwargs) -> dict:
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="S2 11-QoI TOA with GPPlus ORF (Woodbury)")
-    parser.add_argument("--n-train", type=int, default=16000)
-    parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--num-rff", type=int, default=1600)
-    parser.add_argument("--num-orf", type=int, default=None, help="Alias for --num-rff")
-    parser.add_argument("--num-inits", type=int, default=1)
-    parser.add_argument("--num-epochs", type=int, default=1000)
-    parser.add_argument("--lr", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--dtype", type=str, default="float64", choices=("float32", "float64"))
-    parser.add_argument("--predict-chunk-size", type=int, default=512)
-    parser.add_argument("--n-jobs", type=int, default=1)
-    parser.add_argument("--ard", action="store_true", default=True)
-    parser.add_argument("--no-ard", action="store_false", dest="ard")
-    parser.add_argument("--save-path", type=str, default=None)
-    parser.add_argument("--monitor-validation", action="store_true", default=True)
-    parser.add_argument("--no-monitor-validation", action="store_false", dest="monitor_validation")
-    parser.add_argument("--no-plot", action="store_true")
-    parser.add_argument("--plot-posterior", action="store_true", default=True, dest="plot_posterior")
-    parser.add_argument("--rel-tolerance", type=float, default=0.01)
-    parser.add_argument("--posterior-n-examples", type=int, default=20)
-    parser.add_argument("--posterior-example-indices", type=str, default=None)
-    add_s2_common_args(parser, default_qoi=QOI)
-    parser.add_argument("--no-save-checkpoint", action="store_true")
-    parser.add_argument("--response-noise-prior", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--noise-var-fraction", type=float, default=0.001)
-    parser.add_argument("--noise-prior-log-scale", type=float, default=0.5)
-    parser.add_argument("--log-level", type=str, default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR"))
-    parser.add_argument("--log-file", type=str, default=None)
-    parser.add_argument("--parallel-verbose", type=int, default=10)
-    parser.add_argument("--log-every-n-epochs", type=int, default=50)
-    parser.add_argument("--no-training-log", action="store_true")
-    args = parser.parse_args()
-
-    num_rff = args.num_orf if args.num_orf is not None else args.num_rff
-    save_path = args.save_path or (
-        f"experiments_ORF/results/s2_toa_orf_{args.num_inits}inits_numorf{args.num_orf}_"
-        f"lr{args.lr}_noisevarfrac{args.noise_var_fraction}_noisepriorlogscale{args.noise_prior_log_scale}"
+    save_path = SAVE_PATH or (
+        f"experiments_ORF/results/s2_toa_orf_{NUM_INITS}inits_numorf{NUM_RFF}_"
+        f"lr{LR}_noisevarfrac{NOISE_VAR_FRACTION}_noisepriorlogscale{NOISE_PRIOR_LOG_SCALE}"
     )
-    log_file = args.log_file
-    if log_file is None and args.device.startswith("cuda"):
+    log_file = LOG_FILE
+    if log_file is None and DEVICE.startswith("cuda"):
         log_file = os.path.join(save_path, "train.log")
-    gpplus.config.configure_logger(level=getattr(logging, args.log_level), log_to_file=log_file)
-    dtype = torch.float32 if args.dtype == "float32" else torch.float64
+    gpplus.config.configure_logger(level=getattr(logging, LOG_LEVEL), log_to_file=log_file)
+    dtype = torch.float32 if DTYPE == "float32" else torch.float64
     optimizer_kwargs = None
-    if args.num_epochs > 1 and args.lr is not None:
-        optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
+    if NUM_EPOCHS > 1 and LR is not None:
+        optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": LR}
+
+    print(f"ORF IDE config  prior={RESPONSE_NOISE_PRIOR}  qoi={QOI}")
 
     run_s2_toa_orf(
-        n_train=args.n_train,
-        n_test=args.n_test,
-        num_rff=num_rff,
-        num_inits=args.num_inits,
-        num_epochs=args.num_epochs,
+        n_train=N_TRAIN,
+        n_test=N_TEST,
+        num_rff=NUM_RFF,
+        num_inits=NUM_INITS,
+        num_epochs=NUM_EPOCHS,
         optimizer_kwargs=optimizer_kwargs,
-        seed=args.seed,
-        device=args.device,
+        seed=SEED,
+        device=DEVICE,
         dtype=dtype,
-        ard=args.ard,
+        ard=ARD,
         save_path=save_path,
-        n_jobs=None if args.n_jobs < 0 else args.n_jobs,
-        predict_chunk_size=args.predict_chunk_size,
-        monitor_validation=args.monitor_validation,
-        plot_validation=not args.no_plot,
-        plot_posterior=args.plot_posterior and not args.no_plot,
-        rel_tolerance=args.rel_tolerance,
-        posterior_n_examples=args.posterior_n_examples,
-        posterior_example_indices=parse_example_indices(args.posterior_example_indices),
-        data_path=args.data_path,
-        parallel_verbose=args.parallel_verbose,
-        training_verbose=not args.no_training_log,
-        log_every_n_epochs=args.log_every_n_epochs,
-        save_checkpoint=not args.no_save_checkpoint,
-        response_noise_prior=args.response_noise_prior,
-        noise_var_fraction=args.noise_var_fraction,
-        noise_prior_log_scale=args.noise_prior_log_scale,
-        input_variable=args.input_variable,
-        task_names=selected_task_names(args),
-        task_band_config=args.task_band_config,
+        n_jobs=None if N_JOBS < 0 else N_JOBS,
+        predict_chunk_size=PREDICT_CHUNK_SIZE,
+        monitor_validation=MONITOR_VALIDATION,
+        plot_validation=PLOT,
+        plot_posterior=PLOT_POSTERIOR and PLOT,
+        rel_tolerance=REL_TOLERANCE,
+        posterior_n_examples=POSTERIOR_N_EXAMPLES,
+        posterior_example_indices=parse_example_indices(POSTERIOR_EXAMPLE_INDICES),
+        data_path=DATA_PATH,
+        parallel_verbose=PARALLEL_VERBOSE,
+        training_verbose=TRAINING_LOG,
+        log_every_n_epochs=LOG_EVERY_N_EPOCHS,
+        save_checkpoint=SAVE_CHECKPOINT,
+        response_noise_prior=RESPONSE_NOISE_PRIOR,
+        noise_var_fraction=NOISE_VAR_FRACTION,
+        noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
+        input_variable=INPUT_VARIABLE,
+        task_names=parse_task_names(QOI),
+        task_band_config=TASK_BAND_CONFIG,
     )

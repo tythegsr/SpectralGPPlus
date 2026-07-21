@@ -1,4 +1,4 @@
-"""S2 11-QoI TOA benchmark with PCA + RFF/ORF/SORF independent GPs."""
+"""S2 11-QoI TOA benchmark with joint GPPlus RFFMTGPR (Woodbury)."""
 
 from __future__ import annotations
 
@@ -10,9 +10,8 @@ from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_PCA_DIR = Path(__file__).resolve().parent
+_MTGPR_DIR = Path(__file__).resolve().parent
 _RFF_DIR = _ROOT / "experiments_RFF"
-_MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
@@ -20,15 +19,14 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-N_COMPONENTS = 100
 RFF_SAMPLING = "sorf"  # "rff" | "orf" | "sorf"
-NUM_RFF = 1600
+NUM_RFF = 400
 NUM_INITS = 1
-NUM_EPOCHS = 2000
-LR = 0.01
+NUM_EPOCHS = 1000
+LR = 0.1
 SEED = 42
 DEVICE = "cuda"
-DTYPE = "float32"  # "float32" | "float64"
+DTYPE = "float64"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 ARD = True
@@ -41,10 +39,11 @@ POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None  # e.g. "0,3,7" or None
 CORRECT_SORF = True
 SAVE_CHECKPOINT = True
-PCA_SVD_SOLVER = "randomized"  # "auto" | "full" | "randomized" | "arpack"
-RESPONSE_NOISE_PRIOR = True
+RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.5
+LOG_SCALE = True
+RANK_KERNEL = 0  # 0 = independent tasks (QoIs are nearly orthogonal)
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
@@ -52,6 +51,7 @@ LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
+# Joint MT uses the band config "default" ranges (shared X), not per-QoI keeps.
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -62,21 +62,22 @@ if str(_ROOT) not in sys.path:
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _PCA_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR)
 
 import gpplus
 from experiments_toa.s2_cli import parse_example_indices, parse_task_names
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
-from toa_s2_pca_stgp_base import run_s2_toa_pca_stgp
+from toa_s2_mtgpr_base import run_s2_toa_mtgpr
 
 
-def run_s2_toa_pca_rff_entry(**kwargs) -> dict:
-    return run_s2_toa_pca_stgp(**kwargs)
+def run_s2_toa_mtgpr_entry(**kwargs) -> dict:
+    return run_s2_toa_mtgpr(**kwargs)
 
 
 if __name__ == "__main__":
     save_path = SAVE_PATH or (
-        f"experiments_PCA/results/s2_toa_pca_{RFF_SAMPLING}_{NUM_INITS}inits_p{N_COMPONENTS}"
+        f"experiments_RFFMTGPR/results/July21/s2_toa_mtgpr_{RFF_SAMPLING}_"
+        f"{NUM_INITS}inits_numrff{NUM_RFF}_lr{LR}_dtype{DTYPE}"
     )
     log_file = LOG_FILE
     if log_file is None and DEVICE.startswith("cuda"):
@@ -87,14 +88,16 @@ if __name__ == "__main__":
     if NUM_EPOCHS > 1 and LR is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": LR}
 
-    print(f"PCA-RFF IDE config  sampling={RFF_SAMPLING}  prior={RESPONSE_NOISE_PRIOR}  qoi={QOI}")
+    print(
+        f"S2 MTGPR IDE config  sampling={RFF_SAMPLING}  prior={RESPONSE_NOISE_PRIOR}  "
+        f"qoi={QOI}  input={INPUT_VARIABLE}"
+    )
 
-    run_s2_toa_pca_stgp(
+    run_s2_toa_mtgpr(
         n_train=N_TRAIN,
         n_test=N_TEST,
-        n_components=N_COMPONENTS,
-        rff_sampling=RFF_SAMPLING,
         num_rff=NUM_RFF,
+        rff_sampling=RFF_SAMPLING,  # type: ignore[arg-type]
         num_inits=NUM_INITS,
         num_epochs=NUM_EPOCHS,
         optimizer_kwargs=optimizer_kwargs,
@@ -120,7 +123,8 @@ if __name__ == "__main__":
         noise_var_fraction=NOISE_VAR_FRACTION,
         noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
         correct_sorf=CORRECT_SORF,
-        pca_svd_solver=PCA_SVD_SOLVER,
+        log_scale=LOG_SCALE,
+        rank_kernel=RANK_KERNEL,
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,

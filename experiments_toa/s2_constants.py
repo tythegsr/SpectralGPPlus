@@ -47,7 +47,7 @@ S2_DEFAULT_KEEP_RANGES: tuple[tuple[int, int], ...] = (
 )
 
 _S2_DATA_DIR = Path(__file__).resolve().parent / "data 11 QoI"
-S2_DEFAULT_DATA_PATH = _S2_DATA_DIR / "snow_toa_simulations_20261607.nc"
+S2_DEFAULT_DATA_PATH = _S2_DATA_DIR / "snow_toa_simulations_20262107.nc"
 S2_DEFAULT_BAND_CONFIG_PATH = (
     Path(__file__).resolve().parent / "configs" / "s2_task_bands_default.json"
 )

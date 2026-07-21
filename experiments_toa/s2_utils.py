@@ -14,6 +14,19 @@ def select_bands(x: torch.Tensor, band_indices: Sequence[int]) -> torch.Tensor:
     return x.index_select(-1, idx)
 
 
+def apply_x_transform(x: torch.Tensor, transform: str | None) -> torch.Tensor:
+    """
+    Elementwise input transform applied after band select, before PCA / X scaling.
+
+    Supported: ``None`` / ``\"none\"``, ``\"log1p\"`` (``ln(1 + max(x, 0))``).
+    """
+    if transform is None or transform == "none":
+        return x
+    if transform == "log1p":
+        return torch.log1p(x.clamp_min(0.0))
+    raise ValueError(f"Unknown x_transform {transform!r}; expected 'none' or 'log1p'.")
+
+
 def extract_ard_lengthscales(model) -> dict[str, Any]:
     """Extract transformed lengthscales from a GP / RFFGP model if present."""
     out: dict[str, Any] = {

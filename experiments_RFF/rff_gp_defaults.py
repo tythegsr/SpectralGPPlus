@@ -9,7 +9,7 @@ stability knobs (dual Woodbury, dual eigen MT, float32 jitter, σ² floor 1e-5).
 from __future__ import annotations
 
 import torch
-from gpytorch.likelihoods import Likelihood, MultitaskGaussianLikelihood
+from gpytorch.likelihoods import Likelihood
 from gpytorch.priors import Prior
 
 from gpplus.constraints import SoftClamp
@@ -56,19 +56,15 @@ def build_rff_multitask_noise_likelihood(
     noise_prior: Prior | None = None,
     *,
     rank: int = 0,
-) -> MultitaskGaussianLikelihood:
-    """
-    GPyTorch multitask noise uses the constraint transform as σ² directly
-    (softplus-style), **not** log10 SoftClamp. SoftClamp would allow
-    zero/negative task noises and break Woodbury.
-    """
-    from gpytorch.constraints import GreaterThan
+) -> Likelihood:
+    """Log10 SoftClamp per-task noise (matches single-task LogGaussianLikelihood)."""
+    from gpplus.likelihoods import LogMultitaskGaussianLikelihood
 
-    return MultitaskGaussianLikelihood(
+    return LogMultitaskGaussianLikelihood(
         num_tasks=num_tasks,
         rank=rank,
         noise_prior=noise_prior,
-        noise_constraint=GreaterThan(DEFAULT_NOISE_FLOOR),
+        noise_constraint=rff_noise_constraint(),
         has_global_noise=False,
         has_task_noise=True,
     )
@@ -87,14 +83,19 @@ def merge_rff_noise_initializer_kwargs(initializer_kwargs: dict | None) -> dict:
 
 
 def merge_mt_noise_initializer_kwargs(initializer_kwargs: dict | None) -> dict:
-    """
-    Pass-through for MT initializer kwargs.
-
-    Do **not** inject log10 SoftClamp-style ``raw_task_noises`` bounds: GPyTorch
-    ``MultitaskGaussianLikelihood`` parameterizes task noise via a GreaterThan /
-    softplus constraint, not ``10^raw``.
-    """
-    return {} if initializer_kwargs is None else dict(initializer_kwargs)
+    """Apply RFF log10 noise init bounds unless ``raw_task_noises`` is already configured."""
+    cfg = rff_noise_initializer_parameter_config()
+    mt_cfg = {
+        **cfg,
+        "description": f"Per-task noise parameter - uniform log10 scale (σ² >= {DEFAULT_NOISE_FLOOR:g})",
+    }
+    if initializer_kwargs is None:
+        return {"parameter_configs": {"raw_task_noises": mt_cfg}}
+    out = dict(initializer_kwargs)
+    pcs = dict(out.get("parameter_configs") or {})
+    pcs.setdefault("raw_task_noises", mt_cfg)
+    out["parameter_configs"] = pcs
+    return out
 
 
 def rff_mll_class(woodbury_form: WoodburyForm = DEFAULT_WOODBURY_FORM) -> type:

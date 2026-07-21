@@ -46,6 +46,7 @@ from experiments_toa.s2_plotting import (
     select_posterior_example_indices,
 )
 from experiments_toa.s2_utils import (
+    apply_x_transform,
     compute_per_task_metrics,
     extract_ard_lengthscales,
     macro_rrmse,
@@ -165,6 +166,7 @@ def run_s2_toa_stgp(
     input_variable: str = "toa_reflectance",
     task_names: Sequence[str] | None = None,
     task_band_config: str | None = None,
+    x_transform: str | None = None,
 ) -> dict:
     """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
@@ -273,6 +275,12 @@ def run_s2_toa_stgp(
             if x_val_full.numel() > 0
             else x_val_full.to(dtype=dtype)
         )
+        x_tr = apply_x_transform(x_tr, x_transform)
+        x_te = apply_x_transform(x_te, x_transform)
+        if x_va.numel() > 0:
+            x_va = apply_x_transform(x_va, x_transform)
+        if x_transform and x_transform != "none" and task_idx == 0:
+            print(f"X transform: {x_transform} (before PCA / scaling)")
 
         pca_meta = None
         input_dim_before_pca = int(x_tr.shape[-1])
@@ -506,6 +514,7 @@ def run_s2_toa_stgp(
                     "correct_sorf": correct_sorf,
                     "n_pca_components": n_pca_components,
                     "input_variable": input_variable,
+                    "x_transform": x_transform or "none",
                     "dataset": "s2",
                     "band_indices": list(band_indices),
                     "ard_mapping": ard_mapped,
@@ -615,6 +624,7 @@ def run_s2_toa_stgp(
         "initial_lr": float(optimizer_kwargs.get("lr")) if "lr" in optimizer_kwargs else None,
         "standardize_x": standardize_x,
         "x_standardize_method": x_standardize_method,
+        "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
         "log_scale_tasks": [n for n in names if task_uses_log_scale(n, log_scale=log_scale)],

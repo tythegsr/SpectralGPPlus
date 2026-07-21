@@ -38,7 +38,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-rff",
         type=int,
-        default=1600,
+        default=400,
         help="D (SORF frequencies); default: 1600 (min(512, n_train//3) when omitted programmatically)",
     )
     parser.add_argument(
@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=1.0,
+        default=0.01,
         help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float32",
+        default="float64",
         choices=("float32", "float64"),
     )
     parser.add_argument(

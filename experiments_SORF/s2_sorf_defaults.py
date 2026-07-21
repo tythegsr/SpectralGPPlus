@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 # Plan baseline until ablation recommendations override.
-S2_SORF_DEFAULT_RESPONSE_NOISE_PRIOR = True
+S2_SORF_DEFAULT_RESPONSE_NOISE_PRIOR = False
 S2_SORF_DEFAULT_NOISE_VAR_FRACTION = 0.001
 S2_SORF_DEFAULT_NOISE_PRIOR_LOG_SCALE = 0.5
 

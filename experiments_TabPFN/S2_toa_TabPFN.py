@@ -10,9 +10,29 @@ _TABPFN_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 _RFF_DIR = _ROOT / "experiments_RFF"
 
-# IDE RUN CONFIGURATION
-# None trains all 11 QoIs. Example: QOI = ["algae", "fsnow"]
-QOI: list[str] | None = None
+# ---------------------------------------------------------------------------
+# IDE RUN CONFIGURATION — edit these, then press Run.
+# ---------------------------------------------------------------------------
+QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
+N_TRAIN = 16000
+N_TEST = 5000
+SEED = 42
+SAVE_PATH: str | None = None
+PLOT = True
+PLOT_POSTERIOR = True
+REL_TOLERANCE = 0.01
+POSTERIOR_N_EXAMPLES = 20
+POSTERIOR_EXAMPLE_INDICES: str | None = None  # e.g. "0,3,7" or None
+PFN_DEVICE = "cuda"
+PFN_MODEL_VERSION = "auto"
+IGNORE_PRETRAINING_LIMITS = False
+POSTERIOR_PDF_MODE = "tabpfn_bar"  # "gaussian" | "tabpfn_bar"
+DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
+INPUT_VARIABLE = "toa_radiance"
+TASK_BAND_CONFIG: str | None = (
+    "experiments_toa/configs/s2_task_bands_from_corr.json"
+)  # None = s2_task_bands_default.json
+# ---------------------------------------------------------------------------
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -21,8 +41,8 @@ from experiments_toa.paths import pin_toa_import_paths
 
 pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _TABPFN_DIR)
 
-from experiments_toa.s2_cli import add_s2_common_args, parse_example_indices, selected_task_names
-from toa_s2_tabpfn_base import PFN_MODEL_VERSION_CHOICES, run_s2_toa_tabpfn
+from experiments_toa.s2_cli import parse_example_indices, parse_task_names
+from toa_s2_tabpfn_base import run_s2_toa_tabpfn
 
 
 def run_s2_toa_tabpfn_entry(**kwargs) -> dict:
@@ -30,46 +50,24 @@ def run_s2_toa_tabpfn_entry(**kwargs) -> dict:
 
 
 if __name__ == "__main__":
-    import argparse
+    save_path = SAVE_PATH or "experiments_TabPFN/results/s2_toa_tabpfn"
+    print(f"TabPFN IDE config  qoi={QOI}  pfn_device={PFN_DEVICE}")
 
-    parser = argparse.ArgumentParser(description="S2 11-QoI TOA with TabPFN")
-    parser.add_argument("--n-train", type=int, default=16000)
-    parser.add_argument("--n-test", type=int, default=5000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--save-path", type=str, default=None)
-    parser.add_argument("--no-plot", action="store_true")
-    parser.add_argument("--plot-posterior", action="store_true", default=True, dest="plot_posterior")
-    parser.add_argument("--rel-tolerance", type=float, default=0.01)
-    parser.add_argument("--posterior-n-examples", type=int, default=20)
-    parser.add_argument("--posterior-example-indices", type=str, default=None)
-    add_s2_common_args(parser, default_qoi=QOI)
-    parser.add_argument("--pfn-device", type=str, default="cuda")
-    parser.add_argument("--pfn-model-version", type=str, default="auto", choices=PFN_MODEL_VERSION_CHOICES)
-    parser.add_argument("--ignore-pretraining-limits", action="store_true")
-    parser.add_argument(
-        "--posterior-pdf-mode",
-        type=str,
-        default="tabpfn_bar",
-        choices=("gaussian", "tabpfn_bar"),
-    )
-    args = parser.parse_args()
-
-    save_path = args.save_path or "experiments_TabPFN/results/s2_toa_tabpfn"
     run_s2_toa_tabpfn(
-        n_train=args.n_train,
-        n_test=args.n_test,
-        seed=args.seed,
+        n_train=N_TRAIN,
+        n_test=N_TEST,
+        seed=SEED,
         save_path=save_path,
-        plot_posterior=args.plot_posterior and not args.no_plot,
-        rel_tolerance=args.rel_tolerance,
-        posterior_n_examples=args.posterior_n_examples,
-        posterior_example_indices=parse_example_indices(args.posterior_example_indices),
-        data_path=args.data_path,
-        pfn_device=args.pfn_device,
-        pfn_model_version=args.pfn_model_version,
-        ignore_pretraining_limits=args.ignore_pretraining_limits,
-        posterior_pdf_mode=args.posterior_pdf_mode,  # type: ignore[arg-type]
-        input_variable=args.input_variable,
-        task_names=selected_task_names(args),
-        task_band_config=args.task_band_config,
+        plot_posterior=PLOT_POSTERIOR and PLOT,
+        rel_tolerance=REL_TOLERANCE,
+        posterior_n_examples=POSTERIOR_N_EXAMPLES,
+        posterior_example_indices=parse_example_indices(POSTERIOR_EXAMPLE_INDICES),
+        data_path=DATA_PATH,
+        pfn_device=PFN_DEVICE,
+        pfn_model_version=PFN_MODEL_VERSION,
+        ignore_pretraining_limits=IGNORE_PRETRAINING_LIMITS,
+        posterior_pdf_mode=POSTERIOR_PDF_MODE,  # type: ignore[arg-type]
+        input_variable=INPUT_VARIABLE,
+        task_names=parse_task_names(QOI),
+        task_band_config=TASK_BAND_CONFIG,
     )
