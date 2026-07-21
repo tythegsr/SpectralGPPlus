@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.01,
+        default=0.1,
         help="Adam learning rate (only when --num-epochs > 1; default matches DEFAULT_ADAM_KWARGS)",
     )
     parser.add_argument("--seed", type=int, default=42)

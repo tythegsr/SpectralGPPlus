@@ -57,7 +57,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.01,
+        default=1.0,
         help="Adam learning rate (only when --num-epochs > 1)",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -65,7 +65,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dtype",
         type=str,
-        default="float64",
+        default="float32",
         choices=("float32", "float64"),
     )
     parser.add_argument(
