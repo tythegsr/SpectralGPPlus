@@ -1,2 +1,3 @@
 from .log_gaussian_likelihood import LogGaussianLikelihood
+from .log_multitask_gaussian_likelihood import LogMultitaskGaussianLikelihood
 from .multi_likelihood import MultiLikelihood, MultiNoise

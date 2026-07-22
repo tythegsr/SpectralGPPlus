@@ -363,8 +363,8 @@ def run(
     min_ridge_r2: float = 0.15,
     min_bands: int = 16,
     step: int = 8,
-    subsample: int | None = 20000,
-    seed: int = 0,
+    subsample: int | None = 49000,
+    seed: int = 42,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")

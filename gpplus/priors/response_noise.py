@@ -19,6 +19,9 @@ from gpytorch.priors.utils import _load_transformed_to_base_dist
 from torch import Tensor
 from torch.distributions import TransformedDistribution
 
+from ..likelihoods import LogMultitaskGaussianLikelihood
+from ..constraints import SoftClamp
+
 
 def empirical_task_noise_variances(
     y_train: Tensor,
@@ -110,16 +113,18 @@ def build_multitask_noise_likelihood(
     num_tasks: int,
     noise_prior: Prior | None = None,
     rank: int = 0,
-) -> MultitaskGaussianLikelihood:
+    noise_constraint: SoftClamp | None = None,
+) -> LogMultitaskGaussianLikelihood:
     """
-    MultitaskGaussianLikelihood consistent with Woodbury MT inference.
+    Log10 SoftClamp multitask noise likelihood for Woodbury MT inference.
 
     Uses per-task diagonal noise only (``has_global_noise=False``).
     """
-    return MultitaskGaussianLikelihood(
+    return LogMultitaskGaussianLikelihood(
         num_tasks=num_tasks,
         rank=rank,
         noise_prior=noise_prior,
+        noise_constraint=noise_constraint,
         has_global_noise=False,
         has_task_noise=True,
     )
@@ -129,12 +134,13 @@ def task_noise_raw_init_from_variances(
     likelihood: MultitaskGaussianLikelihood,
     variances: Tensor,
 ) -> Tensor:
-    """Map target noise variances σ²_t to ``raw_task_noises`` (constraint inverse)."""
+    """Map target noise variances σ²_t to ``raw_task_noises`` (log10 SoftClamp inverse)."""
     if not hasattr(likelihood, "raw_task_noises_constraint"):
         raise TypeError("likelihood must expose raw_task_noises_constraint (rank=0, has_task_noise=True).")
     ref = likelihood.raw_task_noises
-    v = variances.reshape(-1).to(device=ref.device, dtype=ref.dtype)
-    return likelihood.raw_task_noises_constraint.inverse_transform(v)
+    v = variances.reshape(-1).to(device=ref.device, dtype=ref.dtype).clamp_min(1e-30)
+    log_v = torch.log10(v)
+    return likelihood.raw_task_noises_constraint.inverse_transform(log_v)
 
 
 def empirical_scalar_noise_variance(
