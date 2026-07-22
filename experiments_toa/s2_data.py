@@ -183,6 +183,10 @@ def load_s2_toa_data(
     X_test = X[test_idx]
     y_test = y[test_idx]
 
+    # print(y_train)
+    print(X_train[0])
+    print(y_train[0])
+
     if n_val > 0:
         val_idx = val_pool[:n_val]
         X_val = X[val_idx]

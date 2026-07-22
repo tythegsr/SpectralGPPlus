@@ -22,9 +22,21 @@ TASK_GRAIN = "y_grain"
 DEFAULT_TASK_NAMES = (TASK_COS, TASK_GRAIN)
 
 # Physical / dataset support for TOA targets (grain size >= 0; cos_i in [0, 1]).
+# S2 task names share the same support conventions where applicable.
 TASK_BOUNDS: dict[str, tuple[float, float | None]] = {
     TASK_COS: (0.0, 1.0),
     TASK_GRAIN: (0.0, None),
+    "cos_i": (0.0, 1.0),
+    "aot": (0.0, None),
+    "cwv": (0.0, None),
+    "algae": (0.0, None),
+    "dust": (0.0, None),
+    "grain_size": (0.0, None),
+    "liquid_water": (0.0, None),
+    "fNPV": (0.0, None),
+    "fPV": (0.0, None),
+    "fsnow": (0.0, None),
+    "fsoil": (0.0, None),
 }
 
 # Minimum σ for PDF evaluation only (avoids division by zero; not a display fudge).
@@ -45,9 +57,13 @@ def _pct_str(value: float) -> str:
 
 
 def _format_posterior_value(task_key: str, value: float) -> str:
-    if task_key == TASK_COS:
+    if task_key in (TASK_COS, "cos_i"):
         return f"{value:.4f}"
-    # Grain (µm): .4g collapses mean/median/mode when they differ by <1 µm.
+    if task_key in (TASK_GRAIN, "grain_size"):
+        # Grain (µm): .4g collapses mean/median/mode when they differ by <1 µm.
+        return f"{value:.3f}"
+    if abs(value) >= 1.0e3 or (0.0 < abs(value) < 1.0e-2):
+        return f"{value:.4g}"
     return f"{value:.3f}"
 
 
@@ -370,6 +386,7 @@ def _plot_posterior_density_axis(
     rel_tolerance: float,
     log_grain: bool = False,
     logit_cos: bool = False,
+    use_lognormal: bool | None = None,
     y_pred_mean: float | None = None,
     y_pred_mode: float | None = None,
     log_mu: float | None = None,
@@ -394,6 +411,12 @@ def _plot_posterior_density_axis(
         and tabpfn_logits is not None
         and tabpfn_borders is not None
     )
+    is_cos = task_key in (TASK_COS, "cos_i")
+    is_lognormal = (
+        bool(use_lognormal)
+        if use_lognormal is not None
+        else bool(log_grain and task_key in (TASK_GRAIN, "grain_size"))
+    )
     tabpfn_edges: np.ndarray | None = None
     tabpfn_heights: np.ndarray | None = None
     pdf: np.ndarray | None = None
@@ -408,7 +431,7 @@ def _plot_posterior_density_axis(
             train_scale_log=tabpfn_train_scale_log,
         )
         density_label = "TabPFN posterior"
-    elif logit_cos and task_key == TASK_COS:
+    elif logit_cos and is_cos:
         if (
             logit_mu is not None
             and logit_sigma is not None
@@ -421,7 +444,7 @@ def _plot_posterior_density_axis(
             sigma_logit = max((upper - lower) / (4.0 * max(y_pred * (1.0 - y_pred), 1e-12)), _PDF_STD_EPS)
         pdf = _logit_normal_pdf(grid, mu_logit, sigma_logit, x_min=x_min, x_max=x_max)
         density_label = "posterior"
-    elif log_grain and task_key == TASK_GRAIN:
+    elif is_lognormal:
         if log_mu is not None and log_sigma is not None and np.isfinite(log_mu) and np.isfinite(log_sigma):
             mu_log, sigma_log = float(log_mu), max(float(log_sigma), _PDF_STD_EPS)
         else:
@@ -446,9 +469,9 @@ def _plot_posterior_density_axis(
 
     if use_tabpfn and tabpfn_mean is not None and np.isfinite(tabpfn_mean):
         point_label = f"mean = {fmt(tabpfn_mean)}"
-    elif logit_cos and task_key == TASK_COS:
+    elif logit_cos and is_cos:
         point_label = f"median = {fmt(y_pred)}"
-    elif log_grain and task_key == TASK_GRAIN:
+    elif is_lognormal:
         point_label = f"median = {fmt(y_pred)}"
     else:
         point_label = f"mean = {fmt(y_pred)}"
@@ -495,7 +518,7 @@ def _plot_posterior_density_axis(
             )
     else:
         ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
-    if y_pred_mean is not None and logit_cos and task_key == TASK_COS:
+    if y_pred_mean is not None and logit_cos and is_cos:
         ax.axvline(
             y_pred_mean,
             color="C1",
@@ -503,7 +526,7 @@ def _plot_posterior_density_axis(
             linewidth=1.5,
             label=f"mean = {fmt(y_pred_mean)}",
         )
-    if y_pred_mean is not None and log_grain and task_key == TASK_GRAIN:
+    if y_pred_mean is not None and is_lognormal:
         ax.axvline(
             y_pred_mean,
             color="C1",
@@ -511,7 +534,7 @@ def _plot_posterior_density_axis(
             linewidth=1.5,
             label=f"mean = {fmt(y_pred_mean)}",
         )
-    if log_grain and task_key == TASK_GRAIN:
+    if is_lognormal:
         mode_val = y_pred_mode
         if mode_val is None and log_mu is not None and log_sigma is not None:
             if np.isfinite(log_mu) and np.isfinite(log_sigma):

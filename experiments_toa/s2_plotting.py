@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+import math
+import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from experiments_toa.s2_constants import S2_LOG_SCALE_TASK_NAMES
+
+_TASK_LABELS: dict[str, str] = {
+    "algae": "algae",
+    "aot": "aot",
+    "cos_i": "cos_i",
+    "cwv": "cwv",
+    "dust": "dust",
+    "fNPV": "fNPV",
+    "fPV": "fPV",
+    "fsnow": "fsnow",
+    "fsoil": "fsoil",
+    "grain_size": "grain size (µm)",
+    "liquid_water": "liquid water",
+}
+
+
+def _ensure_plot_toa_posterior():
+    """Import S1 posterior density helpers (MTGPR dir may already be pinned)."""
+    try:
+        import plot_toa_posterior as mod
+
+        return mod
+    except ImportError:
+        mtgpr = Path(__file__).resolve().parents[1] / "experiments_RFFMTGPR"
+        mtgpr_s = str(mtgpr)
+        if mtgpr_s not in sys.path:
+            sys.path.insert(0, mtgpr_s)
+        import plot_toa_posterior as mod
+
+        return mod
 
 
 def select_posterior_example_indices(
@@ -45,6 +79,9 @@ def save_s2_predictions_npz(
     bands_by_task: Mapping[str, Sequence[int]],
     y_pred_mean: np.ndarray | None = None,
     y_pred_mode: np.ndarray | None = None,
+    log_mu: np.ndarray | None = None,
+    log_sigma: np.ndarray | None = None,
+    log_scale_tasks: Sequence[str] | None = None,
 ) -> Path:
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -66,6 +103,12 @@ def save_s2_predictions_npz(
         payload["y_pred_mean"] = np.asarray(y_pred_mean)
     if y_pred_mode is not None:
         payload["y_pred_mode"] = np.asarray(y_pred_mode)
+    if log_mu is not None:
+        payload["log_mu"] = np.asarray(log_mu)
+    if log_sigma is not None:
+        payload["log_sigma"] = np.asarray(log_sigma)
+    if log_scale_tasks is not None:
+        payload["log_scale_tasks"] = np.asarray(list(log_scale_tasks))
     for name, bands in bands_by_task.items():
         payload[f"bands_{name}"] = np.asarray(list(bands), dtype=np.int64)
     np.savez_compressed(out, **payload)
@@ -111,6 +154,21 @@ def plot_s2_task_scatter(
     return out_path
 
 
+def _task_label(name: str) -> str:
+    return _TASK_LABELS.get(name, name)
+
+
+def _resolve_y_std(
+    y_std: np.ndarray | None,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> np.ndarray:
+    if y_std is not None:
+        return np.asarray(y_std, dtype=np.float64)
+    # Approximate σ from a 95% CI when callers omit it.
+    return np.asarray((upper - lower) / (2.0 * 1.96), dtype=np.float64)
+
+
 def plot_s2_posterior_examples(
     *,
     x_test: np.ndarray,
@@ -123,44 +181,126 @@ def plot_s2_posterior_examples(
     example_indices: Sequence[int],
     save_dir: str | Path,
     title: str,
+    y_std: np.ndarray | None = None,
+    rel_metrics_by_task: Mapping[str, Mapping[str, float | int]] | None = None,
+    rel_tolerance: float = 0.01,
+    log_scale_tasks: Sequence[str] | None = None,
+    y_pred_mean: np.ndarray | None = None,
+    y_pred_mode: np.ndarray | None = None,
+    log_mu: np.ndarray | None = None,
+    log_sigma: np.ndarray | None = None,
+    spectrum_ylabel: str = "Radiance",
 ) -> list[str]:
-    """Spectrum + selected-task posterior panels for a few test examples."""
+    """
+    S1-style posterior figures: spectrum + per-task density panels.
+
+    With 1–2 tasks the layout matches S1 (one row: spectrum | densities).
+    With more tasks, the spectrum spans the top row and densities fill a grid below.
+    """
+    post = _ensure_plot_toa_posterior()
+
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     paths: list[str] = []
-    # Cap task panels for readability.
-    panel_tasks = list(task_names[:4])
-    n_panels = 1 + len(panel_tasks)
+
+    names = list(task_names)
+    n_tasks = len(names)
+    if n_tasks == 0:
+        return paths
+
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    lower = np.asarray(lower, dtype=np.float64)
+    upper = np.asarray(upper, dtype=np.float64)
+    y_std_arr = _resolve_y_std(y_std, lower, upper)
+    wl = np.asarray(wavelengths_nm, dtype=np.float64)
+    x_test = np.asarray(x_test, dtype=np.float64)
+
+    if log_scale_tasks is None:
+        log_set = {n for n in names if n in S2_LOG_SCALE_TASK_NAMES}
+    else:
+        log_set = set(log_scale_tasks)
+
+    # Classic S1 row when few tasks; otherwise spectrum on top + density grid.
+    use_s1_row = n_tasks <= 2
+    if use_s1_row:
+        n_cols = 1 + n_tasks
+        n_rows = 1
+    else:
+        n_cols = min(3, n_tasks)
+        n_rows = 1 + int(math.ceil(n_tasks / n_cols))
 
     for ex in example_indices:
-        fig, axes = plt.subplots(
-            n_panels,
-            1,
-            figsize=(8.0, 2.2 * n_panels),
-            constrained_layout=True,
-        )
-        if n_panels == 1:
-            axes = [axes]
-        ax0 = axes[0]
-        ax0.plot(wavelengths_nm, x_test[ex], lw=1.0, color="C0")
-        ax0.set_xlabel("Wavelength (nm)")
-        ax0.set_ylabel("Reflectance")
-        ax0.set_title(f"{title} | test idx {ex}")
+        if use_s1_row:
+            fig, axes = plt.subplots(
+                1,
+                n_cols,
+                figsize=(4.5 * n_cols, 4.2),
+                dpi=120,
+                constrained_layout=True,
+            )
+            axes = np.atleast_1d(axes)
+            ax_spec = axes[0]
+            dens_axes = list(axes[1:])
+        else:
+            fig = plt.figure(
+                figsize=(4.5 * n_cols, 3.6 * n_rows),
+                dpi=120,
+                constrained_layout=True,
+            )
+            gs = fig.add_gridspec(n_rows, n_cols)
+            ax_spec = fig.add_subplot(gs[0, :])
+            dens_axes = []
+            for t in range(n_tasks):
+                r = 1 + t // n_cols
+                c = t % n_cols
+                dens_axes.append(fig.add_subplot(gs[r, c]))
 
-        for ax, t_name in zip(axes[1:], panel_tasks):
-            t = list(task_names).index(t_name)
-            yt = float(y_true[ex, t])
-            yp = float(y_pred[ex, t])
-            lo = float(lower[ex, t])
-            hi = float(upper[ex, t])
-            ax.errorbar([0], [yp], yerr=[[yp - lo], [hi - yp]], fmt="o", color="C1", label="pred")
-            ax.axhline(yt, color="k", ls="--", label="true")
-            ax.set_xticks([])
-            ax.set_ylabel(t_name)
-            ax.legend(loc="best", fontsize=8)
+        spectrum = x_test[ex]
+        ax_spec.plot(wl, spectrum, color="C0", linewidth=1.0)
+        ax_spec.set_xlabel("Wavelength (nm)")
+        ax_spec.set_ylabel(spectrum_ylabel)
+        true_bits = []
+        for name in names[:2]:
+            t = names.index(name)
+            true_bits.append(f"true {name}={y_true[ex, t]:.4g}")
+        ax_spec.set_title(", ".join(true_bits) if true_bits else f"test idx {ex}")
+        ax_spec.grid(True, alpha=0.3)
 
+        for ax, name in zip(dens_axes, names):
+            t = names.index(name)
+            rel = None
+            if rel_metrics_by_task is not None and name in rel_metrics_by_task:
+                rel = dict(rel_metrics_by_task[name])
+            post._plot_posterior_density_axis(
+                ax,
+                task_key=name,
+                task_label=_task_label(name),
+                y_true=float(y_true[ex, t]),
+                y_pred=float(y_pred[ex, t]),
+                y_std=float(y_std_arr[ex, t]),
+                lower=float(lower[ex, t]),
+                upper=float(upper[ex, t]),
+                rel_metrics=rel,
+                rel_tolerance=rel_tolerance,
+                use_lognormal=name in log_set,
+                y_pred_mean=(
+                    float(y_pred_mean[ex, t])
+                    if y_pred_mean is not None
+                    else None
+                ),
+                y_pred_mode=(
+                    float(y_pred_mode[ex, t])
+                    if y_pred_mode is not None
+                    else None
+                ),
+                log_mu=float(log_mu[ex, t]) if log_mu is not None else None,
+                log_sigma=float(log_sigma[ex, t]) if log_sigma is not None else None,
+            )
+
+        fig.suptitle(f"TOA test example {ex}", fontsize=11)
         out = save_dir / f"example_{ex:04d}.png"
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, bbox_inches="tight")
         plt.close(fig)
         paths.append(str(out))
     return paths

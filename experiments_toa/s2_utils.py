@@ -99,20 +99,88 @@ def compute_per_task_metrics(
     for t, name in enumerate(task_names):
         yt = y_true[:, t]
         yp = y_pred[:, t]
-        rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
-        mae = float(np.mean(np.abs(yp - yt)))
-        std = float(np.std(yt))
-        rrmse = rmse / std if std > 0 else float("inf")
-        ss_res = float(np.sum((yt - yp) ** 2))
-        ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
-        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
-        metrics[f"{name}_RMSE"] = rmse
-        metrics[f"{name}_MAE"] = mae
-        metrics[f"{name}_RRMSE"] = rrmse
-        metrics[f"{name}_R2"] = r2
+        metrics.update(_scalar_error_metrics(yt, yp, prefix=f"{name}_"))
     return metrics
+
+
+def _scalar_error_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    prefix: str = "",
+) -> dict[str, float]:
+    yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
+    mae = float(np.mean(np.abs(yp - yt)))
+    std = float(np.std(yt))
+    rrmse = rmse / std if std > 0 else float("inf")
+    ss_res = float(np.sum((yt - yp) ** 2))
+    ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return {
+        f"{prefix}RMSE": rmse,
+        f"{prefix}MAE": mae,
+        f"{prefix}RRMSE": rrmse,
+        f"{prefix}R2": r2,
+    }
+
+
+def compute_log_scale_extra_metrics(
+    y_true_physical: np.ndarray | torch.Tensor,
+    *,
+    log_mu: np.ndarray | torch.Tensor,
+    point_mean_physical: np.ndarray | torch.Tensor | None = None,
+) -> dict[str, float]:
+    """
+    Extra test metrics for QoIs trained in ln-space.
+
+    - ``*_log``: errors in ln-space (``ln(y_true)`` vs predictive ``log_mu``).
+    - ``*_mean``: physical errors using log-normal mean as the point estimate.
+    """
+    yt = np.asarray(y_true_physical, dtype=np.float64).reshape(-1)
+    mu = np.asarray(log_mu, dtype=np.float64).reshape(-1)
+    if yt.shape != mu.shape:
+        raise ValueError(f"y_true and log_mu shape mismatch: {yt.shape} vs {mu.shape}")
+    if np.any(yt <= 0):
+        raise ValueError("log-scale metrics require strictly positive y_true.")
+
+    out = _scalar_error_metrics(np.log(yt), mu, prefix="")
+    # Rename to *_log
+    log_out = {
+        "RMSE_log": out["RMSE"],
+        "MAE_log": out["MAE"],
+        "RRMSE_log": out["RRMSE"],
+        "R2_log": out["R2"],
+    }
+    if point_mean_physical is not None:
+        ym = np.asarray(point_mean_physical, dtype=np.float64).reshape(-1)
+        mean_out = _scalar_error_metrics(yt, ym, prefix="")
+        log_out.update(
+            {
+                "RMSE_mean": mean_out["RMSE"],
+                "MAE_mean": mean_out["MAE"],
+                "RRMSE_mean": mean_out["RRMSE"],
+                "R2_mean": mean_out["R2"],
+            }
+        )
+    return log_out
 
 
 def macro_rrmse(per_task: Mapping[str, float], task_names: Sequence[str]) -> float:
     vals = [float(per_task[f"{name}_RRMSE"]) for name in task_names]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def macro_metric(
+    per_task: Mapping[str, float],
+    task_names: Sequence[str],
+    suffix: str,
+) -> float:
+    """Mean of ``{name}_{suffix}`` over tasks that define the key."""
+    vals = [
+        float(per_task[f"{name}_{suffix}"])
+        for name in task_names
+        if f"{name}_{suffix}" in per_task
+    ]
     return float(np.mean(vals)) if vals else float("nan")

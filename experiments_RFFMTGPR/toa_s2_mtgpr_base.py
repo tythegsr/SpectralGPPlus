@@ -45,7 +45,13 @@ from experiments_toa.s2_plotting import (
     save_s2_predictions_npz,
     select_posterior_example_indices,
 )
-from experiments_toa.s2_utils import compute_per_task_metrics, macro_rrmse, select_bands
+from experiments_toa.s2_utils import (
+    compute_log_scale_extra_metrics,
+    compute_per_task_metrics,
+    macro_metric,
+    macro_rrmse,
+    select_bands,
+)
 from experiments_toa.s2_y_transform import (
     InverseYOutput,
     forward_y_s2,
@@ -491,9 +497,25 @@ def run_s2_toa_mtgpr(
         per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
         per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
         per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
+        if (
+            task_uses_log_scale(name, log_scale=log_scale)
+            and inv.log_mu is not None
+        ):
+            extra = compute_log_scale_extra_metrics(
+                y_true_np[:, t],
+                log_mu=inv.log_mu[:, t].numpy(),
+                point_mean_physical=(
+                    y_pred_mean_np[:, t] if y_pred_mean_np is not None else None
+                ),
+            )
+            for key, value in extra.items():
+                per_task[f"{name}_{key}"] = float(value)
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
     aggregate_rrmse = float(macro_rrmse(per_task, names))
+    log_task_names = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+    aggregate_rrmse_log = macro_metric(per_task, log_task_names, "RRMSE_log")
+    aggregate_rrmse_lnorm_mean = macro_metric(per_task, log_task_names, "RRMSE_mean")
 
     prob_metrics: dict[str, float] = {}
     for t, name in enumerate(names):
@@ -519,16 +541,27 @@ def run_s2_toa_mtgpr(
         for key, value in computed.items():
             prob_metrics[f"{name}_{key}"] = value
 
-    print(f"\nTest macro RRMSE: {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    print(f"\nTest macro RRMSE (physical median): {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    if log_task_names:
+        print(
+            f"Test macro RRMSE_log (ln-space, log QoIs): {aggregate_rrmse_log:.6f}  "
+            f"macro RRMSE_mean (physical lognormal mean): {aggregate_rrmse_lnorm_mean:.6f}"
+        )
     for name in names:
         print(
             f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
             f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
         )
+        if name in log_task_names:
+            print(
+                f"  ln-space RRMSE_log: {per_task[f'{name}_RRMSE_log']:.6f}  "
+                f"RMSE_log: {per_task[f'{name}_RMSE_log']:.6f}  |  "
+                f"physical-mean RRMSE_mean: {per_task[f'{name}_RRMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"Total training time: {train_time:.1f}s")
 
-    log_tasks = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+    log_tasks = log_task_names
     metrics: dict = {
         "title": title,
         "dataset": "s2",
@@ -571,6 +604,8 @@ def run_s2_toa_mtgpr(
         "Total_Time": train_time + prediction_time,
         "RMSE": aggregate_rmse,
         "aggregate_RRMSE": aggregate_rrmse,
+        "aggregate_RRMSE_log_tasks": aggregate_rrmse_log,
+        "aggregate_RRMSE_lognormal_mean_tasks": aggregate_rrmse_lnorm_mean,
         **per_task,
         **prob_metrics,
     }
@@ -685,6 +720,19 @@ def run_s2_toa_mtgpr(
                     example_indices=example_indices,
                     save_dir=post_dir,
                     title=title,
+                    y_std=pred_std_np,
+                    rel_metrics_by_task=rel_metrics_by_task,
+                    rel_tolerance=rel_tolerance,
+                    log_scale_tasks=log_tasks,
+                    y_pred_mean=y_pred_mean_np if log_tasks else None,
+                    y_pred_mode=y_pred_mode_np if log_tasks else None,
+                    log_mu=inv.log_mu.numpy() if log_tasks and inv.log_mu is not None else None,
+                    log_sigma=inv.log_sigma.numpy() if log_tasks and inv.log_sigma is not None else None,
+                    spectrum_ylabel=(
+                        "Radiance"
+                        if str(data_meta.get("input_variable", "")).endswith("radiance")
+                        else "Reflectance"
+                    ),
                 )
                 for p in post_paths:
                     print(f"Saved posterior plot to {p}")

@@ -17,16 +17,16 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = None# None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-NUM_RFF = 800
-NUM_INITS = 2
-NUM_EPOCHS = 1000
+NUM_RFF = 200
+NUM_INITS = 1
+NUM_EPOCHS = 1
 LR = 0.01
 SEED = 42
 DEVICE = "cuda"
-DTYPE = "float64"  # "float32" | "float64"
+DTYPE = "float32"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 ARD = True
@@ -48,11 +48,11 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_loguniform_20262107.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "log1p"  # "none" | "log1p" (before UniformScaler / StandardScaler)
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr.json"
+    "experiments_toa/configs/s2_task_bands_from_corr_loguniform.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
 
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July21/s2_toa_sorf_{NUM_INITS}inits_numrff{NUM_RFF}_"
+        f"experiments_SORF/results/July22_loguniform_test/s2_toa_sorf_{NUM_INITS}inits_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"
     )

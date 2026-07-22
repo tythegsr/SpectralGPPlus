@@ -1,4 +1,4 @@
-"""Histograms of S2 TOA radiance (all wavelengths): raw and log1p."""
+"""Histograms of S2 TOA radiance and QoIs (raw + log transforms)."""
 
 from __future__ import annotations
 
@@ -16,18 +16,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from experiments_toa.s2_constants import S2_DEFAULT_DATA_PATH, S2_TASK_NAMES
+from experiments_toa.s2_constants import (
+    S2_DEFAULT_DATA_PATH,
+    S2_LOG_SCALE_TASK_NAMES,
+    S2_TASK_NAMES,
+)
 
 QOI_NAMES = list(S2_TASK_NAMES)
 BANDS_PER_PAGE = 24  # 4 x 6
 NCOLS = 4
 
 
-def _load_radiance(path: Path) -> tuple[np.ndarray, np.ndarray]:
+def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     with h5py.File(path, "r") as f:
         wl = np.asarray(f["wl"][:], dtype=np.float64)
         rad = np.asarray(f["toa_radiance"][:], dtype=np.float64)
-    return wl, rad
+        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in QOI_NAMES])
+    return wl, rad, Y
 
 
 def _finite(x: np.ndarray) -> np.ndarray:
@@ -52,6 +57,56 @@ def _stats(x: np.ndarray) -> dict:
 def radiance_log1p(rad: np.ndarray) -> np.ndarray:
     """ln(1 + x); clip tiny negatives from numerical noise before transform."""
     return np.log1p(np.clip(rad, 0.0, None))
+
+
+def _plot_qoi_histograms(Y: np.ndarray, out: Path, *, log_space: bool) -> None:
+    """Grid of QoI histograms: raw physical, or log10 for log-scale QoIs only."""
+    n = len(QOI_NAMES)
+    ncols = 4
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3.2 * nrows))
+    axes = np.atleast_1d(axes).ravel()
+    title = (
+        "QoI histograms (log10) — expect ~flat for log-uniform design dims"
+        if log_space
+        else "QoI histograms (raw / physical)"
+    )
+    for j, name in enumerate(QOI_NAMES):
+        ax = axes[j]
+        col = Y[:, j]
+        if log_space:
+            if name not in S2_LOG_SCALE_TASK_NAMES:
+                ax.set_visible(False)
+                continue
+            col = np.log10(np.clip(_finite(col), 1e-30, None))
+            label = f"log10({name})"
+            color = "coral"
+        else:
+            col = _finite(col)
+            label = name
+            color = "steelblue"
+        ax.hist(col, bins=60, color=color, edgecolor="white", linewidth=0.3)
+        ax.set_title(label, fontsize=10)
+        ax.set_ylabel("count")
+        st = _stats(col)
+        ax.text(
+            0.98,
+            0.95,
+            f"n={st['n']}\n[{st['min']:.3g}, {st['max']:.3g}]\n"
+            f"μ={st['mean']:.3g}\nσ={st['std']:.3g}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=7,
+            family="monospace",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="none"),
+        )
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(title, y=1.01)
+    fig.tight_layout()
+    fig.savefig(out, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _plot_all_band_histograms_pdf(
@@ -131,11 +186,16 @@ def _plot_wavelength_value_density(
     plt.close(fig)
 
 
-def run_radiance_histograms(data_path: Path, out_dir: Path) -> dict:
+def run_histograms(data_path: Path, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Loading radiance from {data_path}")
-    wl, rad = _load_radiance(data_path)
-    print(f"  rad={rad.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+    print(f"Loading {data_path}")
+    wl, rad, Y = _load(data_path)
+    print(f"  rad={rad.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+
+    print("QoI raw histograms...")
+    _plot_qoi_histograms(Y, out_dir / "qoi_histograms_raw.png", log_space=False)
+    print("QoI log10 histograms (algae/dust/grain_size/liquid_water)...")
+    _plot_qoi_histograms(Y, out_dir / "qoi_histograms_log10.png", log_space=True)
 
     rad_log = radiance_log1p(rad)
     n_bands = rad.shape[1]
@@ -178,7 +238,14 @@ def run_radiance_histograms(data_path: Path, out_dir: Path) -> dict:
         "data_path": str(data_path.resolve()),
         "n_samples": int(rad.shape[0]),
         "n_bands": int(n_bands),
-        "transform": "log1p = ln(1 + max(radiance, 0))",
+        "log_scale_qois": sorted(S2_LOG_SCALE_TASK_NAMES),
+        "qoi_stats_raw": {name: _stats(Y[:, j]) for j, name in enumerate(QOI_NAMES)},
+        "qoi_stats_log10": {
+            name: _stats(np.log10(np.clip(_finite(Y[:, j]), 1e-30, None)))
+            for j, name in enumerate(QOI_NAMES)
+            if name in S2_LOG_SCALE_TASK_NAMES
+        },
+        "transform_radiance": "log1p = ln(1 + max(radiance, 0))",
         "band_stats_raw": {
             str(j): {**_stats(rad[:, j]), "wavelength_nm": float(wl[j])} for j in range(n_bands)
         },
@@ -186,10 +253,15 @@ def run_radiance_histograms(data_path: Path, out_dir: Path) -> dict:
             str(j): {**_stats(rad_log[:, j]), "wavelength_nm": float(wl[j])} for j in range(n_bands)
         },
     }
-    summary_path = out_dir / "radiance_histogram_summary.json"
+    summary_path = out_dir / "histogram_summary.json"
     summary_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"Wrote summary -> {summary_path}")
     return meta
+
+
+def run_radiance_histograms(data_path: Path, out_dir: Path) -> dict:
+    """Back-compat alias."""
+    return run_histograms(data_path, out_dir)
 
 
 def main() -> None:
@@ -201,7 +273,7 @@ def main() -> None:
         default=Path(__file__).resolve().parent / "analysis_toa_July21",
     )
     args = p.parse_args()
-    run_radiance_histograms(args.data_path, args.out_dir)
+    run_histograms(args.data_path, args.out_dir)
 
 
 if __name__ == "__main__":

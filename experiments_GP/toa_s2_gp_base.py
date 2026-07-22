@@ -528,5 +528,9 @@ def run_s2_toa_gp(
                 example_indices=example_indices,
                 save_dir=Path(save_path) / "plots" / "posterior" / title,
                 title=title,
+                y_std=y_std_stacked,
+                rel_metrics_by_task=rel_metrics_by_task,
+                rel_tolerance=rel_tolerance,
+                log_scale_tasks=[n for n in names if task_uses_log_scale(n, log_scale=log_scale)],
             )
     return metrics

@@ -47,8 +47,10 @@ from experiments_toa.s2_plotting import (
 )
 from experiments_toa.s2_utils import (
     apply_x_transform,
+    compute_log_scale_extra_metrics,
     compute_per_task_metrics,
     extract_ard_lengthscales,
+    macro_metric,
     macro_rrmse,
     map_ard_to_bands,
     select_bands,
@@ -261,6 +263,10 @@ def run_s2_toa_stgp(
     y_std_all: list[np.ndarray] = []
     lower_all: list[np.ndarray] = []
     upper_all: list[np.ndarray] = []
+    y_pred_mean_all: list[np.ndarray] = []
+    y_pred_mode_all: list[np.ndarray] = []
+    log_mu_all: list[np.ndarray] = []
+    log_sigma_all: list[np.ndarray] = []
     rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
 
     for task_idx, task_name in enumerate(names):
@@ -559,6 +565,14 @@ def run_s2_toa_stgp(
         )
         if task_uses_log_scale(task_name, log_scale=log_scale):
             computed["log_scale"] = True
+            if inv.log_mu is None:
+                raise RuntimeError(f"log_mu missing after inverse for log-scale task {task_name}")
+            extra = compute_log_scale_extra_metrics(
+                y_te.cpu(),
+                log_mu=inv.log_mu,
+                point_mean_physical=inv.point_mean,
+            )
+            computed.update(extra)
         tm: dict = {
             "best_train_loss": best_loss,
             **learned_noise,
@@ -577,15 +591,50 @@ def run_s2_toa_stgp(
         y_std_all.append(pred_std.numpy())
         lower_all.append(lower.numpy())
         upper_all.append(upper.numpy())
-        print(
-            f"{task_name} Test RMSE: {computed['RMSE']:.6f}  "
-            f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
-        )
+        if inv.point_mean is not None:
+            y_pred_mean_all.append(inv.point_mean.numpy())
+        else:
+            y_pred_mean_all.append(pred_mean.numpy())
+        if inv.point_mode is not None:
+            y_pred_mode_all.append(inv.point_mode.numpy())
+        else:
+            y_pred_mode_all.append(np.full_like(pred_mean.numpy(), np.nan))
+        if inv.log_mu is not None:
+            log_mu_all.append(inv.log_mu.numpy())
+        else:
+            log_mu_all.append(np.full_like(pred_mean.numpy(), np.nan))
+        if inv.log_sigma is not None:
+            log_sigma_all.append(inv.log_sigma.numpy())
+        else:
+            log_sigma_all.append(np.full_like(pred_mean.numpy(), np.nan))
+        if task_uses_log_scale(task_name, log_scale=log_scale):
+            print(
+                f"{task_name} Test (physical median) RMSE: {computed['RMSE']:.6f}  "
+                f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
+            )
+            print(
+                f"{task_name} Test (ln-space) RMSE_log: {computed['RMSE_log']:.6f}  "
+                f"RRMSE_log: {computed['RRMSE_log']:.6f}  MAE_log: {computed['MAE_log']:.6f}"
+            )
+            if "RRMSE_mean" in computed:
+                print(
+                    f"{task_name} Test (physical mean) RMSE_mean: {computed['RMSE_mean']:.6f}  "
+                    f"RRMSE_mean: {computed['RRMSE_mean']:.6f}"
+                )
+        else:
+            print(
+                f"{task_name} Test RMSE: {computed['RMSE']:.6f}  "
+                f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
+            )
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
     y_std_stacked = np.stack(y_std_all, axis=1)
     lower_stacked = np.stack(lower_all, axis=1)
     upper_stacked = np.stack(upper_all, axis=1)
+    y_pred_mean_stacked = np.stack(y_pred_mean_all, axis=1)
+    y_pred_mode_stacked = np.stack(y_pred_mode_all, axis=1)
+    log_mu_stacked = np.stack(log_mu_all, axis=1)
+    log_sigma_stacked = np.stack(log_sigma_all, axis=1)
     y_test_np = y_test.detach().cpu().numpy()
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked, names)
 
@@ -604,6 +653,17 @@ def run_s2_toa_stgp(
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
     aggregate_rrmse = macro_rrmse(per_task, names)
+
+    # Flatten per-task log extras into per_task for aggregates / JSON.
+    log_task_names = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+    for name in log_task_names:
+        tm = task_metrics[name]
+        for key in ("RMSE_log", "MAE_log", "RRMSE_log", "R2_log", "RMSE_mean", "MAE_mean", "RRMSE_mean", "R2_mean"):
+            if key in tm:
+                per_task[f"{name}_{key}"] = float(tm[key])
+    aggregate_rrmse_log = macro_metric(per_task, log_task_names, "RRMSE_log")
+    aggregate_rrmse_mean = macro_metric(per_task, log_task_names, "RRMSE_mean")
+
     metrics: dict = {
         "title": title,
         "dataset": "s2",
@@ -642,6 +702,8 @@ def run_s2_toa_stgp(
         "Total_Time": total_train_time + total_prediction_time,
         "aggregate_RRMSE": aggregate_rrmse,
         "aggregate_RRMSE_mean": aggregate_rrmse,
+        "aggregate_RRMSE_log_tasks": aggregate_rrmse_log,
+        "aggregate_RRMSE_lognormal_mean_tasks": aggregate_rrmse_mean,
         "RMSE": aggregate_rmse,
         **per_task,
     }
@@ -675,12 +737,23 @@ def run_s2_toa_stgp(
             for key, value in val_summary.items():
                 metrics[f"{task_name}_{key}"] = value
 
-    print(f"\nTest macro RRMSE: {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    print(f"\nTest macro RRMSE (physical median): {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    if log_task_names:
+        print(
+            f"Test macro RRMSE_log (ln-space, log QoIs): {aggregate_rrmse_log:.6f}  "
+            f"macro RRMSE_mean (physical lognormal mean): {aggregate_rrmse_mean:.6f}"
+        )
     for name in names:
         print(
             f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
             f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
         )
+        if name in log_task_names:
+            print(
+                f"  ln-space RRMSE_log: {per_task[f'{name}_RRMSE_log']:.6f}  "
+                f"RMSE_log: {per_task[f'{name}_RMSE_log']:.6f}  |  "
+                f"physical-mean RRMSE_mean: {per_task[f'{name}_RRMSE_mean']:.6f}"
+            )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
     print(f"Total training time: {total_train_time:.1f}s")
 
@@ -691,6 +764,7 @@ def run_s2_toa_stgp(
             seed=seed,
             explicit_indices=posterior_example_indices,
         )
+        log_task_names_plot = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
         out_npz = save_s2_predictions_npz(
             save_path,
             title=title,
@@ -706,6 +780,11 @@ def run_s2_toa_stgp(
             val_idx=val_idx.cpu().numpy(),
             test_idx=test_idx.cpu().numpy(),
             bands_by_task=bands_by_task,
+            y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+            y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
+            log_mu=log_mu_stacked if log_task_names_plot else None,
+            log_sigma=log_sigma_stacked if log_task_names_plot else None,
+            log_scale_tasks=log_task_names_plot,
         )
         print(f"Saved predictions to {out_npz}")
         metrics["predictions_npz"] = str(out_npz)
@@ -733,6 +812,11 @@ def run_s2_toa_stgp(
                     title=f"{title} | {name}",
                 )
             post_dir = Path(save_path) / "plots" / "posterior" / title
+            spectrum_ylabel = (
+                "Radiance"
+                if str(data_meta.get("input_variable", "")).endswith("radiance")
+                else "Reflectance"
+            )
             post_paths = plot_s2_posterior_examples(
                 x_test=x_test_orig.numpy(),
                 wavelengths_nm=wavelengths_np,
@@ -744,6 +828,15 @@ def run_s2_toa_stgp(
                 example_indices=example_indices,
                 save_dir=post_dir,
                 title=title,
+                y_std=y_std_stacked,
+                rel_metrics_by_task=rel_metrics_by_task,
+                rel_tolerance=rel_tolerance,
+                log_scale_tasks=log_task_names_plot,
+                y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+                y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
+                log_mu=log_mu_stacked if log_task_names_plot else None,
+                log_sigma=log_sigma_stacked if log_task_names_plot else None,
+                spectrum_ylabel=spectrum_ylabel,
             )
             for p in post_paths[:3]:
                 print(f"Saved posterior plot to {p}")

@@ -286,6 +286,11 @@ def main() -> None:
         ]
     ]
 
+    # sRTMnet 6c LUTs store rhoatm + dir-* coupling products already in radiance
+    # (RT_mode=rdn). Only transm-mode LUTs need solar_irr * coszen / pi.
+    rt_mode = str(ds_mod.attrs.get("RT_mode", ds_mod.attrs.get("rt_mode", "rdn"))).lower()
+    print(f"Atmospheric LUT RT_mode={rt_mode}")
+
     print("Building MODTRAN interpolators...")
     v_interp_rhoatm = VectorInterpolator(
         modtran_grid, ds_mod.rhoatm.transpose(*target_dims).values, version="mlg"
@@ -362,26 +367,30 @@ def main() -> None:
         atm_pt = np.array([ELE_TRUE, 180.0 - VZA_TRUE, RAA_TRUE, aot, cwv])
         rho_atm = v_interp_rhoatm(atm_pt)
         s_alb = v_interp_sphalb(atm_pt)
-        l_raw = [
-            v_interp_lraw[k](atm_pt) * (solar_irr * coszen / np.pi)
-            for k in ["dir-dir", "dif-dir", "dir-dif", "dif-dif"]
-        ]
+        # Coupling terms from LUT; convert transmittance -> radiance only in transm mode.
+        scale = (solar_irr * coszen / np.pi) if rt_mode == "transm" else 1.0
+        l_raw = [v_interp_lraw[k](atm_pt) * scale for k in ["dir-dir", "dif-dir", "dir-dif", "dif-dif"]]
+        l_atm = rho_atm * scale if rt_mode == "transm" else rho_atm
         solar_irr_emit = np.dot(h_matrix, solar_irr)
 
+        # ISOFIT 6c: L_tot before eq. 11 on diffuse; residual is L_tot * s * rho^2 / (1 - s * rho).
         eq_11_term = 1.0 - (s_alb * rho_hd)
         l_dir_dir = (l_raw[0] / coszen) * cosi
-        l_dif_dir = (l_raw[1] * (cosi / coszen)) / eq_11_term
-        l_dir_dif = (l_raw[2] / coszen) * coszen
-        l_dif_dif = l_raw[3] / eq_11_term
-        l_path_sum = sum(l_raw)
+        l_dif_dir = l_raw[1] * (cosi / coszen)
+        l_dir_dif = l_raw[2]  # flat background: cos_i_bg = coszen
+        l_dif_dif = l_raw[3]
+        l_tot = l_dir_dir + l_dif_dir + l_dir_dif + l_dif_dif
+        l_dif_dir = l_dif_dir / eq_11_term
+        l_dif_dif = l_dif_dif / eq_11_term
+        atm_surface_scattering = s_alb * rho_hd
 
         toa_rdn = (
-            (rho_atm * (solar_irr * coszen / np.pi))
+            l_atm
             + l_dir_dir * rho_dd
             + l_dif_dir * rho_hd
             + l_dir_dif * rho_hd
             + l_dif_dif * rho_hd
-            + (l_path_sum * rho_hd) / (1.0 - s_alb * rho_hd)
+            + (l_tot * atm_surface_scattering * rho_hd) / eq_11_term
         )
 
         rdn_emit = np.dot(h_matrix, toa_rdn)
@@ -445,6 +454,7 @@ def main() -> None:
             "elev_km": ELE_TRUE,
             "noise_model": "https://github.com/isofit/isofit-data/blob/main/emit_noise.txt",
             "RT_atmosphere": "sRTMnet 6c",
+            "RT_mode": rt_mode,
             "RT_surface": "DISORT based snow surface LUT",
             "sampling": (
                 "Sobol(11); log-uniform physical decode for "

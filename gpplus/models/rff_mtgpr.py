@@ -10,7 +10,7 @@ from gpytorch.distributions import MultitaskMultivariateNormal
 from gpytorch.priors import Prior
 
 from ..config import logger
-from ..kernels import LogScaleKernel, RFFKernel
+from ..kernels import LogIndexKernel, LogScaleKernel, RFFKernel
 from ..priors.response_noise import align_registered_priors, build_multitask_noise_likelihood
 from ..utils.rff_utils import (
     RffSampling,
@@ -68,8 +68,8 @@ class RFFMTGPR(gpytorch.models.ExactGP):
                 rank=self.rank_likelihood,
             )
             logger.warning(
-                "No likelihood provided. Using MultitaskGaussianLikelihood "
-                "(per-task noise only, Woodbury-compatible)."
+                "No likelihood provided. Using LogMultitaskGaussianLikelihood "
+                "(per-task log10 SoftClamp noise, Woodbury-compatible)."
             )
         if mean_module is None:
             base_mean = gpytorch.means.ConstantMean()
@@ -101,9 +101,22 @@ class RFFMTGPR(gpytorch.models.ExactGP):
                 num_tasks=self.num_tasks,
                 rank=self.rank_kernel,
             )
+            kernel_module.task_covar_module = LogIndexKernel(
+                num_tasks=self.num_tasks,
+                rank=self.rank_kernel,
+            )
         elif not isinstance(kernel_module, gpytorch.kernels.MultitaskKernel):
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 kernel_module,
+                num_tasks=self.num_tasks,
+                rank=self.rank_kernel,
+            )
+            kernel_module.task_covar_module = LogIndexKernel(
+                num_tasks=self.num_tasks,
+                rank=self.rank_kernel,
+            )
+        elif not isinstance(kernel_module.task_covar_module, LogIndexKernel):
+            kernel_module.task_covar_module = LogIndexKernel(
                 num_tasks=self.num_tasks,
                 rank=self.rank_kernel,
             )
