@@ -55,7 +55,12 @@ from experiments_toa.s2_utils import (
     map_ard_to_bands,
     select_bands,
 )
-from experiments_toa.s2_y_transform import forward_y_s2, inverse_y_s2, task_uses_log_scale
+from experiments_toa.s2_y_transform import (
+    forward_y_s2,
+    inverse_y_s2,
+    resolve_log_scale,
+    task_uses_log_scale,
+)
 from gpplus.models import RFFGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
@@ -140,7 +145,7 @@ def run_s2_toa_stgp(
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
-    log_scale: bool = True,
+    log_scale: bool | None = None,
     ard: bool = True,
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
@@ -247,6 +252,13 @@ def run_s2_toa_stgp(
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
     )
+    log_scale, log_scale_task_set, log_scale_source = resolve_log_scale(
+        log_scale, meta=data_meta
+    )
+    print(
+        f"Output log_scale={log_scale} (source={log_scale_source}); "
+        f"log tasks={sorted(log_scale_task_set) or '[]'}"
+    )
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
     y_train = y_train.to(dtype=dtype)
@@ -338,7 +350,9 @@ def run_s2_toa_stgp(
         y_tr = y_train[:, task_idx]
         y_te = y_test[:, task_idx]
         y_va = y_val[:, task_idx] if y_val.numel() > 0 else y_val
-        y_tr_model = forward_y_s2(y_tr, task_name, log_scale=log_scale)
+        y_tr_model = forward_y_s2(
+            y_tr, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+        )
 
         y_scaler = None
         if standardize_y:
@@ -350,7 +364,9 @@ def run_s2_toa_stgp(
 
         y_val_scaled = y_va
         if y_va.numel() > 0:
-            y_va_model = forward_y_s2(y_va, task_name, log_scale=log_scale)
+            y_va_model = forward_y_s2(
+                y_va, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+            )
             if standardize_y and y_scaler is not None:
                 y_val_scaled = y_scaler.transform(y_va_model.unsqueeze(-1)).squeeze(-1)
             else:
@@ -510,7 +526,9 @@ def run_s2_toa_stgp(
                 data_path=data_path,
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
-                log_grain=task_uses_log_scale(task_name, log_scale=log_scale),
+                log_grain=task_uses_log_scale(
+                    task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+                ),
                 logit_cos=False,
                 input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
                 model_config={
@@ -525,7 +543,11 @@ def run_s2_toa_stgp(
                     "band_indices": list(band_indices),
                     "ard_mapping": ard_mapped,
                     "data_meta": data_meta,
-                    "log_scale": task_uses_log_scale(task_name, log_scale=log_scale),
+                    "log_scale": task_uses_log_scale(
+                        task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+                    ),
+                    "log_scale_source": log_scale_source,
+                    "log_scale_tasks": sorted(log_scale_task_set),
                 },
             )
             learned_noise["checkpoint_path"] = str(ckpt_path)
@@ -550,6 +572,7 @@ def run_s2_toa_stgp(
             y_scaler=y_scaler,
             standardize_y=standardize_y,
             log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
             extended=True,
         )
         pred_mean, pred_std, lower, upper = inv.as_tuple()
@@ -563,7 +586,9 @@ def run_s2_toa_stgp(
             training_time=train_time,
             prediction_time=prediction_time,
         )
-        if task_uses_log_scale(task_name, log_scale=log_scale):
+        if task_uses_log_scale(
+            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+        ):
             computed["log_scale"] = True
             if inv.log_mu is None:
                 raise RuntimeError(f"log_mu missing after inverse for log-scale task {task_name}")
@@ -607,7 +632,9 @@ def run_s2_toa_stgp(
             log_sigma_all.append(inv.log_sigma.numpy())
         else:
             log_sigma_all.append(np.full_like(pred_mean.numpy(), np.nan))
-        if task_uses_log_scale(task_name, log_scale=log_scale):
+        if task_uses_log_scale(
+            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+        ):
             print(
                 f"{task_name} Test (physical median) RMSE: {computed['RMSE']:.6f}  "
                 f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
@@ -655,7 +682,11 @@ def run_s2_toa_stgp(
     aggregate_rrmse = macro_rrmse(per_task, names)
 
     # Flatten per-task log extras into per_task for aggregates / JSON.
-    log_task_names = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+    log_task_names = [
+        n
+        for n in names
+        if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
+    ]
     for name in log_task_names:
         tm = task_metrics[name]
         for key in ("RMSE_log", "MAE_log", "RRMSE_log", "R2_log", "RMSE_mean", "MAE_mean", "RRMSE_mean", "R2_mean"):
@@ -687,7 +718,8 @@ def run_s2_toa_stgp(
         "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
-        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, log_scale=log_scale)],
+        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)],
+        "log_scale_source": log_scale_source,
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),
@@ -764,7 +796,11 @@ def run_s2_toa_stgp(
             seed=seed,
             explicit_indices=posterior_example_indices,
         )
-        log_task_names_plot = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+        log_task_names_plot = [
+            n
+            for n in names
+            if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
+        ]
         out_npz = save_s2_predictions_npz(
             save_path,
             title=title,

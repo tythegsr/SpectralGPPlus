@@ -229,7 +229,10 @@ ds_out = xr.Dataset(
         "noise_model": "https://github.com/isofit/isofit-data/blob/main/emit_noise.txt",
         "RT_atmosphere": "sRTMnet 6c",
         "RT_mode": RT_MODE,
-        "RT_surface": "DISORT based snow surface LUT"
+        "RT_surface": "DISORT based snow surface LUT",
+        "sampling": "Sobol(11); linear-uniform physical decode for all QoIs",
+        "log_uniform_qois": "",
+        "output_log_scale": "false",
     }
 )
 ds_out.to_netcdf(OUTPUT_PATH)

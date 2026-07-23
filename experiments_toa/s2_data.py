@@ -21,6 +21,10 @@ from experiments_toa.s2_constants import (
     S2_INPUT_VARIABLES,
     S2_TASK_NAMES,
 )
+from experiments_toa.s2_y_transform import (
+    _attr_to_str,
+    infer_log_scale_from_attrs,
+)
 
 InputVariable = Literal["toa_reflectance", "toa_radiance"]
 
@@ -34,6 +38,14 @@ def _dataset_fingerprint(path: str | Path) -> str:
     st = os.stat(abs_path)
     payload = f"{abs_path}|{st.st_size}|{int(st.st_mtime)}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_dataset_attrs(h5_file) -> dict[str, str]:
+    """Decode NetCDF/HDF5 root attrs to plain strings for log-scale inference."""
+    out: dict[str, str] = {}
+    for key in h5_file.attrs:
+        out[str(key)] = _attr_to_str(h5_file.attrs[key])
+    return out
 
 
 def load_s2_arrays(
@@ -52,6 +64,8 @@ def load_s2_arrays(
     wavelengths_nm : (285,) float64
     task_names : list[str]
     meta : dict
+        Includes ``log_scale``, ``log_scale_tasks``, ``log_scale_source`` inferred
+        from NetCDF attrs (``output_log_scale`` / ``log_uniform_qois``).
     """
     if input_variable not in S2_INPUT_VARIABLES:
         raise ValueError(
@@ -90,6 +104,7 @@ def load_s2_arrays(
                 raise KeyError(f"Missing QoI {name!r} in {data_path}")
             cols.append(np.asarray(f[name][:], dtype=np.float64))
         Y = np.column_stack(cols)
+        dataset_attrs = _read_dataset_attrs(f)
 
     if X.ndim != 2 or X.shape[1] != S2_INPUT_DIM:
         raise ValueError(f"Expected X shape (n, {S2_INPUT_DIM}), got {X.shape}")
@@ -102,6 +117,7 @@ def load_s2_arrays(
     if not np.isfinite(Y).all():
         raise ValueError("Non-finite values found in Y")
 
+    log_scale, log_tasks, log_source = infer_log_scale_from_attrs(dataset_attrs)
     meta = {
         "data_path": os.path.abspath(str(data_path)),
         "dataset_fingerprint": _dataset_fingerprint(data_path),
@@ -110,6 +126,10 @@ def load_s2_arrays(
         "n_samples": int(X.shape[0]),
         "task_names": list(names),
         "num_tasks": len(names),
+        "dataset_attrs": dataset_attrs,
+        "log_scale": bool(log_scale),
+        "log_scale_tasks": sorted(log_tasks),
+        "log_scale_source": log_source,
     }
     return X, Y, wl, list(names), meta
 

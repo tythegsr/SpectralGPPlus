@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Mapping
 
 import torch
 
-from experiments_toa.s2_constants import S2_LOG_SCALE_TASK_NAMES
+from experiments_toa.s2_constants import S2_LOG_SCALE_TASK_NAMES, S2_TASK_NAMES
 from gpplus.utils import StandardScaler
 
 # Cap σ in log space when computing log-normal mean (matches S1 toa_y_transform).
@@ -31,9 +32,134 @@ class InverseYOutput:
         return self.point, self.std, self.lower, self.upper
 
 
-def task_uses_log_scale(task_name: str, *, log_scale: bool = True) -> bool:
+def _attr_to_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
+def _attr_to_bool(value: Any) -> bool | None:
+    """Parse a NetCDF/HDF5 attribute as bool; return None if not interpretable."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if hasattr(value, "item") and not isinstance(value, (str, bytes, bool)):
+        try:
+            value = value.item()
+        except (ValueError, AttributeError):
+            pass
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    text = _attr_to_str(value).lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", ""}:
+        return False
+    return None
+
+
+def parse_log_uniform_qois(raw: Any) -> frozenset[str]:
+    """Parse ``log_uniform_qois`` attr into known S2 task names."""
+    text = _attr_to_str(raw)
+    if not text or text.lower() in {"none", "null", "n/a"}:
+        return frozenset()
+    names = {
+        part.strip()
+        for part in text.replace(";", ",").split(",")
+        if part.strip()
+    }
+    return frozenset(n for n in names if n in S2_TASK_NAMES)
+
+
+def infer_log_scale_from_attrs(
+    attrs: Mapping[str, Any] | None,
+) -> tuple[bool, frozenset[str], str]:
+    """
+    Infer whether QoI targets should use log scaling from NetCDF attrs.
+
+    Priority:
+    1. ``output_log_scale`` (explicit bool-like)
+    2. non-empty ``log_uniform_qois`` → True for those tasks (else default log set)
+    3. otherwise False (linear / physical outputs)
+
+    Returns
+    -------
+    log_scale, log_scale_tasks, source
+    """
+    attrs = dict(attrs or {})
+    explicit = _attr_to_bool(attrs.get("output_log_scale"))
+    log_qois = parse_log_uniform_qois(attrs.get("log_uniform_qois"))
+
+    if explicit is True:
+        tasks = log_qois or frozenset(S2_LOG_SCALE_TASK_NAMES)
+        return True, tasks, "attr:output_log_scale=true"
+    if explicit is False:
+        return False, frozenset(), "attr:output_log_scale=false"
+    if log_qois:
+        return True, log_qois, "attr:log_uniform_qois"
+    return False, frozenset(), "attr:default_false"
+
+
+def resolve_log_scale(
+    log_scale: bool | None,
+    *,
+    meta: Mapping[str, Any] | None = None,
+    attrs: Mapping[str, Any] | None = None,
+) -> tuple[bool, frozenset[str], str]:
+    """
+    Resolve master log-scale switch.
+
+    ``None`` means auto-detect from dataset ``meta`` / NetCDF ``attrs``.
+    Explicit True/False always wins.
+    """
+    if log_scale is not None:
+        flag = bool(log_scale)
+        if flag:
+            tasks = frozenset(S2_LOG_SCALE_TASK_NAMES)
+            if meta is not None:
+                raw = meta.get("log_scale_tasks")
+                if raw:
+                    tasks = frozenset(str(x) for x in raw) or tasks
+            return flag, tasks, "explicit"
+        return False, frozenset(), "explicit"
+
+    if meta is not None and "log_scale" in meta and meta.get("log_scale_source"):
+        tasks = frozenset(str(x) for x in (meta.get("log_scale_tasks") or []))
+        return bool(meta["log_scale"]), tasks, str(meta["log_scale_source"])
+
+    src_attrs = attrs
+    if src_attrs is None and meta is not None:
+        src_attrs = meta.get("dataset_attrs")  # type: ignore[assignment]
+    return infer_log_scale_from_attrs(src_attrs)
+
+
+def task_uses_log_scale(
+    task_name: str,
+    *,
+    log_scale: bool = True,
+    log_scale_tasks: frozenset[str] | set[str] | None = None,
+) -> bool:
     """Return True when ``task_name`` should be trained in log space."""
-    return bool(log_scale) and task_name in S2_LOG_SCALE_TASK_NAMES
+    if not log_scale:
+        return False
+    allowed = (
+        frozenset(log_scale_tasks)
+        if log_scale_tasks is not None
+        else frozenset(S2_LOG_SCALE_TASK_NAMES)
+    )
+    return task_name in allowed
 
 
 def forward_y_s2(
@@ -41,9 +167,12 @@ def forward_y_s2(
     task_name: str,
     *,
     log_scale: bool = True,
+    log_scale_tasks: frozenset[str] | set[str] | None = None,
 ) -> torch.Tensor:
     """Apply forward target transform for one S2 QoI (``log`` for selected tasks)."""
-    if not task_uses_log_scale(task_name, log_scale=log_scale):
+    if not task_uses_log_scale(
+        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks
+    ):
         return y
     if torch.any(y <= 0):
         raise ValueError(
@@ -103,6 +232,7 @@ def inverse_y_s2(
     y_scaler: StandardScaler | None,
     standardize_y: bool,
     log_scale: bool = True,
+    log_scale_tasks: frozenset[str] | set[str] | None = None,
     extended: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | InverseYOutput:
     """Map single-task model outputs to the original QoI scale."""
@@ -120,7 +250,9 @@ def inverse_y_s2(
     log_mu = None
     log_sigma = None
 
-    if task_uses_log_scale(task_name, log_scale=log_scale):
+    if task_uses_log_scale(
+        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks
+    ):
         mu_log = pred_mean
         sigma_log = pred_std
         median, mean, mode, ln_std, lo, hi = _lognormal_original_scale(mu_log, sigma_log)

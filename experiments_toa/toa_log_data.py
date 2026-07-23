@@ -462,6 +462,7 @@ def main() -> None:
                 "linear-uniform for remaining QoIs"
             ),
             "log_uniform_qois": "grain_size,liquid_water,dust,algae",
+            "output_log_scale": "true",
             "grain_size_bounds": f"[{grain_lo}, {grain_hi}]",
             "liquid_water_bounds": f"[{lwc_lo}, {lwc_hi}]",
             "dust_bounds": f"[{dust_lo}, {dust_hi}]",

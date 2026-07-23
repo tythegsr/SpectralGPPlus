@@ -17,12 +17,12 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None# None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["cos_i"] # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-NUM_RFF = 200
-NUM_INITS = 1
-NUM_EPOCHS = 1
+NUM_RFF = 400
+NUM_INITS = 4
+NUM_EPOCHS = 1000
 LR = 0.01
 SEED = 42
 DEVICE = "cuda"
@@ -48,11 +48,13 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_loguniform_20262107.nc"  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262207.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
-X_TRANSFORM = "log1p"  # "none" | "log1p" (before UniformScaler / StandardScaler)
+X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
+# None = auto from NetCDF attrs (output_log_scale / log_uniform_qois)
+LOG_SCALE: bool | None = None
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr_loguniform.json"
+    "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -96,7 +98,7 @@ if __name__ == "__main__":
     x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
 
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July22_loguniform_test/s2_toa_sorf_{NUM_INITS}inits_numrff{NUM_RFF}_"
+        f"experiments_SORF/results/July23_testparallel/s2_toa_sorf_{NUM_INITS}inits_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"
     )
@@ -116,7 +118,8 @@ if __name__ == "__main__":
     print(
         f"SORF IDE config  prior={RESPONSE_NOISE_PRIOR}  "
         f"frac={NOISE_VAR_FRACTION}  log_scale={NOISE_PRIOR_LOG_SCALE}  "
-        f"x_transform={X_TRANSFORM}  init_overrides={init_pcs or {}}  qoi={QOI}"
+        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  "
+        f"init_overrides={init_pcs or {}}  qoi={QOI}"
     )
 
     run_s2_toa_sorf(
@@ -153,4 +156,5 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
+        log_scale=LOG_SCALE,
     )

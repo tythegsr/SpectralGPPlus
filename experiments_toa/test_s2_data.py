@@ -191,7 +191,9 @@ def test_s2_log_scale_forward_inverse_roundtrip():
     from experiments_toa.s2_constants import S2_LOG_SCALE_TASK_NAMES
     from experiments_toa.s2_y_transform import (
         forward_y_s2,
+        infer_log_scale_from_attrs,
         inverse_y_s2,
+        resolve_log_scale,
         task_uses_log_scale,
     )
     from gpplus.utils import StandardScaler
@@ -229,3 +231,36 @@ def test_s2_log_scale_forward_inverse_roundtrip():
 
     y_cos = torch.tensor([0.2, 0.5, 0.9], dtype=torch.float64)
     assert torch.equal(forward_y_s2(y_cos, "cos_i"), y_cos)
+
+
+def test_infer_log_scale_from_attrs():
+    from experiments_toa.s2_y_transform import infer_log_scale_from_attrs, resolve_log_scale
+
+    flag, tasks, src = infer_log_scale_from_attrs({})
+    assert flag is False and not tasks and src == "attr:default_false"
+
+    flag, tasks, src = infer_log_scale_from_attrs(
+        {"log_uniform_qois": "grain_size,dust,algae,liquid_water"}
+    )
+    assert flag is True
+    assert tasks == frozenset({"grain_size", "dust", "algae", "liquid_water"})
+    assert src == "attr:log_uniform_qois"
+
+    flag, tasks, src = infer_log_scale_from_attrs(
+        {"output_log_scale": "false", "log_uniform_qois": "algae"}
+    )
+    assert flag is False and not tasks and src == "attr:output_log_scale=false"
+
+    flag, tasks, src = infer_log_scale_from_attrs({"output_log_scale": "true"})
+    assert flag is True
+    assert "algae" in tasks
+    assert src == "attr:output_log_scale=true"
+
+    # Explicit override wins over attrs
+    flag, tasks, src = resolve_log_scale(
+        False, attrs={"log_uniform_qois": "algae,dust"}
+    )
+    assert flag is False and src == "explicit"
+
+    flag, tasks, src = resolve_log_scale(None, attrs={"log_uniform_qois": "algae"})
+    assert flag is True and tasks == frozenset({"algae"})
