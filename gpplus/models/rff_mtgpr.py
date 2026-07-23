@@ -48,6 +48,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         noise_prior: Prior | None = None,
         outputscale_prior: Prior | None = None,
         lengthscale_prior: Prior | None = None,
+        batch_shape: torch.Size | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -60,23 +61,27 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.num_rff = num_rff
         self.rff_sampling = rff_sampling
         self.correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
+        self.batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
 
         if likelihood is None:
             likelihood = build_multitask_noise_likelihood(
                 self.num_tasks,
                 noise_prior=noise_prior,
                 rank=self.rank_likelihood,
+                batch_shape=self.batch_shape,
             )
             logger.warning(
                 "No likelihood provided. Using LogMultitaskGaussianLikelihood "
                 "(per-task log10 SoftClamp noise, Woodbury-compatible)."
             )
         if mean_module is None:
-            base_mean = gpytorch.means.ConstantMean()
+            base_mean = gpytorch.means.ConstantMean(batch_shape=self.batch_shape)
             mean_module = gpytorch.means.MultitaskMean(base_mean, self.num_tasks)
         if kernel_module is None:
             input_dim = train_x.shape[-1]
-            kernel_kwargs = {"ard_num_dims": input_dim} if ard else {}
+            kernel_kwargs = {"ard_num_dims": input_dim, "batch_shape": self.batch_shape} if ard else {
+                "batch_shape": self.batch_shape
+            }
             if lengthscale_prior is not None:
                 kernel_kwargs["lengthscale_prior"] = lengthscale_prior
             base = LogScaleKernel(
@@ -88,13 +93,14 @@ class RFFMTGPR(gpytorch.models.ExactGP):
                     **kernel_kwargs,
                 ),
                 outputscale_prior=outputscale_prior,
+                batch_shape=self.batch_shape,
             )
             feature_kind = rff_sampling.upper()
             logger.warning(
                 "No kernel_module provided. Using MultitaskKernel(LogScaleKernel(RFFKernel(...))) "
                 f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim}"
                 + (f", correct_sorf={self.correct_sorf}" if rff_sampling == "sorf" else "")
-                + ")."
+                + f", batch_shape={self.batch_shape})."
             )
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 base,
@@ -104,6 +110,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
             kernel_module.task_covar_module = LogIndexKernel(
                 num_tasks=self.num_tasks,
                 rank=self.rank_kernel,
+                batch_shape=self.batch_shape,
             )
         elif not isinstance(kernel_module, gpytorch.kernels.MultitaskKernel):
             kernel_module = gpytorch.kernels.MultitaskKernel(
@@ -146,11 +153,13 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         return torch.pow(10.0, self.covar_module.data_covar_module.outputscale / 2.0)
 
     def _feature_cache_key(self, x: torch.Tensor) -> tuple:
-        ls = self._rff_kernel.raw_lengthscale.detach().cpu().tolist()
-        os_ = float(self.covar_module.data_covar_module.raw_outputscale.detach().cpu())
-        task_key = self.covar_module.task_covar_module.covar_matrix.to_dense().detach().cpu().tolist()
+        ls = self._rff_kernel.raw_lengthscale.detach().reshape(-1).cpu().tolist()
+        os_ = self.covar_module.data_covar_module.raw_outputscale.detach().reshape(-1).cpu().tolist()
+        task_key = (
+            self.covar_module.task_covar_module.covar_matrix.to_dense().detach().reshape(-1).cpu().tolist()
+        )
         ver = getattr(self._rff_kernel, "_feature_cache_version", 0)
-        return (id(x), tuple(ls), os_, tuple(map(tuple, task_key)), ver)
+        return (id(x), tuple(ls), tuple(os_), tuple(task_key), ver)
 
     def invalidate_feature_cache(self) -> None:
         self._train_phi_cache = None
@@ -159,7 +168,10 @@ class RFFMTGPR(gpytorch.models.ExactGP):
     def scaled_spatial_features(self, x: torch.Tensor) -> torch.Tensor:
         z = self._rff_kernel.featurize(x)
         z = _drop_singleton_batch(z)
-        return z * self._output_scale()
+        scale = self._output_scale()
+        while scale.dim() < z.dim():
+            scale = scale.unsqueeze(-1)
+        return z * scale
 
     def train_spatial_features(self) -> torch.Tensor:
         """Cached train Φ for eval-mode Woodbury (never materializes Omega).

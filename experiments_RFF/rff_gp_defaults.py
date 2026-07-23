@@ -45,10 +45,18 @@ def rff_noise_initializer_parameter_config() -> dict:
     }
 
 
-def build_rff_scalar_noise_likelihood(noise_prior: Prior | None = None) -> Likelihood:
+def build_rff_scalar_noise_likelihood(
+    noise_prior: Prior | None = None,
+    *,
+    batch_shape: torch.Size | None = None,
+) -> Likelihood:
     from gpplus.likelihoods import LogGaussianLikelihood
 
-    return LogGaussianLikelihood(noise_prior=noise_prior, noise_constraint=rff_noise_constraint())
+    return LogGaussianLikelihood(
+        noise_prior=noise_prior,
+        noise_constraint=rff_noise_constraint(),
+        batch_shape=torch.Size([]) if batch_shape is None else torch.Size(batch_shape),
+    )
 
 
 def build_rff_multitask_noise_likelihood(
@@ -56,6 +64,7 @@ def build_rff_multitask_noise_likelihood(
     noise_prior: Prior | None = None,
     *,
     rank: int = 0,
+    batch_shape: torch.Size | None = None,
 ) -> Likelihood:
     """Log10 SoftClamp per-task noise (matches single-task LogGaussianLikelihood)."""
     from gpplus.likelihoods import LogMultitaskGaussianLikelihood
@@ -67,6 +76,7 @@ def build_rff_multitask_noise_likelihood(
         noise_constraint=rff_noise_constraint(),
         has_global_noise=False,
         has_task_noise=True,
+        batch_shape=torch.Size([]) if batch_shape is None else torch.Size(batch_shape),
     )
 
 

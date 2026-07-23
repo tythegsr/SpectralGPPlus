@@ -40,10 +40,12 @@ def lrnn_trace_penalty(noise_var: Tensor, kernel_diag: Tensor) -> Tensor:
     ``tr(C) = n * max(k_ii) - sum(k_ii)``.
 
     Subtract this from ``log p(y)`` when maximizing the corrected lower bound.
+    Supports batched ``kernel_diag`` ``(B, n)`` / ``noise_var`` ``(B,)``.
     """
     noise = noise_var.clamp_min(1e-12)
-    k_max = kernel_diag.max()
-    tr_c = kernel_diag.numel() * k_max - kernel_diag.sum()
+    k_max = kernel_diag.amax(dim=-1)
+    n = kernel_diag.shape[-1]
+    tr_c = n * k_max - kernel_diag.sum(dim=-1)
     return tr_c / (2.0 * noise)
 
 

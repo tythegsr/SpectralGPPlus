@@ -174,8 +174,19 @@ def run_s2_toa_stgp(
     task_names: Sequence[str] | None = None,
     task_band_config: str | None = None,
     x_transform: str | None = None,
+    train_mode: str = "independent",
+    init_batch_size: int | None = None,
 ) -> dict:
     """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
+    if init_batch_size is None:
+        init_batch_size = num_inits
+    if int(init_batch_size) < 1:
+        raise ValueError(f"init_batch_size must be >= 1, got {init_batch_size}.")
+    init_batch_size = int(init_batch_size)
+    if train_mode == "batched" and num_inits % init_batch_size != 0:
+        raise ValueError(
+            f"num_inits ({num_inits}) must be divisible by init_batch_size ({init_batch_size})."
+        )
     if rff_sampling not in RFF_SAMPLING_CHOICES:
         raise ValueError(f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}")
     correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
@@ -219,10 +230,11 @@ def run_s2_toa_stgp(
     print(title)
     print(
         f"S2 Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
-        f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, "
-        f"tasks={names}, input={input_variable}"
+        f"ARD={ard}, dtype={dtype}, inits={num_inits}, init_batch_size={init_batch_size}, "
+        f"epochs={num_epochs}, tasks={names}, input={input_variable}"
         + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
         + (f", pca={n_pca_components}" if n_pca_components is not None else "")
+        + (f", train_mode={train_mode}" if train_mode != "independent" else "")
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
@@ -399,6 +411,12 @@ def run_s2_toa_stgp(
         initializer_kwargs: dict | None = None
         noise_prior_meta: dict | None = None
         override_pcs = dict(initializer_parameter_configs or {})
+        concurrent = init_batch_size if train_mode == "batched" else num_inits
+        lik_batch_shape = (
+            torch.Size([concurrent])
+            if train_mode == "batched" and concurrent > 1
+            else torch.Size([])
+        )
         if response_noise_prior:
             from gpplus.priors.response_noise import (
                 empirical_scalar_noise_variance,
@@ -414,7 +432,9 @@ def run_s2_toa_stgp(
                 dtype=dtype,
                 device=y_tr_fit.device,
             )
-            likelihood = build_rff_scalar_noise_likelihood(noise_prior=noise_prior)
+            likelihood = build_rff_scalar_noise_likelihood(
+                noise_prior=noise_prior, batch_shape=lik_batch_shape
+            )
             raw_init = scalar_noise_raw_init_from_variance(
                 likelihood, target_var.to(dtype=dtype)
             )
@@ -428,7 +448,7 @@ def run_s2_toa_stgp(
                 "noise_prior_loc": float(noise_prior.loc.detach().cpu()),
             }
         else:
-            likelihood = build_rff_scalar_noise_likelihood()
+            likelihood = build_rff_scalar_noise_likelihood(batch_shape=lik_batch_shape)
 
         initializer_kwargs = merge_rff_noise_initializer_kwargs(initializer_kwargs)
         if override_pcs:
@@ -443,6 +463,8 @@ def run_s2_toa_stgp(
             ard=ard,
             rff_sampling=rff_sampling,
             correct_sorf=correct_sorf,
+            batch_shape=lik_batch_shape if len(lik_batch_shape) > 0 else None,
+            init_batch_size=concurrent if train_mode == "batched" else None,
         )
         trainer = GPTrainer(
             model,
@@ -463,11 +485,15 @@ def run_s2_toa_stgp(
             callbacks=callbacks,
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
+            train_mode=train_mode,
+            init_batch_size=concurrent if train_mode == "batched" else None,
         )
         t_train = time.time()
         runs = trainer.train()
         train_time = time.time() - t_train
         total_train_time += train_time
+        # Batched mode replaces trainer.model with an unbatched winner clone.
+        model = trainer.model
 
         successful = [r for r in runs if r.get("loss") is not None and r.get("state_dict") is not None]
         if not successful:
@@ -709,6 +735,12 @@ def run_s2_toa_stgp(
         "feature_dim": feature_dim,
         "ard": ard,
         "model_class": "RFFGPR",
+        "train_mode": train_mode,
+        "num_inits": num_inits,
+        "init_batch_size": init_batch_size if train_mode == "batched" else num_inits,
+        "num_batches": (
+            num_inits // init_batch_size if train_mode == "batched" else 1
+        ),
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),

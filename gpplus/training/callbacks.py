@@ -109,11 +109,18 @@ class TrainLossLoggingCallback(Callback):
         self.num_inits = num_inits
         self.total_epochs = total_epochs
         self._run_index: int | None = None
+        self._train_mode: str | None = None
 
     def set_run_index(self, run_index: int) -> None:
         self._run_index = run_index
 
     def _init_label(self, context: dict) -> str:
+        train_mode = context.get("train_mode", self._train_mode)
+        if train_mode == "batched":
+            num_inits = context.get("num_inits", self.num_inits)
+            if num_inits is not None:
+                return f"Batched ({num_inits} inits)"
+            return "Batched"
         run_index = context.get("run_index", self._run_index)
         num_inits = context.get("num_inits", self.num_inits)
         if run_index is not None and num_inits is not None:
@@ -123,6 +130,7 @@ class TrainLossLoggingCallback(Callback):
         return "Init ?"
 
     def on_train_start(self, context: dict) -> None:
+        self._train_mode = context.get("train_mode", self._train_mode)
         if not self.verbose:
             return
         from ..config import logger
@@ -4087,6 +4095,7 @@ class ValidationMetricsCallback(Callback):
         self._trainer = None
         self._lbfgs_registered = False
         self._prev_val_nll: Optional[float] = None
+        self._train_mode: Optional[str] = None
 
     def set_run_index(self, run_index: int) -> None:
         self._run_index = run_index
@@ -4095,6 +4104,12 @@ class ValidationMetricsCallback(Callback):
         self._fold_index = fold_index
 
     def _init_label(self, context: dict) -> str:
+        train_mode = context.get("train_mode", self._train_mode)
+        if train_mode == "batched":
+            num_inits = context.get("num_inits", self.num_inits)
+            if num_inits is not None:
+                return f"Batched ({num_inits} inits)"
+            return "Batched"
         run_index = context.get("run_index", self._run_index)
         num_inits = context.get("num_inits", self.num_inits)
         if run_index is not None and num_inits is not None:
@@ -4230,6 +4245,12 @@ class ValidationMetricsCallback(Callback):
         lbfgs_iter: Optional[int] = None,
     ) -> dict:
         from .training_metrics import compute_validation_metrics
+        from .batch_utils import (
+            _remap_lrnn_feature_net_keys,
+            build_unbatched_model_shell,
+            model_init_batch_size,
+            slice_state_dict,
+        )
 
         model = context["model"]
         trainer = context.get("trainer", self._trainer)
@@ -4238,26 +4259,40 @@ class ValidationMetricsCallback(Callback):
         if jitter is None and trainer is not None and hasattr(trainer, "cholesky_jitter"):
             jitter = trainer.cholesky_jitter
 
-        metrics = compute_validation_metrics(
-            model,
-            self.val_x,
-            self.val_y,
-            cholesky_jitter=jitter,
-            chunk_size=self.chunk_size,
-            woodbury_form=self.woodbury_form,
-            woodbury_mt_method=self.woodbury_mt_method,
-        )
+        batch_size = model_init_batch_size(model)
+        train_mode = context.get("train_mode", self._train_mode)
+        if train_mode == "batched" or batch_size > 1:
+            metrics = self._compute_batched_validation_metrics(
+                model,
+                context,
+                jitter=jitter,
+            )
+        else:
+            metrics = compute_validation_metrics(
+                model,
+                self.val_x,
+                self.val_y,
+                cholesky_jitter=jitter,
+                chunk_size=self.chunk_size,
+                woodbury_form=self.woodbury_form,
+                woodbury_mt_method=self.woodbury_mt_method,
+            )
         record = {
             "run_index": context.get("run_index", self._run_index),
             "fold_index": context.get("fold_index", self._fold_index),
             "train_loss": self._to_float(train_loss),
             "val_NLL": metrics["val_NLL"],
             "val_RRMSE": metrics["val_RRMSE"],
+            "train_mode": train_mode,
         }
         if epoch is not None:
             record["epoch"] = int(epoch)
         if lbfgs_iter is not None:
             record["lbfgs_iter"] = int(lbfgs_iter)
+        if "per_init_val_NLL" in metrics:
+            record["per_init_val_NLL"] = metrics["per_init_val_NLL"]
+            record["per_init_val_RRMSE"] = metrics["per_init_val_RRMSE"]
+            record["best_val_init"] = metrics.get("best_val_init")
         val_diag = metrics.get("val_diag")
         if isinstance(val_diag, dict):
             record["val_diag"] = val_diag
@@ -4270,6 +4305,79 @@ class ValidationMetricsCallback(Callback):
         self._records.append(record)
         context["val_metrics"] = metrics
         return metrics
+
+    def _compute_batched_validation_metrics(
+        self,
+        model,
+        context: dict,
+        *,
+        jitter: Optional[float],
+    ) -> dict:
+        """Evaluate each active init on an unbatched shell; report best-NLL metrics."""
+        from .training_metrics import compute_validation_metrics
+        from .batch_utils import (
+            _remap_lrnn_feature_net_keys,
+            build_unbatched_model_shell,
+            model_init_batch_size,
+            slice_state_dict,
+        )
+
+        B = model_init_batch_size(model)
+        active = context.get("active")
+        shell = build_unbatched_model_shell(model)
+        ref_sd = shell.state_dict()
+        cur_sd = model.state_dict()
+
+        per_nll: list[float] = []
+        per_rrmse: list[float] = []
+        best_metrics: dict | None = None
+        best_init = 0
+        best_nll = float("inf")
+
+        for i in range(B):
+            if active is not None and not bool(active[i]):
+                per_nll.append(float("nan"))
+                per_rrmse.append(float("nan"))
+                continue
+            sliced = _remap_lrnn_feature_net_keys(
+                slice_state_dict(cur_sd, i, batch_size=B, reference_state_dict=ref_sd),
+                i,
+            )
+            shell.load_state_dict(sliced, strict=False)
+            if hasattr(shell, "invalidate_feature_cache"):
+                shell.invalidate_feature_cache()
+            m = compute_validation_metrics(
+                shell,
+                self.val_x,
+                self.val_y,
+                cholesky_jitter=jitter,
+                chunk_size=self.chunk_size,
+                woodbury_form=self.woodbury_form,
+                woodbury_mt_method=self.woodbury_mt_method,
+            )
+            nll = float(m["val_NLL"])
+            rrmse = float(m["val_RRMSE"])
+            per_nll.append(nll)
+            per_rrmse.append(rrmse)
+            if math.isfinite(nll) and nll < best_nll:
+                best_nll = nll
+                best_init = i
+                best_metrics = m
+
+        if best_metrics is None:
+            return {
+                "val_NLL": float("nan"),
+                "val_RRMSE": float("nan"),
+                "per_init_val_NLL": per_nll,
+                "per_init_val_RRMSE": per_rrmse,
+                "best_val_init": None,
+            }
+
+        out = dict(best_metrics)
+        out["per_init_val_NLL"] = per_nll
+        out["per_init_val_RRMSE"] = per_rrmse
+        out["best_val_init"] = best_init
+        return out
 
     def _print_metrics(
         self,
@@ -4292,6 +4400,14 @@ class ValidationMetricsCallback(Callback):
             parts.append(f"train_loss={train_loss:.4f}")
         parts.append(f"val_NLL={metrics['val_NLL']:.4f}")
         parts.append(f"val_RRMSE={metrics['val_RRMSE']:.4f}")
+        if metrics.get("best_val_init") is not None:
+            parts.append(f"best_val_init={metrics['best_val_init']}")
+        per_nll = metrics.get("per_init_val_NLL")
+        if isinstance(per_nll, list) and per_nll:
+            pretty = ", ".join(
+                f"{v:.4f}" if isinstance(v, float) and math.isfinite(v) else "nan" for v in per_nll
+            )
+            parts.append(f"per_init_val_NLL=[{pretty}]")
         val_diag = metrics.get("val_diag")
         if isinstance(val_diag, dict):
             compact = self._format_compact_diag(val_diag)
@@ -4303,6 +4419,7 @@ class ValidationMetricsCallback(Callback):
         self._trainer = context.get("trainer")
         self._run_index = context.get("run_index", self._run_index)
         self._fold_index = context.get("fold_index", self._fold_index)
+        self._train_mode = context.get("train_mode", self._train_mode)
         self._records = []
         self._prev_val_nll = None
 

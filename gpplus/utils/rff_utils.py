@@ -454,20 +454,39 @@ def featurize_rbf(
     Map inputs to RFF features Z of shape (..., n, 2D).
 
     Uses GPPlus/GaussianKernel-style input scaling 10^(lengthscale/2), then x @ W.
-    Lengthscales multiply columns of ``W`` (shape ``(d, D)``) rather than rows of
-    ``x`` (``(n, d)``) — algebraically identical, cheaper for large ``n``.
+    Lengthscales multiply columns of ``W`` (shape ``(d, D)`` or ``(..., d, D)``)
+    rather than rows of ``x`` — algebraically identical, cheaper for large ``n``.
+
+    Supports a leading init-batch on ``lengthscale`` ``(..., 1, d)`` and optional
+    batched ``randn_weights`` ``(..., d, D)`` with unbatched ``x`` ``(n, d)``.
 
     Cos/sin are written into one ``(..., n, 2D)`` buffer (no ``cat`` of temporaries).
     """
     D = num_samples if num_samples is not None else randn_weights.shape[-1]
-    scale = torch.pow(10.0, lengthscale / 2.0).reshape(-1, 1)
-    proj = x.matmul(randn_weights * scale)
+    # lengthscale: (1, d) | (d,) | (B, 1, d) -> scale with trailing (d, 1) for W columns
+    scale = torch.pow(10.0, lengthscale / 2.0)
+    if scale.dim() >= 2 and scale.shape[-2] == 1:
+        scale = scale.transpose(-1, -2)  # (..., d, 1)
+    else:
+        scale = scale.reshape(-1, 1)  # unbatched ARD / scalar fallback
+    w = randn_weights * scale
+    if x.dim() == 2 and w.dim() > 2:
+        proj = torch.einsum("nd,...dD->...nD", x, w)
+    else:
+        proj = x.matmul(w)
     inv_sqrt_d = 1.0 / math.sqrt(D)
     out = proj.new_empty(proj.shape[:-1] + (2 * D,))
     # Write into one (..., 2D) buffer (no cat); scale on the slices for autograd safety.
     out[..., :D] = torch.cos(proj).mul(inv_sqrt_d)
     out[..., D:] = torch.sin(proj).mul(inv_sqrt_d)
     return out
+
+
+def _expand_noise_for_square(noise: Tensor, square: Tensor) -> Tensor:
+    """Broadcast noise ``()`` / ``(B,)`` against square mats ``(..., m, m)``."""
+    while noise.dim() < square.dim():
+        noise = noise.unsqueeze(-1)
+    return noise
 
 
 _warned_woodbury_rank = False
@@ -548,7 +567,8 @@ def woodbury_factor(
     def build_middle(j: float) -> Tensor:
         m = ztz.shape[-1]
         eye = torch.eye(m, device=ztz.device, dtype=ztz.dtype)
-        middle = eye + ztz / noise
+        noise_b = _expand_noise_for_square(noise, ztz)
+        middle = eye + ztz / noise_b
         if j > 0:
             middle = middle + j * eye
         return middle
@@ -583,12 +603,13 @@ def woodbury_solve_from_chol(
     z_train : (n, m) feature matrix Phi.
     b : (n,) or (n, k)
     """
-    squeeze = b.dim() == 1
+    # b: (n,) | (n, k) | (B, n) | (B, n, k)
+    squeeze = b.dim() == z_train.dim() - 1
     if squeeze:
         b = b.unsqueeze(-1)
     factor_dtype = chol.dtype
     phi_dtype = z_train.dtype
-    noise_f = noise.to(dtype=phi_dtype)
+    noise_f = _expand_noise_for_square(noise.to(dtype=phi_dtype), b)
     b_f = b.to(dtype=phi_dtype)
     inv_noise_b = b_f / noise_f
     middle_rhs = (z_train.transpose(-1, -2) @ inv_noise_b).to(dtype=factor_dtype)
@@ -614,8 +635,8 @@ def woodbury_solve(
 
     Parameters
     ----------
-    z_train : (n, m) feature matrix Phi.
-    b : (n,) or (n, k)
+    z_train : (n, m) or (B, n, m) feature matrix Phi.
+    b : matching ``(..., n)`` or ``(..., n, k)``
     """
     if chol is None or noise is None:
         chol, noise = woodbury_factor(noise_var, z_train, jitter=jitter)
@@ -631,10 +652,11 @@ def woodbury_log_det_from_chol(
     ``log|Sigma|`` for ``Sigma = noise I_n + Phi Phi^T`` via ``log|Sigma| = n log(noise) + log|M|``.
 
     ``chol`` is the Cholesky factor of ``M = I + Phi^T Phi / noise``.
+    Returns a scalar or ``(B,)`` when ``chol`` is batched.
     """
     n = z_train.shape[-2]
-    log_det_middle = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum()
-    return n * noise.log() + log_det_middle
+    log_det_middle = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum(dim=-1)
+    return n * noise.reshape(noise.shape[: log_det_middle.dim()]).log() + log_det_middle
 
 
 def woodbury_log_det(
@@ -658,11 +680,11 @@ def woodbury_quadratic_form(
     chol: Tensor | None = None,
     noise: Tensor | None = None,
 ) -> Tensor:
-    """y^T Sigma^{-1} y (scalar)."""
+    """y^T Sigma^{-1} y — scalar, or ``(B,)`` when ``y`` has a leading batch dim."""
     alpha = woodbury_solve(
         noise_var, z_train, y, jitter=jitter, chol=chol, noise=noise
     )
-    return (y * alpha).sum()
+    return (y * alpha).sum(dim=-1)
 
 
 def woodbury_marginal_log_likelihood(
@@ -711,11 +733,17 @@ def woodbury_predictive_mean(
     """
     if chol is None or noise is None:
         chol, noise = woodbury_factor(noise_var, z_train, jitter=jitter)
-    y = y_centered.to(dtype=z_train.dtype).reshape(-1)
-    phi_ty = (z_train.transpose(-1, -2) @ y).to(dtype=chol.dtype)
+    y = y_centered.to(dtype=z_train.dtype)
+    if y.dim() == z_train.dim() - 1:
+        y_col = y.unsqueeze(-1)
+    else:
+        y_col = y
+    phi_ty = (z_train.transpose(-1, -2) @ y_col).squeeze(-1).to(dtype=chol.dtype)
     noise_c = noise.to(dtype=chol.dtype)
+    while noise_c.dim() < phi_ty.dim():
+        noise_c = noise_c.unsqueeze(-1)
     w = torch.cholesky_solve((phi_ty / noise_c).unsqueeze(-1), chol).squeeze(-1)
-    return (z_test.to(dtype=chol.dtype) @ w).to(dtype=z_test.dtype)
+    return (z_test.to(dtype=chol.dtype) @ w.unsqueeze(-1)).squeeze(-1).to(dtype=z_test.dtype)
 
 
 def woodbury_predictive_var_diag(
@@ -848,7 +876,8 @@ def woodbury_factor_dual(
 
     def build_lambda(j: float) -> Tensor:
         eye = torch.eye(m, device=ztz.device, dtype=lin_dtype)
-        return _symmetrize_matrix(ztz) + (noise + j) * eye
+        noise_b = _expand_noise_for_square(noise, ztz)
+        return _symmetrize_matrix(ztz) + (noise_b + j) * eye
 
     chol, _ = _woodbury_cholesky_factor(
         build_lambda, jitter, max_attempts=12, jitter_scale=10.0
@@ -896,23 +925,35 @@ def woodbury_marginal_log_likelihood_dual(
 
     ``log|Σ| = (n-m) log σ² + log|Λ|`` and the quadratic form uses
     ``yᵀ Σ⁻¹ y = ||y||²/σ² - ||Λ⁻¹/² Φᵀ y||²/σ²``.
+
+    Supports batched ``z_train`` ``(B, n, m)``, ``noise_var`` ``(B,)``, and
+    ``y_centered`` ``(B, n)`` returning ``(B,)``.
     """
     n = z_train.shape[-2]
     m = z_train.shape[-1]
     chol, noise, z_lin = woodbury_factor_dual(noise_var, z_train, jitter)
-    y = y_centered.to(dtype=z_lin.dtype).reshape(-1)
+    y = y_centered.to(dtype=z_lin.dtype)
+    if y.dim() == z_lin.dim() - 1:
+        y_col = y.unsqueeze(-1)
+    else:
+        y_col = y
 
-    log_det_lam = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum()
-    phi_ty = z_lin.transpose(-1, -2) @ y
+    log_det_lam = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum(dim=-1)
+    phi_ty = (z_lin.transpose(-1, -2) @ y_col).squeeze(-1)
     inner = torch.cholesky_solve(phi_ty.unsqueeze(-1), chol).squeeze(-1)
-    lambda_quad = (phi_ty * inner).sum()
-    y_norm_sq = (y * y).sum()
+    lambda_quad = (phi_ty * inner).sum(dim=-1)
+    y_norm_sq = (y * y).sum(dim=-1)
+
+    noise_b = noise.reshape(noise.shape[: y_norm_sq.dim()]) if noise.dim() > y_norm_sq.dim() else noise
+    if noise_b.dim() < y_norm_sq.dim():
+        # scalar noise with batched y — broadcast
+        pass
 
     const = -0.5 * n * math.log(2.0 * math.pi)
-    noise_log = -0.5 * (n - m) * noise.log()
+    noise_log = -0.5 * (n - m) * noise_b.log()
     log_det_term = -0.5 * log_det_lam
-    y_term = -0.5 * y_norm_sq / noise
-    lambda_term = 0.5 * lambda_quad / noise
+    y_term = -0.5 * y_norm_sq / noise_b
+    lambda_term = 0.5 * lambda_quad / noise_b
     return const + noise_log + log_det_term + y_term + lambda_term
 
 
@@ -1400,7 +1441,7 @@ def woodbury_marginal_log_likelihood_mt(
     dtype = factor.chol.dtype if factor.kind == "chol" else factor.q_g.dtype
     y_c = y_centered.to(dtype)
     alpha = woodbury_solve_mt_from_factor(noise, phi, r_b, n, factor, y_c)
-    quad = (y_c * alpha).sum()
+    quad = (y_c * alpha).sum(dim=-1)
     log_det = woodbury_log_det_mt_from_factor(noise, n, factor)
     const = -0.5 * n_t * math.log(2.0 * math.pi)
     return const - 0.5 * quad - 0.5 * log_det

@@ -20,4 +20,11 @@ from .stop_conditions import (
     StopCondition,
 )
 from .trainer import GPTrainer
+from .training_batched import BatchedGPTrainer
 from .training_metrics import compute_validation_metrics
+from .batch_utils import (
+    resolve_batch_shape,
+    slice_state_dict,
+    select_best_init_state_dict,
+    materialize_unbatched_model,
+)

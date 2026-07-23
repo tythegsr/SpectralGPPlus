@@ -21,14 +21,16 @@ QOI: list[str] | None = ["cos_i"] # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
 NUM_RFF = 400
-NUM_INITS = 4
+NUM_INITS = 16  # total random starts
+INIT_BATCH_SIZE = 16  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
 NUM_EPOCHS = 1000
 LR = 0.01
 SEED = 42
-DEVICE = "cuda"
-DTYPE = "float32"  # "float32" | "float64"
+DEVICE = "cpu"
+DTYPE = "float64"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
+TRAIN_MODE = "batched"  # "independent" | "batched"
 ARD = True
 SAVE_PATH: str | None = None
 MONITOR_VALIDATION = True
@@ -97,8 +99,10 @@ if __name__ == "__main__":
 
     x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
 
+    ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July23_testparallel/s2_toa_sorf_{NUM_INITS}inits_numrff{NUM_RFF}_"
+        f"experiments_SORF/results/July23_testparallel/s2_toa_sorf_{NUM_INITS}inits"
+        f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"
     )
@@ -127,6 +131,7 @@ if __name__ == "__main__":
         n_test=N_TEST,
         num_rff=NUM_RFF,
         num_inits=NUM_INITS,
+        init_batch_size=INIT_BATCH_SIZE,
         num_epochs=NUM_EPOCHS,
         optimizer_kwargs=optimizer_kwargs,
         seed=SEED,
@@ -157,4 +162,5 @@ if __name__ == "__main__":
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
         log_scale=LOG_SCALE,
+        train_mode=TRAIN_MODE,
     )

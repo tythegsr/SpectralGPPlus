@@ -58,14 +58,23 @@ class DefaultParameterInitializer(ParameterInitializer):
 
         Excludes '.weight' and '.bias' parameters from Sobol sampling count,
         as these are initialized separately (Xavier uniform for weights, zeros for biases).
+
+        For batched multi-init models, counts parameters **per init** using the model's
+        leading batch size (which may be smaller than ``num_inits`` when training
+        sequential init waves via ``init_batch_size``).
         """
-        # Count only parameters that will use Sobol samples (exclude .weight and .bias)
+        from .batch_utils import model_init_batch_size
+
+        batch_size = model_init_batch_size(model)
         self.num_params = 0
         for name, param in model.named_parameters():
             if param.requires_grad and ".weight" not in name and ".bias" not in name:
-                self.num_params += param.numel()
+                if batch_size > 1 and param.dim() >= 1 and param.shape[0] == batch_size:
+                    self.num_params += param[0].numel()
+                else:
+                    self.num_params += param.numel()
 
-        sobol_engine = SobolEngine(dimension=self.num_params, scramble=True, seed=self.seed)
+        sobol_engine = SobolEngine(dimension=max(self.num_params, 1), scramble=True, seed=self.seed)
         self.sobol_samples = sobol_engine.draw(self.num_inits)
 
         logger.info("Using DefaultParameterInitializer")
@@ -271,6 +280,20 @@ class DefaultParameterInitializer(ParameterInitializer):
         z = torch.erfinv(2.0 * sample - 1.0) * torch.sqrt(torch.tensor(2.0, dtype=sample.dtype, device=sample.device))
         return mean + std * z
 
+    @staticmethod
+    def _assign_param_data(param: torch.Tensor, value: torch.Tensor) -> None:
+        """
+        Write ``value`` into ``param`` storage.
+
+        Must use in-place ``copy_``: ``param.data = ...`` on a slice view (e.g.
+        ``param[b]`` in batched init) only rebinds the view object and does **not**
+        update the parent Parameter — which broke multi-wave re-initialization.
+        """
+        value = value.to(device=param.device, dtype=param.dtype)
+        if value.shape != param.shape:
+            value = value.reshape(param.shape)
+        param.data.copy_(value)
+
     def initialize_parameter(
         self,
         param: torch.Tensor,
@@ -300,7 +323,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     logger.error(f"NaN detected in orthogonal initialization for {name}")
                     logger.error(f"temp_param: {temp_param}")
                     logger.error(f"param shape: {param.shape}, dtype: {param.dtype}")
-                param.data = temp_param
+                self._assign_param_data(param, temp_param)
                 logger.debug(f"Orthogonal initialization successful for {name} with seed {generator_seed}")
             except Exception as e:
                 logger.error(f"Orthogonal initialization failed for {name}: {e}")
@@ -312,7 +335,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                     std=0.1,
                     generator=self._make_generator(temp_param, generator_seed),
                 )
-                param.data = temp_param
+                self._assign_param_data(param, temp_param)
 
         elif method == "orthogonal":
             torch.nn.init.orthogonal_(param, gain=config.get("gain", 1.0))
@@ -349,14 +372,14 @@ class DefaultParameterInitializer(ParameterInitializer):
             lower = config.get("lower", -6.0)
             upper = config.get("upper", 3.0)
             raw_value = lower + (upper - lower) * sample
-            param.data = raw_value.to(dtype=param.dtype)
+            self._assign_param_data(param, raw_value)
 
         elif method == "normal":
             mean = config.get("mean", -2.0)
             std = config.get("std", 1.5)
             raw_value = self._generate_normal_samples(sample, mean, std)
             # Direct initialization - constraints are built into kernel classes
-            param.data = raw_value.to(dtype=param.dtype)
+            self._assign_param_data(param, raw_value)
             logger.debug(f"Direct initialization: {name} = {raw_value} (constraints built into kernel classes)")
 
         elif method == "zeros":
@@ -371,9 +394,9 @@ class DefaultParameterInitializer(ParameterInitializer):
                         f"constant init shape mismatch for {name}: "
                         f"value {tuple(value.shape)} vs param {tuple(param.shape)}"
                     )
-                param.data.copy_(value)
+                self._assign_param_data(param, value)
             else:
-                param.data = torch.full_like(param, value, dtype=param.dtype)
+                self._assign_param_data(param, torch.full_like(param, value, dtype=param.dtype))
 
         elif method == "skip":
             pass
@@ -381,7 +404,7 @@ class DefaultParameterInitializer(ParameterInitializer):
         else:
             # Fallback to normal with conservative parameters
             raw_value = 0.1 * (sample * 2 - 1)
-            param.data = raw_value.to(dtype=param.dtype)
+            self._assign_param_data(param, raw_value)
 
     def initialize(self, model: torch.nn.Module, run_index: int):
         """
@@ -459,6 +482,98 @@ class DefaultParameterInitializer(ParameterInitializer):
                 idx += param_length
 
         logger.info(f"Model parameters initialized with run #{run_index}")
+
+    def initialize_batched(self, model: torch.nn.Module, start_index: int = 0) -> None:
+        """
+        Initialize one wave of a batched model from Sobol rows ``[start_index, start_index+B)``.
+
+        ``B`` is the model's leading init-batch size. ``self.num_inits`` is the total
+        number of Sobol rows (across all sequential waves when ``init_batch_size``
+        is smaller than ``num_inits``).
+
+        Parameters with a leading dim equal to ``B`` receive Sobol row ``start_index+i``
+        in slice ``param[i]``. Unbatched parameters use the row at ``start_index``.
+        """
+        from .batch_utils import model_init_batch_size
+
+        B = model_init_batch_size(model)
+        if B < 1:
+            B = 1
+        if start_index < 0 or start_index + B > self.num_inits:
+            raise ValueError(
+                f"initialize_batched start_index={start_index} with batch size {B} "
+                f"exceeds initializer num_inits={self.num_inits}."
+            )
+        if self.sobol_samples is None:
+            self.setup(model)
+
+        with torch.no_grad():
+            idx = 0
+            for name, param in model.named_parameters():
+                if not param.requires_grad or param.numel() == 0:
+                    continue
+
+                config = self.get_initialization_config(name, param, model)
+                is_batched = param.dim() >= 1 and param.shape[0] == B and B > 1
+
+                if ".weight" in name:
+                    # LRNN stores one ModuleList entry per init; seed from that index.
+                    net_idx = None
+                    if "feature_nets." in name:
+                        try:
+                            net_idx = int(name.split("feature_nets.", 1)[1].split(".", 1)[0])
+                        except (IndexError, ValueError):
+                            net_idx = None
+                    if net_idx is not None:
+                        global_i = start_index + int(net_idx)
+                        generator_seed = (
+                            (self.seed + global_i) if self.seed is not None else global_i
+                        )
+                        g = self._make_generator(param, generator_seed)
+                        if param.dim() >= 2:
+                            torch.nn.init.xavier_uniform_(param, generator=g)
+                        else:
+                            torch.nn.init.uniform_(param, -0.1, 0.1)
+                        continue
+                    for b in range(B if is_batched else 1):
+                        target = param[b] if is_batched else param
+                        global_i = start_index + b
+                        generator_seed = (self.seed + global_i) if self.seed is not None else global_i
+                        g = self._make_generator(target, generator_seed)
+                        if target.dim() >= 2:
+                            torch.nn.init.xavier_uniform_(target, generator=g)
+                        else:
+                            torch.nn.init.uniform_(target, -0.1, 0.1)
+                    continue
+
+                if ".bias" in name:
+                    torch.nn.init.zeros_(param)
+                    continue
+
+                if is_batched:
+                    per_init = param[0].numel()
+                    for b in range(B):
+                        global_i = start_index + b
+                        sample = self.sobol_samples[global_i, idx : idx + per_init]
+                        sample = sample.reshape(param[b].shape).to(device=param.device, dtype=param.dtype)
+                        self.initialize_parameter(
+                            param[b], sample, config, name, model, run_index=global_i
+                        )
+                    idx += per_init
+                else:
+                    per_init = param.numel()
+                    sample = self.sobol_samples[start_index, idx : idx + per_init]
+                    sample = sample.reshape(param.shape).to(device=param.device, dtype=param.dtype)
+                    self.initialize_parameter(
+                        param, sample, config, name, model, run_index=start_index
+                    )
+                    idx += per_init
+
+        logger.info(
+            "Batched model parameters initialized for %s inits (start_index=%s).",
+            B,
+            start_index,
+        )
 
 
 class RFFParameterInitializer(DefaultParameterInitializer):
@@ -553,6 +668,62 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             run_index,
             self.seed,
         )
+
+    def initialize_batched(self, model: torch.nn.Module, start_index: int = 0) -> None:
+        """Assign stacked RFF weights ``(B, d, D)`` for one wave, then Sobol hypers."""
+        from ..models.rff_gpr import RFFGPR
+        from ..models.rff_mtgpr import RFFMTGPR
+        from ..utils.rff_utils import init_rbf_weights
+        from .batch_utils import model_init_batch_size
+
+        if self._rff_weight_draws is None:
+            self._rff_weight_draws = []
+
+        if isinstance(model, RFFGPR):
+            rff_kernel = model._rff_kernel
+            num_rff = model.num_rff
+            invalidate = model.invalidate_feature_cache
+        elif isinstance(model, RFFMTGPR):
+            rff_kernel = model._rff_kernel
+            num_rff = model.num_rff
+            invalidate = model.invalidate_feature_cache
+        else:
+            super().initialize_batched(model, start_index=start_index)
+            return
+
+        B = model_init_batch_size(model)
+        if B < 1:
+            B = 1
+        end = start_index + B
+        if end > self.num_inits:
+            raise ValueError(
+                f"RFF initialize_batched start_index={start_index} with batch size {B} "
+                f"exceeds initializer num_inits={self.num_inits}."
+            )
+
+        num_dims = model.train_inputs[0].shape[-1]
+        rff_sampling = rff_kernel.rff_sampling
+        correct_sorf = bool(getattr(rff_kernel, "correct_sorf", False))
+        while len(self._rff_weight_draws) < end:
+            self._rff_weight_draws.append(
+                init_rbf_weights(
+                    num_dims,
+                    num_rff,
+                    device=rff_kernel.raw_lengthscale.device,
+                    dtype=rff_kernel.raw_lengthscale.dtype,
+                    rff_sampling=rff_sampling,
+                    correct_sorf=correct_sorf,
+                )
+            )
+        stacked = torch.stack(self._rff_weight_draws[start_index:end], dim=0)
+        # Unbatched RFF kernels store weights as (d, D); batched as (B, d, D).
+        if len(getattr(model, "batch_shape", torch.Size([]))) == 0:
+            stacked = stacked.squeeze(0)
+        rff_kernel.register_buffer("randn_weights", stacked)
+        if hasattr(rff_kernel, "_feature_cache_version"):
+            rff_kernel._feature_cache_version += 1
+        invalidate()
+        super().initialize_batched(model, start_index=start_index)
 
 
 class RFFMTParameterInitializer(RFFParameterInitializer):

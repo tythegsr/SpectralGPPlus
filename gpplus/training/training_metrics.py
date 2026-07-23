@@ -1158,7 +1158,10 @@ def compute_validation_metrics(
 
             val_nll = _gaussian_predictive_nll(val_y, pred_mean, pred_std)
             val_rrmse = _relative_rmse(val_y, pred_mean)
-    except Exception:
+    except Exception as exc:
+        from ..config import logger
+
+        logger.debug("compute_validation_metrics failed: %s", exc, exc_info=True)
         return {"val_NLL": float("nan"), "val_RRMSE": float("nan")}
     finally:
         if was_training:

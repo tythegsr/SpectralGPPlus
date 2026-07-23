@@ -114,6 +114,7 @@ def build_multitask_noise_likelihood(
     noise_prior: Prior | None = None,
     rank: int = 0,
     noise_constraint: SoftClamp | None = None,
+    batch_shape: torch.Size = torch.Size(),
 ) -> LogMultitaskGaussianLikelihood:
     """
     Log10 SoftClamp multitask noise likelihood for Woodbury MT inference.
@@ -127,6 +128,7 @@ def build_multitask_noise_likelihood(
         noise_constraint=noise_constraint,
         has_global_noise=False,
         has_task_noise=True,
+        batch_shape=batch_shape,
     )
 
 

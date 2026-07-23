@@ -59,11 +59,16 @@ class LRNNWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood
         train_x = _drop_singleton_batch(model.train_inputs[0])
         phi_train = model.scaled_features(train_x)
         mean = model.mean_module(train_x)
-        if mean.dim() > 1 and mean.shape[0] == 1:
+        if mean.dim() > 1 and mean.shape[0] == 1 and phi_train.dim() == 2:
             mean = mean.squeeze(0)
         target_1d = _drop_singleton_batch(target)
-        y_centered = target_1d - mean
+        if phi_train.dim() == 3 and target_1d.dim() == 1:
+            y_centered = target_1d.unsqueeze(0) - mean
+        else:
+            y_centered = target_1d - mean
         noise = model.likelihood.noise
+        if noise.dim() > 1:
+            noise = noise.reshape(noise.shape[0])
         res = woodbury_marginal_log_likelihood_lrnn(
             noise,
             phi_train,
@@ -72,5 +77,5 @@ class LRNNWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihood
             variance_correction=self.variance_correction,
         )
         res = self._add_other_terms(res, args)
-        num_data = target.numel()
+        num_data = target_1d.shape[-1]
         return res.div(num_data)

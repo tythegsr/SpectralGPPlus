@@ -19,6 +19,7 @@ class GPR(gpytorch.models.ExactGP):
     Attributes:
         mean_module (gpytorch.means.Mean): The mean function of the GP.
         covar_module (gpytorch.kernels.Kernel): The covariance (kernel) function.
+        batch_shape (torch.Size): Leading init-batch shape (empty if unbatched).
     """
 
     def __init__(
@@ -28,6 +29,7 @@ class GPR(gpytorch.models.ExactGP):
         likelihood: gpytorch.likelihoods.Likelihood = None,
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
+        batch_shape: torch.Size | None = None,
     ):
         """Initializes GPR.
 
@@ -39,11 +41,13 @@ class GPR(gpytorch.models.ExactGP):
             mean_module (gpytorch.means.Mean, optional): Mean function. Defaults to ConstantMean if None.
             kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
                 Defaults to a ScaleKernel * Gaussian combo if None.
+            batch_shape: Optional leading init-batch shape, e.g. ``torch.Size([num_inits])``.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
         """
         self.dtype = train_x.dtype
+        self.batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             logger.error("train_x and train_y must be torch.Tensor instances.")
@@ -52,19 +56,23 @@ class GPR(gpytorch.models.ExactGP):
         logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
 
         if likelihood is None:
-            likelihood = LogGaussianLikelihood()
+            likelihood = LogGaussianLikelihood(batch_shape=self.batch_shape)
             logger.warning("No likelihood provided. Using LogGaussianLikelihood as default.")
 
         if mean_module is None:
-            mean_module = gpytorch.means.ConstantMean()
+            mean_module = gpytorch.means.ConstantMean(batch_shape=self.batch_shape)
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
             input_dim = train_x.shape[-1]
-            kernel_module = LogScaleKernel(GaussianKernel(ard_num_dims=input_dim))  # Uses one lengthscale per dimension
+            kernel_module = LogScaleKernel(
+                GaussianKernel(ard_num_dims=input_dim, batch_shape=self.batch_shape),
+                batch_shape=self.batch_shape,
+            )
             logger.warning(
-                "No kernel_module provided. Using LogScaleKernel(GaussianKernel(ard_num_dims=None)) "
-                f"(single lengthscale; input_dim={input_dim})."
+                "No kernel_module provided. Using LogScaleKernel(GaussianKernel(ard_num_dims=%s)) "
+                f"(batch_shape={self.batch_shape}).",
+                input_dim,
             )
 
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):

@@ -19,7 +19,7 @@ from ..utils.lrnn_utils import woodbury_predict_lrnn
 
 
 def _drop_singleton_batch(t: torch.Tensor) -> torch.Tensor:
-    """Woodbury helpers expect (n, m); GPyTorch may store train_x as (1, n, d)."""
+    """Woodbury helpers expect (n, ...); GPyTorch may store train_x as (1, n, d)."""
     if t.dim() >= 3 and t.shape[0] == 1:
         return t.squeeze(0)
     return t
@@ -49,16 +49,18 @@ class LRNNGPR(gpytorch.models.ExactGP):
         activation: Callable[[], nn.Module] | type[nn.Module] = nn.Tanh,
         layer_config: dict | None = None,
         variance_correction: bool = True,
+        batch_shape: torch.Size | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
 
         self.dtype = train_x.dtype
+        self.batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
         if likelihood is None:
-            likelihood = LogGaussianLikelihood()
+            likelihood = LogGaussianLikelihood(batch_shape=self.batch_shape)
             logger.warning("No likelihood provided. Using LogGaussianLikelihood.")
         if mean_module is None:
-            mean_module = gpytorch.means.ConstantMean()
+            mean_module = gpytorch.means.ConstantMean(batch_shape=self.batch_shape)
         if kernel_module is None:
             input_dim = int(train_x.shape[-1])
             kernel_module = LRNNKernel(
@@ -67,11 +69,13 @@ class LRNNGPR(gpytorch.models.ExactGP):
                 feature_rank=feature_rank,
                 activation=activation,
                 layer_config=layer_config,
+                batch_shape=self.batch_shape,
             )
             logger.warning(
                 "No kernel_module provided. Using LRNNKernel("
                 f"input_dim={input_dim}, hidden_dims={tuple(hidden_dims)}, "
-                f"feature_rank={feature_rank}, variance_correction={variance_correction})."
+                f"feature_rank={feature_rank}, variance_correction={variance_correction}, "
+                f"batch_shape={self.batch_shape})."
             )
 
         if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):

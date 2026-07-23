@@ -18,6 +18,8 @@ from .trainer_utils import (
     run_parallel_initializations,
     select_best_run,
 )
+from .batch_utils import materialize_unbatched_model
+from .training_batched import BatchedGPTrainer
 from .training_single_run import GPTrainerSingleProcess
 
 
@@ -45,6 +47,8 @@ class GPTrainer:
         inner_max_num_threads: Optional[int] = 1,
         dtype: torch.dtype = torch.float64,
         parallel_verbose: int = 0,
+        train_mode: str = "independent",
+        init_batch_size: int | None = None,
     ):
         #! TODO: Update so LBFGS and adam use different trainers to minimize 'if' lines
         """
@@ -61,7 +65,7 @@ class GPTrainer:
                 ``model.parameters()`` + ``optimizer_kwargs``.
             num_epochs: Number of epochs per run.
             seed: Random seed for parameter initialization.
-            num_inits: Number of initialization runs to evaluate.
+            num_inits: Total number of random starts to evaluate.
             mll_class: Marginal log likelihood class. Defaults to exact MLL.
             cholesky_jitter: Cholesky jitter used during training.
             callbacks: Optional callback instances applied during training.
@@ -70,11 +74,27 @@ class GPTrainer:
             device: Target device string (falls back to CPU if CUDA is unavailable).
             stop_conditions: Optional early-stop conditions. Defaults are applied when omitted.
             min_epochs: Minimum epochs before stop conditions can terminate a run.
-            n_jobs: Optional parallel job cap used by run dispatch.
+            n_jobs: Optional parallel job cap used by run dispatch (independent mode).
+                On CUDA, ``None`` means one worker per GPU; a positive value is the
+                total concurrent init cap (may place multiple jobs on one GPU).
             inner_max_num_threads: Optional torch thread cap per run worker.
             dtype: Tensor dtype used for model and training data.
             parallel_verbose: joblib Parallel verbosity (0=quiet, 10=progress).
+            train_mode: ``"independent"`` (default) runs deepcopy+joblib multi-init;
+                ``"batched"`` trains one model with ``batch_shape=[init_batch_size]`` on a
+                single device (Adam-style optimizers only), in sequential waves until
+                ``num_inits`` starts are done.
+            init_batch_size: Concurrent inits per wave in batched mode (model
+                ``batch_shape``). Defaults to ``num_inits`` (single wave) or
+                ``model.init_batch_size`` when set. ``num_inits`` must be divisible by
+                this value. Ignored in independent mode. After batched freeze /
+                early-stop fixes this is a **VRAM / throughput** knob only — it
+                should not change per-init Adam dynamics vs a smaller wave.
         """
+        if train_mode not in {"independent", "batched"}:
+            raise ValueError(f"train_mode must be 'independent' or 'batched', got {train_mode!r}.")
+        self.train_mode = train_mode
+
         if device.startswith("cuda") and not torch.cuda.is_available():
             logger.warning("CUDA not available. Falling back to CPU.")
             device = "cpu"
@@ -87,7 +107,38 @@ class GPTrainer:
         self._prepare_model_and_data(model)
 
         self.num_epochs = num_epochs
-        self.num_inits = num_inits
+        if int(num_inits) < 1:
+            raise ValueError(f"num_inits must be >= 1, got {num_inits}.")
+        self.num_inits = int(num_inits)
+        self.total_inits = self.num_inits
+
+        resolved_ibs = init_batch_size
+        if resolved_ibs is None:
+            resolved_ibs = getattr(model, "init_batch_size", None)
+        if resolved_ibs is None:
+            resolved_ibs = self.num_inits
+        resolved_ibs = int(resolved_ibs)
+        if resolved_ibs < 1:
+            raise ValueError(f"init_batch_size must be >= 1, got {resolved_ibs}.")
+        self.init_batch_size = min(resolved_ibs, self.num_inits)
+
+        if self.train_mode == "batched":
+            if self.num_inits % self.init_batch_size != 0:
+                raise ValueError(
+                    f"num_inits ({self.num_inits}) must be divisible by "
+                    f"init_batch_size ({self.init_batch_size})."
+                )
+            self.num_batches = self.num_inits // self.init_batch_size
+        else:
+            if init_batch_size is not None and int(init_batch_size) != self.num_inits:
+                logger.warning(
+                    "init_batch_size=%s is ignored when train_mode=%r.",
+                    init_batch_size,
+                    self.train_mode,
+                )
+            self.init_batch_size = self.num_inits
+            self.num_batches = 1
+
         self.seed = seed
         self.callbacks = callbacks or []
         self.cholesky_jitter = cholesky_jitter
@@ -110,7 +161,9 @@ class GPTrainer:
             self.stop_conditions = stop_conditions
 
         if initializer_class is None:
-            self.initializer = DefaultParameterInitializer(num_inits=self.num_inits, seed=self.seed)
+            self.initializer = DefaultParameterInitializer(
+                num_inits=self.num_inits, seed=self.seed
+            )
         else:
             self.initializer = initializer_class(
                 num_inits=self.num_inits,
@@ -151,12 +204,19 @@ class GPTrainer:
             logger.info("Overriding num_epochs=%s to 1 for LBFGS-style optimizer.", self.num_epochs)
             self.num_epochs = 1
 
+        if self.train_mode == "batched" and is_lbfgs_like:
+            raise ValueError(
+                "train_mode='batched' requires an Adam-style PyTorch optimizer; "
+                "LBFGS is only supported with train_mode='independent'."
+            )
+
         optimizer_name = getattr(self.optimizer_class, "__name__", str(self.optimizer_class))
         effective_optimizer_kwargs = get_effective_optimizer_kwargs(self.optimizer_class, self.optimizer_kwargs)
         logger.info(
-            "Trainer optimizer configured: class=%s, effective_kwargs=%s",
+            "Trainer optimizer configured: class=%s, effective_kwargs=%s, train_mode=%s",
             optimizer_name,
             effective_optimizer_kwargs,
+            self.train_mode,
         )
 
     def _prepare_model_and_data(self, model) -> None:
@@ -252,7 +312,111 @@ class GPTrainer:
         logger.info("Training completed.")
         return results
 
+    def train_batched(self) -> list[RunResult]:
+        """Train ``num_inits`` starts in waves of ``init_batch_size``; load the best unbatched state."""
+        if not hasattr(self.initializer, "initialize_batched"):
+            raise TypeError(
+                f"Initializer {type(self.initializer).__name__} does not support initialize_batched()."
+            )
+
+        from .batch_utils import model_init_batch_size
+
+        model_batch = model_init_batch_size(self.model)
+        if self.init_batch_size > 1 and model_batch != self.init_batch_size:
+            raise ValueError(
+                f"Batched model batch size is {model_batch}, but init_batch_size="
+                f"{self.init_batch_size}. Construct the model with "
+                f"batch_shape=torch.Size([{self.init_batch_size}])."
+            )
+
+        patience = None
+        min_loss_change = None
+        for sc in self.stop_conditions:
+            if hasattr(sc, "patience"):
+                patience = sc.patience
+            if hasattr(sc, "min_loss_change"):
+                min_loss_change = sc.min_loss_change
+
+        all_results: list[RunResult] = []
+        best_unbatched = None
+        best_index = None
+        best_loss = None
+        wave_size = self.init_batch_size
+
+        for wave in range(self.num_batches):
+            offset = wave * wave_size
+            logger.info(
+                "Batched init wave %s/%s (inits %s..%s of %s total, concurrent=%s).",
+                wave + 1,
+                self.num_batches,
+                offset,
+                offset + wave_size - 1,
+                self.num_inits,
+                wave_size,
+            )
+            self.initializer.initialize_batched(self.model, start_index=offset)
+
+            runner = BatchedGPTrainer(
+                model=self.model,
+                optimizer_class=self.optimizer_class,
+                optimizer_kwargs=self.optimizer_kwargs,
+                mll_class=self.mll_class,
+                num_epochs=self.num_epochs,
+                cholesky_jitter=self.cholesky_jitter,
+                callbacks=self.callbacks,
+                device=self.device,
+                scheduler_class=self.scheduler_class,
+                scheduler_kwargs=self.scheduler_kwargs,
+                param_groups_fn=self.param_groups_fn,
+                stop_conditions=self.stop_conditions,
+                min_epochs=self.min_epochs,
+                dtype=self.dtype,
+                num_inits=wave_size,
+                patience=patience,
+                min_loss_change=min_loss_change,
+            )
+            wave_results = runner.train()
+            for result in wave_results:
+                local_idx = result.get("run_index")
+                if local_idx is not None:
+                    result = {**result, "run_index": offset + int(local_idx), "batch_index": wave}
+                else:
+                    result = {**result, "batch_index": wave}
+                all_results.append(result)
+
+            wave_state = getattr(runner, "_best_unbatched_state", None)
+            wave_best_index = getattr(runner, "_best_run_index", None)
+            wave_best_loss = getattr(runner, "_best_loss", None)
+            if wave_state is not None and wave_best_loss is not None:
+                if best_loss is None or float(wave_best_loss) < float(best_loss):
+                    best_unbatched = wave_state
+                    best_loss = float(wave_best_loss)
+                    best_index = (
+                        offset + int(wave_best_index) if wave_best_index is not None else offset
+                    )
+
+        if best_unbatched is not None:
+            self.model = materialize_unbatched_model(self.model, best_unbatched)
+            self.train_x = self.model.train_inputs[0]
+            self.train_y = self.model.train_targets
+            logger.info(
+                "Best batched init #%s materialized into unbatched model (loss=%.4f, "
+                "waves=%s, init_batch_size=%s, total_inits=%s).",
+                best_index,
+                best_loss if best_loss is not None else float("nan"),
+                self.num_batches,
+                self.init_batch_size,
+                self.num_inits,
+            )
+        else:
+            logger.warning("No batched winner state found; model left in batched form.")
+        logger.info("Batched training completed.")
+        return all_results
+
     def train(self) -> list[RunResult]:
+        if self.train_mode == "batched":
+            return self.train_batched()
+
         results = self.train_multiple_process_parallel()
         failed_runs = [result for result in results if result.get("error")]
         if failed_runs:

@@ -68,17 +68,44 @@ class RFFMTWoodburyMarginalLogLikelihood(gpytorch.mlls.ExactMarginalLogLikelihoo
         target_mt = _drop_singleton_batch(target)
         if target_mt.dim() == 1:
             target_mt = target_mt.reshape(-1, model.num_tasks)
-        y_centered = flatten_multitask_targets(target_mt - mean)
+        y_centered_mt = target_mt - mean
         task_noises = model.task_noises()
-        res = woodbury_marginal_log_likelihood_mt(
-            task_noises,
-            phi,
-            r_b,
-            n_train,
-            y_centered,
-            jitter=self.jitter,
-            method=self.method,
-            promote_features=self.promote_features,
-        )
+
+        # Fused ST-style batching is not yet available for all MT eigen paths.
+        # When Phi is (B, n, m), evaluate per-init and stack (still one process / one GPU).
+        if phi.dim() == 3:
+            B = phi.shape[0]
+            losses = []
+            for b in range(B):
+                y_b = flatten_multitask_targets(
+                    y_centered_mt[b] if y_centered_mt.dim() == 3 else y_centered_mt
+                )
+                noise_b = task_noises[b] if task_noises.dim() > 1 else task_noises
+                r_b_b = r_b[b] if r_b.dim() == 3 else r_b
+                losses.append(
+                    woodbury_marginal_log_likelihood_mt(
+                        noise_b,
+                        phi[b],
+                        r_b_b,
+                        n_train,
+                        y_b,
+                        jitter=self.jitter,
+                        method=self.method,
+                        promote_features=self.promote_features,
+                    )
+                )
+            res = torch.stack(losses)
+        else:
+            y_centered = flatten_multitask_targets(y_centered_mt)
+            res = woodbury_marginal_log_likelihood_mt(
+                task_noises,
+                phi,
+                r_b,
+                n_train,
+                y_centered,
+                jitter=self.jitter,
+                method=self.method,
+                promote_features=self.promote_features,
+            )
         res = self._add_other_terms(res, args)
-        return res.div(target.numel())
+        return res.div(target_mt[0].numel() if target_mt.dim() == 3 else target_mt.numel())

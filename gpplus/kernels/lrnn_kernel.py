@@ -43,6 +43,9 @@ class LRNNKernel(Kernel):
 
     Default architecture (paper §4): two hidden layers of 128 units with ``tanh``,
     then a linear map to ``feature_rank`` basis functions (default ``r=128``).
+
+    With ``batch_shape=torch.Size([B])``, maintains ``B`` independent feature nets
+    and returns features shaped ``(B, n, r)``.
     """
 
     has_lengthscale = False
@@ -54,9 +57,11 @@ class LRNNKernel(Kernel):
         feature_rank: int = 128,
         activation: Callable[[], nn.Module] | type[nn.Module] = nn.Tanh,
         layer_config: dict | None = None,
+        batch_shape: torch.Size | None = None,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
+        super().__init__(batch_shape=batch_shape, **kwargs)
         if input_dim < 1:
             raise ValueError(f"input_dim must be >= 1, got {input_dim}")
         if feature_rank < 1:
@@ -74,7 +79,15 @@ class LRNNKernel(Kernel):
                 self.hidden_dims, self.feature_rank, activation
             )
 
-        self.feature_net = InputTransformNet(self.input_dim, self.layer_config)
+        if len(self.batch_shape) == 0:
+            self.feature_net = InputTransformNet(self.input_dim, self.layer_config)
+            self.feature_nets = None
+        else:
+            b = int(self.batch_shape[0])
+            self.feature_nets = nn.ModuleList(
+                [InputTransformNet(self.input_dim, self.layer_config) for _ in range(b)]
+            )
+            self.feature_net = self.feature_nets[0]  # alias for single-net call sites
         self._feature_cache_version = 0
 
     @property
@@ -87,10 +100,15 @@ class LRNNKernel(Kernel):
         self._feature_cache_version += 1
 
     def featurize(self, x: Tensor) -> Tensor:
-        """Map inputs to neural basis features ``φ(x)`` of shape ``(..., r)``."""
+        """Map inputs to neural basis features ``φ(x)`` of shape ``(..., r)`` or ``(B, n, r)``."""
         flat = x.reshape(-1, x.shape[-1])
-        phi = self.feature_net(flat)
-        phi = phi.reshape(*x.shape[:-1], phi.shape[-1])
+        if self.feature_nets is None:
+            phi = self.feature_net(flat)
+            phi = phi.reshape(*x.shape[:-1], phi.shape[-1])
+        else:
+            # Independent nets per init -> (B, n, r)
+            phis = [net(flat).reshape(*x.shape[:-1], -1) for net in self.feature_nets]
+            phi = torch.stack(phis, dim=0)
         # Keep typical ||φ||² and Gram entries O(1) for Woodbury stability.
         return phi * self._feature_scale
 

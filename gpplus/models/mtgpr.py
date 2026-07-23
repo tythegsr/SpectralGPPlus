@@ -30,6 +30,7 @@ class MTGPR(gpytorch.models.ExactGP):
         likelihood: gpytorch.likelihoods.Likelihood = None,
         mean_module: gpytorch.means.MultitaskMean = None,
         kernel_module: gpytorch.kernels.MultitaskKernel = None,
+        batch_shape: torch.Size | None = None,
     ):
         """Initializes GPR.
 
@@ -43,6 +44,7 @@ class MTGPR(gpytorch.models.ExactGP):
                 If not a :class:`gpytorch.kernels.MultitaskKernel`, it is wrapped automatically
                 as the shared base kernel inside ``MultitaskKernel``.
                 Defaults to ``LogScaleKernel(GaussianKernel())`` inside ``MultitaskKernel`` if None.
+            batch_shape: Optional leading init-batch shape, e.g. ``torch.Size([num_inits])``.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
@@ -51,20 +53,21 @@ class MTGPR(gpytorch.models.ExactGP):
         self.num_tasks = num_tasks
         self.rank_likelihood = rank_likelihood
         self.rank_kernel = rank_kernel
+        self.batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
 
         if likelihood is None:
             likelihood = gpytorch.likelihoods.MultitaskGaussianLikelihood(
-                num_tasks=num_tasks, rank=self.rank_likelihood
+                num_tasks=num_tasks, rank=self.rank_likelihood, batch_shape=self.batch_shape
             )
             logger.warning("No likelihood provided. Using MultitaskGaussianLikelihood as default.")
 
         if mean_module is None:
-            base_mean = gpytorch.means.ConstantMean()
+            base_mean = gpytorch.means.ConstantMean(batch_shape=self.batch_shape)
             mean_module = gpytorch.means.MultitaskMean(base_mean, self.num_tasks)
             logger.warning("No mean_module provided. Using ConstantMean as default.")
 
         if kernel_module is None:
-            base_kernel = LogScaleKernel(GaussianKernel())
+            base_kernel = LogScaleKernel(GaussianKernel(batch_shape=self.batch_shape), batch_shape=self.batch_shape)
             kernel_module = gpytorch.kernels.MultitaskKernel(
                 base_kernel, num_tasks=self.num_tasks, rank=self.rank_kernel
             )
