@@ -29,6 +29,8 @@ IGNORE_PRETRAINING_LIMITS = False
 POSTERIOR_PDF_MODE = "tabpfn_bar"  # "gaussian" | "tabpfn_bar"
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
+X_TRANSFORM = "none"  # "none" | "log1p"
+LOG_SCALE: bool | None = None
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -51,7 +53,10 @@ def run_s2_toa_tabpfn_entry(**kwargs) -> dict:
 
 if __name__ == "__main__":
     save_path = SAVE_PATH or "experiments_TabPFN/results/s2_toa_tabpfn"
-    print(f"TabPFN IDE config  qoi={QOI}  pfn_device={PFN_DEVICE}")
+    print(
+        f"TabPFN IDE config  qoi={QOI}  pfn_device={PFN_DEVICE}  "
+        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}"
+    )
 
     run_s2_toa_tabpfn(
         n_train=N_TRAIN,
@@ -70,4 +75,6 @@ if __name__ == "__main__":
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
+        x_transform=X_TRANSFORM,
+        log_scale=LOG_SCALE,
     )

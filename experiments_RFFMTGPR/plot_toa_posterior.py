@@ -123,6 +123,7 @@ def _metrics_text_for_task(
 ) -> str:
     lines = [
         f"mean_rel: {_pct_str(float(rel_metrics['mean_rel_error']))}",
+        f"median_rel: {_pct_str(float(rel_metrics.get('median_rel_error', float('nan'))))}",
         f"max_rel: {_pct_str(float(rel_metrics['max_rel_error']))}",
         f"within_{rel_tolerance * 100:g}%: {_pct_str(float(rel_metrics['pct_within_1pct']))}",
     ]

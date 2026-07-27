@@ -449,6 +449,7 @@ def compute_metrics(
             "RMSE": np.sqrt(mean_squared_error(y_true, y_hat)),
             "MSE": mean_squared_error(y_true, y_hat),
             "MAE": np.mean(np.abs(y_true - y_hat)),
+            "MedAE": float(np.median(np.abs(y_true - y_hat))),
         }
     elif start_time is not None:
         # Legacy approach: single start_time
@@ -459,6 +460,7 @@ def compute_metrics(
             "RMSE": np.sqrt(mean_squared_error(y_true, y_hat)),
             "MSE": mean_squared_error(y_true, y_hat),
             "MAE": np.mean(np.abs(y_true - y_hat)),
+            "MedAE": float(np.median(np.abs(y_true - y_hat))),
         }
     else:
         # No time information
@@ -467,6 +469,7 @@ def compute_metrics(
             "RMSE": np.sqrt(mean_squared_error(y_true, y_hat)),
             "MSE": mean_squared_error(y_true, y_hat),
             "MAE": np.mean(np.abs(y_true - y_hat)),
+            "MedAE": float(np.median(np.abs(y_true - y_hat))),
         }
 
     # Add NIS (and CRPS, if std available) when we have any uncertainty information

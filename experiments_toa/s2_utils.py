@@ -111,8 +111,10 @@ def _scalar_error_metrics(
 ) -> dict[str, float]:
     yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
     yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    abs_err = np.abs(yp - yt)
     rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
-    mae = float(np.mean(np.abs(yp - yt)))
+    mae = float(np.mean(abs_err))
+    medae = float(np.median(abs_err))
     std = float(np.std(yt))
     rrmse = rmse / std if std > 0 else float("inf")
     ss_res = float(np.sum((yt - yp) ** 2))
@@ -121,6 +123,7 @@ def _scalar_error_metrics(
     return {
         f"{prefix}RMSE": rmse,
         f"{prefix}MAE": mae,
+        f"{prefix}MedAE": medae,
         f"{prefix}RRMSE": rrmse,
         f"{prefix}R2": r2,
     }
@@ -150,6 +153,7 @@ def compute_log_scale_extra_metrics(
     log_out = {
         "RMSE_log": out["RMSE"],
         "MAE_log": out["MAE"],
+        "MedAE_log": out["MedAE"],
         "RRMSE_log": out["RRMSE"],
         "R2_log": out["R2"],
     }
@@ -160,6 +164,7 @@ def compute_log_scale_extra_metrics(
             {
                 "RMSE_mean": mean_out["RMSE"],
                 "MAE_mean": mean_out["MAE"],
+                "MedAE_mean": mean_out["MedAE"],
                 "RRMSE_mean": mean_out["RRMSE"],
                 "R2_mean": mean_out["R2"],
             }

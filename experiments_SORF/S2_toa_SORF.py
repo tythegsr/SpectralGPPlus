@@ -17,20 +17,20 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["cos_i"] # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = None # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
 NUM_RFF = 400
-NUM_INITS = 16  # total random starts
-INIT_BATCH_SIZE = 16  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
+NUM_INITS = 1  # total random starts
+INIT_BATCH_SIZE = 1  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
 NUM_EPOCHS = 1000
 LR = 0.01
 SEED = 42
-DEVICE = "cpu"
+DEVICE = "cuda" # "cpu" | "cuda"
 DTYPE = "float64"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
-TRAIN_MODE = "batched"  # "independent" | "batched"
+TRAIN_MODE = "independent"  # "independent" | "batched"
 ARD = True
 SAVE_PATH: str | None = None
 MONITOR_VALIDATION = True
@@ -50,7 +50,7 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262207.nc"  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262307.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
 # None = auto from NetCDF attrs (output_log_scale / log_uniform_qois)
@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July23_testparallel/s2_toa_sorf_{NUM_INITS}inits"
+        f"experiments_SORF/results/July23/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"

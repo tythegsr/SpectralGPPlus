@@ -41,13 +41,15 @@ def compute_point_estimate_metrics(
     *,
     prefix: str = "",
 ) -> dict[str, float]:
-    """RMSE, RRMSE, MAE, R2 for one point estimate vs true values (1D)."""
+    """RMSE, RRMSE, MAE, MedAE, R2 for one point estimate vs true values (1D)."""
     yt = np.asarray(y_true, dtype=np.float64).ravel()
     yp = np.asarray(y_pred, dtype=np.float64).ravel()
+    abs_err = np.abs(yp - yt)
     rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
     std = float(np.std(yt))
     rrmse = rmse / std if std > 0 else float("inf")
-    mae = float(np.mean(np.abs(yp - yt)))
+    mae = float(np.mean(abs_err))
+    medae = float(np.median(abs_err))
     ss_res = float(np.sum((yt - yp) ** 2))
     ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
@@ -56,6 +58,7 @@ def compute_point_estimate_metrics(
         f"{p}RMSE": rmse,
         f"{p}RRMSE": rrmse,
         f"{p}MAE": mae,
+        f"{p}MedAE": medae,
         f"{p}R2": r2,
     }
 
@@ -76,6 +79,7 @@ def merge_grain_mean_metrics(
     per_task[f"{grain_task_name}_RMSE_mean"] = mean_metrics["mean_RMSE"]
     per_task[f"{grain_task_name}_RRMSE_mean"] = mean_metrics["mean_RRMSE"]
     per_task[f"{grain_task_name}_MAE_mean"] = mean_metrics["mean_MAE"]
+    per_task[f"{grain_task_name}_MedAE_mean"] = mean_metrics["mean_MedAE"]
     per_task[f"{grain_task_name}_R2_mean"] = mean_metrics["mean_R2"]
     return per_task
 
@@ -87,7 +91,7 @@ def compute_relative_error_metrics(
     rel_tolerance: float = 0.01,
     eps: float = 1e-12,
 ) -> dict[str, float | int]:
-    """Relative error stats: max/mean |error|/|y_true| and fraction below rel_tolerance."""
+    """Relative error stats: max/mean/median |error|/|y_true| and fraction below rel_tolerance."""
     yt = np.asarray(y_true, dtype=np.float64).ravel()
     yp = np.asarray(y_pred, dtype=np.float64).ravel()
     n_total = yt.shape[0]
@@ -97,6 +101,7 @@ def compute_relative_error_metrics(
         return {
             "max_rel_error": float("nan"),
             "mean_rel_error": float("nan"),
+            "median_rel_error": float("nan"),
             "pct_within_1pct": 0.0,
             "n_rel_error_valid": 0,
             "n_rel_error_excluded": n_excluded,
@@ -105,6 +110,7 @@ def compute_relative_error_metrics(
     return {
         "max_rel_error": float(np.max(rel_err)),
         "mean_rel_error": float(np.mean(rel_err)),
+        "median_rel_error": float(np.median(rel_err)),
         "pct_within_1pct": float(np.mean(rel_err < rel_tolerance)),
         "n_rel_error_valid": int(valid.sum()),
         "n_rel_error_excluded": n_excluded,
@@ -121,11 +127,13 @@ def format_relative_error_summary(
     n_excluded = int(rel_metrics.get("n_rel_error_excluded", 0))
     n_total = n_valid + n_excluded
     mean_rel = float(rel_metrics["mean_rel_error"])
+    median_rel = float(rel_metrics.get("median_rel_error", float("nan")))
     max_rel = float(rel_metrics["max_rel_error"])
     pct = float(rel_metrics["pct_within_1pct"]) * 100.0
     tol_pct = rel_tolerance * 100.0
     return (
-        f"{task_name}: mean_rel={mean_rel * 100:.2f}%  max_rel={max_rel * 100:.2f}%  "
+        f"{task_name}: mean_rel={mean_rel * 100:.2f}%  "
+        f"median_rel={median_rel * 100:.2f}%  max_rel={max_rel * 100:.2f}%  "
         f"within_{tol_pct:g}%={pct:.1f}%  ({n_valid}/{n_total} pts)"
     )
 

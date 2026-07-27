@@ -45,6 +45,11 @@ from experiments_toa.s2_plotting import (
     save_s2_predictions_npz,
     select_posterior_example_indices,
 )
+from experiments_toa.s2_reporting import (
+    plot_per_task_validation_curves,
+    print_end_of_run_summary,
+    print_task_test_metrics,
+)
 from experiments_toa.s2_utils import (
     apply_x_transform,
     compute_log_scale_extra_metrics,
@@ -96,39 +101,6 @@ from rff_experiment_utils import extract_learned_likelihood_noise
 from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
 
 RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
-
-
-def _plot_task_validation_curves(
-    metrics: dict,
-    save_path: str | Path,
-    task_name: str,
-    json_path: str | None = None,
-) -> list[str]:
-    block_key = f"{task_name}_validation_metrics_by_init"
-    if block_key not in metrics:
-        return []
-    from plot_validation_curves import plot_run
-
-    task_metrics = {
-        "monitor_validation": True,
-        "validation_metrics_by_init": metrics[block_key],
-        "best_init_index": metrics.get(f"{task_name}_best_init_index"),
-        "best_val_NLL": metrics.get(f"{task_name}_best_val_NLL"),
-        "best_val_RRMSE": metrics.get(f"{task_name}_best_val_RRMSE"),
-        "title": metrics.get("title", ""),
-    }
-    if json_path:
-        task_metrics["_source_file"] = json_path
-    out_dir = Path(save_path) / "validation" / task_name
-    try:
-        return [str(p) for p in plot_run(task_metrics, out_dir)]
-    except Exception as exc:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Validation plot generation failed for %s: %s", task_name, exc
-        )
-        return []
 
 
 def run_s2_toa_stgp(
@@ -658,27 +630,12 @@ def run_s2_toa_stgp(
             log_sigma_all.append(inv.log_sigma.numpy())
         else:
             log_sigma_all.append(np.full_like(pred_mean.numpy(), np.nan))
-        if task_uses_log_scale(
-            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        ):
-            print(
-                f"{task_name} Test (physical median) RMSE: {computed['RMSE']:.6f}  "
-                f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
-            )
-            print(
-                f"{task_name} Test (ln-space) RMSE_log: {computed['RMSE_log']:.6f}  "
-                f"RRMSE_log: {computed['RRMSE_log']:.6f}  MAE_log: {computed['MAE_log']:.6f}"
-            )
-            if "RRMSE_mean" in computed:
-                print(
-                    f"{task_name} Test (physical mean) RMSE_mean: {computed['RMSE_mean']:.6f}  "
-                    f"RRMSE_mean: {computed['RRMSE_mean']:.6f}"
-                )
-        else:
-            print(
-                f"{task_name} Test RMSE: {computed['RMSE']:.6f}  "
-                f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}"
-            )
+        print_task_test_metrics(
+            task_name,
+            computed,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
+        )
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
     y_std_stacked = np.stack(y_std_all, axis=1)
@@ -700,12 +657,14 @@ def run_s2_toa_stgp(
         rel_metrics_by_task[name] = rel_m
         per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
         per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
+        per_task[f"{name}_median_rel_error"] = float(rel_m["median_rel_error"])
         per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
         per_task[f"{name}_n_rel_error_valid"] = int(rel_m["n_rel_error_valid"])
         per_task[f"{name}_n_rel_error_excluded"] = int(rel_m["n_rel_error_excluded"])
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
     aggregate_rrmse = macro_rrmse(per_task, names)
+    aggregate_medae = macro_metric(per_task, names, "MedAE")
 
     # Flatten per-task log extras into per_task for aggregates / JSON.
     log_task_names = [
@@ -715,7 +674,18 @@ def run_s2_toa_stgp(
     ]
     for name in log_task_names:
         tm = task_metrics[name]
-        for key in ("RMSE_log", "MAE_log", "RRMSE_log", "R2_log", "RMSE_mean", "MAE_mean", "RRMSE_mean", "R2_mean"):
+        for key in (
+            "RMSE_log",
+            "MAE_log",
+            "MedAE_log",
+            "RRMSE_log",
+            "R2_log",
+            "RMSE_mean",
+            "MAE_mean",
+            "MedAE_mean",
+            "RRMSE_mean",
+            "R2_mean",
+        ):
             if key in tm:
                 per_task[f"{name}_{key}"] = float(tm[key])
     aggregate_rrmse_log = macro_metric(per_task, log_task_names, "RRMSE_log")
@@ -766,6 +736,7 @@ def run_s2_toa_stgp(
         "Total_Time": total_train_time + total_prediction_time,
         "aggregate_RRMSE": aggregate_rrmse,
         "aggregate_RRMSE_mean": aggregate_rrmse,
+        "aggregate_MedAE": aggregate_medae,
         "aggregate_RRMSE_log_tasks": aggregate_rrmse_log,
         "aggregate_RRMSE_lognormal_mean_tasks": aggregate_rrmse_mean,
         "RMSE": aggregate_rmse,
@@ -801,25 +772,20 @@ def run_s2_toa_stgp(
             for key, value in val_summary.items():
                 metrics[f"{task_name}_{key}"] = value
 
-    print(f"\nTest macro RRMSE (physical median): {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
-    if log_task_names:
-        print(
-            f"Test macro RRMSE_log (ln-space, log QoIs): {aggregate_rrmse_log:.6f}  "
-            f"macro RRMSE_mean (physical lognormal mean): {aggregate_rrmse_mean:.6f}"
-        )
-    for name in names:
-        print(
-            f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
-            f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
-        )
-        if name in log_task_names:
-            print(
-                f"  ln-space RRMSE_log: {per_task[f'{name}_RRMSE_log']:.6f}  "
-                f"RMSE_log: {per_task[f'{name}_RMSE_log']:.6f}  |  "
-                f"physical-mean RRMSE_mean: {per_task[f'{name}_RRMSE_mean']:.6f}"
-            )
-        print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
-    print(f"Total training time: {total_train_time:.1f}s")
+    print_end_of_run_summary(
+        names=names,
+        per_task=per_task,
+        rel_metrics_by_task=rel_metrics_by_task,
+        aggregate_rrmse=aggregate_rrmse,
+        aggregate_rmse=aggregate_rmse,
+        log_task_names=log_task_names,
+        aggregate_rrmse_log=aggregate_rrmse_log,
+        aggregate_rrmse_mean=aggregate_rrmse_mean,
+        rel_tolerance=rel_tolerance,
+        total_train_time=total_train_time,
+        format_relative_error_summary=format_relative_error_summary,
+        aggregate_medae=aggregate_medae,
+    )
 
     if save_path:
         example_indices = select_posterior_example_indices(
@@ -862,7 +828,7 @@ def run_s2_toa_stgp(
 
         if plot_validation and monitor_validation and n_val > 0:
             for task_name in names:
-                for plot_path in _plot_task_validation_curves(
+                for plot_path in plot_per_task_validation_curves(
                     metrics, save_path, task_name, json_path=out_json
                 ):
                     print(f"Saved validation plot to {plot_path}")

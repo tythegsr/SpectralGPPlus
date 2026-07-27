@@ -49,6 +49,8 @@ LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
+X_TRANSFORM = "none"  # "none" | "log1p"
+LOG_SCALE: bool | None = None
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -79,7 +81,10 @@ if __name__ == "__main__":
     if NUM_EPOCHS > 1 and LR is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": LR}
 
-    print(f"PCA-GPR IDE config  prior={RESPONSE_NOISE_PRIOR}  qoi={QOI}")
+    print(
+        f"PCA-GPR IDE config  prior={RESPONSE_NOISE_PRIOR}  "
+        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+    )
 
     run_s2_toa_pca_gpr(
         n_train=N_TRAIN,
@@ -113,4 +118,6 @@ if __name__ == "__main__":
         partition_shuffle=PARTITION_SHUFFLE,
         top_m_partitions=TOP_M_PARTITIONS,
         single_partition_index=SINGLE_PARTITION_INDEX,
+        x_transform=X_TRANSFORM,
+        log_scale=LOG_SCALE,
     )

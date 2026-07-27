@@ -28,20 +28,32 @@ from experiments_toa.data import TOA_TEST_POOL_SIZE, TOA_TRAIN_POOL_SIZE, TOA_VA
 from experiments_toa.s2_bands import band_config_metadata, load_task_band_config
 from experiments_toa.s2_constants import S2_DEFAULT_BAND_CONFIG_PATH, S2_INPUT_DIM, S2_TASK_NAMES
 from experiments_toa.s2_data import load_s2_toa_data
-from experiments_toa.s2_plotting import (
-    plot_s2_posterior_examples,
-    plot_s2_task_scatter,
-    save_s2_predictions_npz,
-    select_posterior_example_indices,
+from experiments_toa.s2_reporting import (
+    apply_log_scale_extra_metrics,
+    attach_log_scale_aggregate_fields,
+    attach_relative_error_fields,
+    collect_log_scale_prediction_arrays,
+    compute_aggregate_rmse,
+    compute_aggregate_rrmse,
+    print_end_of_run_summary,
+    print_task_test_metrics,
+    save_s2_summary_artifacts,
+    stack_or_none,
 )
 from experiments_toa.s2_utils import (
+    apply_x_transform,
     compute_per_task_metrics,
     extract_ard_lengthscales,
-    macro_rrmse,
+    macro_metric,
     map_ard_to_bands,
     select_bands,
 )
-from experiments_toa.s2_y_transform import forward_y_s2, inverse_y_s2, task_uses_log_scale
+from experiments_toa.s2_y_transform import (
+    forward_y_s2,
+    inverse_y_s2,
+    resolve_log_scale,
+    task_uses_log_scale,
+)
 from gpplus.training import (
     ConvergencePatienceStopCondition,
     GPTrainer,
@@ -79,7 +91,7 @@ def run_s2_toa_gp(
     standardize_x: bool = True,
     x_standardize_method: int = 2,
     standardize_y: bool = True,
-    log_scale: bool = True,
+    log_scale: bool | None = None,
     ard: bool = True,
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
@@ -103,6 +115,7 @@ def run_s2_toa_gp(
     input_variable: str = "toa_reflectance",
     task_names: Sequence[str] | None = None,
     task_band_config: str | None = None,
+    x_transform: str | None = None,
 ) -> dict:
     """Train independent exact GPR models on the S2 11-QoI dataset."""
     if save_path is None:
@@ -163,6 +176,13 @@ def run_s2_toa_gp(
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
     )
+    log_scale, log_scale_task_set, log_scale_source = resolve_log_scale(
+        log_scale, meta=data_meta
+    )
+    print(
+        f"Output log_scale={log_scale} (source={log_scale_source}); "
+        f"log tasks={sorted(log_scale_task_set) or '[]'}"
+    )
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
     y_train = y_train.to(dtype=dtype)
@@ -179,7 +199,10 @@ def run_s2_toa_gp(
     y_std_all: list[np.ndarray] = []
     lower_all: list[np.ndarray] = []
     upper_all: list[np.ndarray] = []
-    rel_metrics_by_task: dict[str, dict] = {}
+    y_pred_mean_all: list[np.ndarray] = []
+    y_pred_mode_all: list[np.ndarray] = []
+    log_mu_all: list[np.ndarray] = []
+    log_sigma_all: list[np.ndarray] = []
 
     for task_idx, task_name in enumerate(names):
         print(f"\n--- Task: {task_name} ---")
@@ -191,6 +214,12 @@ def run_s2_toa_gp(
             if x_val_full.numel() > 0
             else x_val_full.to(dtype=dtype)
         )
+        x_tr = apply_x_transform(x_tr, x_transform)
+        x_te = apply_x_transform(x_te, x_transform)
+        if x_va.numel() > 0:
+            x_va = apply_x_transform(x_va, x_transform)
+        if x_transform and x_transform != "none" and task_idx == 0:
+            print(f"X transform: {x_transform} (before PCA / scaling)")
 
         pca_meta = None
         input_dim_before_pca = int(x_tr.shape[-1])
@@ -239,7 +268,9 @@ def run_s2_toa_gp(
         y_tr = y_train[:, task_idx]
         y_te = y_test[:, task_idx]
         y_va = y_val[:, task_idx] if y_val.numel() > 0 else y_val
-        y_tr_model = forward_y_s2(y_tr, task_name, log_scale=log_scale)
+        y_tr_model = forward_y_s2(
+            y_tr, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+        )
         y_scaler = None
         if standardize_y:
             y_scaler = StandardScaler()
@@ -249,7 +280,9 @@ def run_s2_toa_gp(
             y_tr_fit = y_tr_model
         y_val_scaled = y_va
         if y_va.numel() > 0:
-            y_va_model = forward_y_s2(y_va, task_name, log_scale=log_scale)
+            y_va_model = forward_y_s2(
+                y_va, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
+            )
             y_val_scaled = (
                 y_scaler.transform(y_va_model.unsqueeze(-1)).squeeze(-1)
                 if standardize_y and y_scaler is not None
@@ -373,6 +406,7 @@ def run_s2_toa_gp(
             y_scaler=y_scaler,
             standardize_y=standardize_y,
             log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
             extended=True,
         )
         pred_mean, pred_std, lower, upper = inv.as_tuple()
@@ -386,12 +420,14 @@ def run_s2_toa_gp(
             training_time=train_time,
             prediction_time=prediction_time,
         )
-        if task_uses_log_scale(task_name, log_scale=log_scale):
-            tm_log = {"log_scale": True}
-            if inv.log_mu is not None and inv.log_sigma is not None:
-                tm_log["log_mu_mean"] = float(inv.log_mu.mean())
-                tm_log["log_sigma_mean"] = float(inv.log_sigma.mean())
-            computed.update(tm_log)
+        apply_log_scale_extra_metrics(
+            computed,
+            y_true=y_te,
+            inv=inv,
+            task_name=task_name,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
+        )
         tm = {"best_train_loss": best_loss, **learned_noise, **computed}
         if noise_prior_meta:
             tm.update(noise_prior_meta)
@@ -402,27 +438,50 @@ def run_s2_toa_gp(
         y_std_all.append(pred_std.numpy())
         lower_all.append(lower.numpy())
         upper_all.append(upper.numpy())
-        print(
-            f"{task_name} Test RMSE: {computed['RMSE']:.6f}  RRMSE: {computed['RRMSE']:.6f}"
+        collect_log_scale_prediction_arrays(
+            inv,
+            pred_mean,
+            y_pred_mean_all=y_pred_mean_all,
+            y_pred_mode_all=y_pred_mode_all,
+            log_mu_all=log_mu_all,
+            log_sigma_all=log_sigma_all,
+        )
+        print_task_test_metrics(
+            task_name,
+            computed,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
         )
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
     y_std_stacked = np.stack(y_std_all, axis=1)
     lower_stacked = np.stack(lower_all, axis=1)
     upper_stacked = np.stack(upper_all, axis=1)
+    y_pred_mean_stacked = stack_or_none(y_pred_mean_all)
+    y_pred_mode_stacked = stack_or_none(y_pred_mode_all)
+    log_mu_stacked = stack_or_none(log_mu_all)
+    log_sigma_stacked = stack_or_none(log_sigma_all)
     y_test_np = y_test.detach().cpu().numpy()
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked, names)
-    for t, name in enumerate(names):
-        rel_m = compute_relative_error_metrics(
-            y_test_np[:, t], y_pred_stacked[:, t], rel_tolerance=rel_tolerance
-        )
-        rel_metrics_by_task[name] = rel_m
-        per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
-        per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
-        per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
+    rel_metrics_by_task = attach_relative_error_fields(
+        per_task,
+        names=names,
+        y_true=y_test_np,
+        y_pred=y_pred_stacked,
+        rel_tolerance=rel_tolerance,
+        compute_relative_error_metrics=compute_relative_error_metrics,
+    )
+    aggregate_rmse = compute_aggregate_rmse(y_pred_stacked, y_test_np)
+    aggregate_rrmse = compute_aggregate_rrmse(per_task, names)
+    log_task_names, aggregate_rrmse_log, aggregate_rrmse_mean = attach_log_scale_aggregate_fields(
+        per_task,
+        task_metrics,
+        names=names,
+        log_scale=log_scale,
+        log_scale_tasks=log_scale_task_set,
+    )
+    aggregate_medae = macro_metric(per_task, names, "MedAE")
 
-    aggregate_rmse = float(np.sqrt(np.mean((y_pred_stacked - y_test_np) ** 2)))
-    aggregate_rrmse = macro_rrmse(per_task, names)
     metrics: dict = {
         "title": title,
         "dataset": "s2",
@@ -438,9 +497,15 @@ def run_s2_toa_gp(
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
         "standardize_x": standardize_x,
         "x_standardize_method": x_standardize_method,
+        "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
-        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, log_scale=log_scale)],
+        "log_scale_tasks": [
+            n
+            for n in names
+            if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
+        ],
+        "log_scale_source": log_scale_source,
         "response_noise_prior": bool(response_noise_prior),
         "rel_tolerance": rel_tolerance,
         "task_band_config": str(band_cfg_path),
@@ -452,6 +517,9 @@ def run_s2_toa_gp(
         "Total_Time": total_train_time + total_prediction_time,
         "aggregate_RRMSE": aggregate_rrmse,
         "aggregate_RRMSE_mean": aggregate_rrmse,
+        "aggregate_MedAE": aggregate_medae,
+        "aggregate_RRMSE_log_tasks": aggregate_rrmse_log,
+        "aggregate_RRMSE_lognormal_mean_tasks": aggregate_rrmse_mean,
         "RMSE": aggregate_rmse,
         **per_task,
     }
@@ -476,61 +544,54 @@ def run_s2_toa_gp(
             for key, value in val_summary.items():
                 metrics[f"{task_name}_{key}"] = value
 
-    print(f"\nTest macro RRMSE: {aggregate_rrmse:.6f}")
-    for name in names:
-        print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
+    print_end_of_run_summary(
+        names=names,
+        per_task=per_task,
+        rel_metrics_by_task=rel_metrics_by_task,
+        aggregate_rrmse=aggregate_rrmse,
+        aggregate_rmse=aggregate_rmse,
+        log_task_names=log_task_names,
+        aggregate_rrmse_log=aggregate_rrmse_log,
+        aggregate_rrmse_mean=aggregate_rrmse_mean,
+        rel_tolerance=rel_tolerance,
+        total_train_time=total_train_time,
+        format_relative_error_summary=format_relative_error_summary,
+        aggregate_medae=aggregate_medae,
+    )
 
     if save_path:
-        example_indices = select_posterior_example_indices(
-            y_test_np.shape[0],
-            posterior_n_examples,
-            seed=seed,
-            explicit_indices=posterior_example_indices,
-        )
-        out_npz = save_s2_predictions_npz(
-            save_path,
+        save_s2_summary_artifacts(
+            save_path=save_path,
             title=title,
-            task_names=names,
-            y_true=y_test_np,
-            y_pred=y_pred_stacked,
-            y_std=y_std_stacked,
-            lower=lower_stacked,
-            upper=upper_stacked,
-            x_test=x_test_orig.numpy(),
-            wavelengths_nm=wavelengths_np,
+            metrics=metrics,
+            names=names,
+            y_test_np=y_test_np,
+            y_pred_stacked=y_pred_stacked,
+            y_std_stacked=y_std_stacked,
+            lower_stacked=lower_stacked,
+            upper_stacked=upper_stacked,
+            x_test_orig=x_test_orig.numpy(),
+            wavelengths_np=wavelengths_np,
             train_idx=train_idx.cpu().numpy(),
             val_idx=val_idx.cpu().numpy(),
             test_idx=test_idx.cpu().numpy(),
             bands_by_task=bands_by_task,
+            rel_metrics_by_task=rel_metrics_by_task,
+            rel_tolerance=rel_tolerance,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_task_set,
+            data_meta=data_meta,
+            seed=seed,
+            posterior_n_examples=posterior_n_examples,
+            posterior_example_indices=posterior_example_indices,
+            plot_validation=plot_validation,
+            plot_posterior=plot_posterior,
+            monitor_validation=monitor_validation,
+            n_val=n_val,
+            save_metrics_json=save_metrics_json,
+            y_pred_mean_stacked=y_pred_mean_stacked,
+            y_pred_mode_stacked=y_pred_mode_stacked,
+            log_mu_stacked=log_mu_stacked,
+            log_sigma_stacked=log_sigma_stacked,
         )
-        metrics["predictions_npz"] = str(out_npz)
-        out_json = save_metrics_json(metrics, save_path, title)
-        print(f"Saved metrics to {out_json}")
-        if plot_posterior:
-            scatter_dir = Path(save_path) / "plots" / "scatter" / title
-            for t, name in enumerate(names):
-                plot_s2_task_scatter(
-                    y_true=y_test_np[:, t],
-                    y_pred=y_pred_stacked[:, t],
-                    lower=lower_stacked[:, t],
-                    upper=upper_stacked[:, t],
-                    task_name=name,
-                    out_path=scatter_dir / f"{name}_scatter.png",
-                )
-            plot_s2_posterior_examples(
-                x_test=x_test_orig.numpy(),
-                wavelengths_nm=wavelengths_np,
-                y_true=y_test_np,
-                y_pred=y_pred_stacked,
-                lower=lower_stacked,
-                upper=upper_stacked,
-                task_names=names,
-                example_indices=example_indices,
-                save_dir=Path(save_path) / "plots" / "posterior" / title,
-                title=title,
-                y_std=y_std_stacked,
-                rel_metrics_by_task=rel_metrics_by_task,
-                rel_tolerance=rel_tolerance,
-                log_scale_tasks=[n for n in names if task_uses_log_scale(n, log_scale=log_scale)],
-            )
     return metrics

@@ -17,20 +17,20 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["cos_i"]  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-HIDDEN_DIMS = [128, 256, 512, 1024, 512, 256]
+HIDDEN_DIMS = [128, 256, 512, 1024, 512, 256, 128]
 FEATURE_RANK = 128
 ACTIVATION = "tanh"  # "tanh" | "relu" | "gelu" | "identity"
 VARIANCE_CORRECTION = True
 NUM_INITS = 1
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 300
 LR = 1e-4
 WEIGHT_DECAY = 1e-4
 SEED = 42
 DEVICE = "cuda"
-DTYPE = "float32"  # "float32" | "float64"
+DTYPE = "float64"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 SAVE_PATH: str | None = None
@@ -49,8 +49,11 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262307.nc"
 INPUT_VARIABLE = "toa_radiance"
+X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
+# None = auto from NetCDF attrs (output_log_scale / log_uniform_qois)
+LOG_SCALE: bool | None = None
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -76,7 +79,7 @@ def run_s2_toa_lrnn_entry(**kwargs) -> dict:
 if __name__ == "__main__":
     hid_tag = "-".join(str(h) for h in HIDDEN_DIMS)
     save_path = SAVE_PATH or (
-        f"experiments_LRNN/results/s2_toa_lrnn_{NUM_INITS}inits_hiddims{hid_tag}_featr{FEATURE_RANK}"
+        f"experiments_LRNN/results/July27/s2_toa_lrnn_{NUM_INITS}inits_hiddims{hid_tag}_featr{FEATURE_RANK}"
     )
     log_file = LOG_FILE
     if log_file is None and DEVICE.startswith("cuda"):
@@ -91,7 +94,15 @@ if __name__ == "__main__":
             "weight_decay": WEIGHT_DECAY,
         }
 
-    print(f"LRNN IDE config  prior={RESPONSE_NOISE_PRIOR}  qoi={QOI}")
+    x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
+    if SAVE_PATH is None and x_tf_str:
+        save_path = f"{save_path}{x_tf_str}"
+
+    print(
+        f"LRNN IDE config  prior={RESPONSE_NOISE_PRIOR}  "
+        f"frac={NOISE_VAR_FRACTION}  log_scale={NOISE_PRIOR_LOG_SCALE}  "
+        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+    )
 
     run_s2_toa_lrnn(
         n_train=N_TRAIN,
@@ -126,4 +137,6 @@ if __name__ == "__main__":
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
+        x_transform=X_TRANSFORM,
+        log_scale=LOG_SCALE,
     )

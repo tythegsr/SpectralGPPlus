@@ -45,6 +45,8 @@ LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
+X_TRANSFORM = "none"  # "none" | "log1p"
+LOG_SCALE: bool | None = None
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -78,7 +80,10 @@ if __name__ == "__main__":
     if NUM_EPOCHS > 1 and LR is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": LR}
 
-    print(f"GP IDE config  prior={RESPONSE_NOISE_PRIOR}  qoi={QOI}")
+    print(
+        f"GP IDE config  prior={RESPONSE_NOISE_PRIOR}  "
+        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+    )
 
     run_s2_toa_gp(
         n_train=N_TRAIN,
@@ -109,4 +114,6 @@ if __name__ == "__main__":
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
+        x_transform=X_TRANSFORM,
+        log_scale=LOG_SCALE,
     )

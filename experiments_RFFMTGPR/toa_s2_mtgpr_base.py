@@ -496,6 +496,7 @@ def run_s2_toa_mtgpr(
         rel_metrics_by_task[name] = rel_m
         per_task[f"{name}_max_rel_error"] = float(rel_m["max_rel_error"])
         per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
+        per_task[f"{name}_median_rel_error"] = float(rel_m["median_rel_error"])
         per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
         if (
             task_uses_log_scale(name, log_scale=log_scale)
@@ -513,6 +514,7 @@ def run_s2_toa_mtgpr(
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
     aggregate_rrmse = float(macro_rrmse(per_task, names))
+    aggregate_medae = float(macro_metric(per_task, names, "MedAE"))
     log_task_names = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
     aggregate_rrmse_log = macro_metric(per_task, log_task_names, "RRMSE_log")
     aggregate_rrmse_lnorm_mean = macro_metric(per_task, log_task_names, "RRMSE_mean")
@@ -541,7 +543,10 @@ def run_s2_toa_mtgpr(
         for key, value in computed.items():
             prob_metrics[f"{name}_{key}"] = value
 
-    print(f"\nTest macro RRMSE (physical median): {aggregate_rrmse:.6f}  RMSE: {aggregate_rmse:.6f}")
+    print(
+        f"\nTest macro RRMSE (physical median): {aggregate_rrmse:.6f}  "
+        f"RMSE: {aggregate_rmse:.6f}  MedAE: {aggregate_medae:.6f}"
+    )
     if log_task_names:
         print(
             f"Test macro RRMSE_log (ln-space, log QoIs): {aggregate_rrmse_log:.6f}  "
@@ -550,12 +555,15 @@ def run_s2_toa_mtgpr(
     for name in names:
         print(
             f"{name} RRMSE: {per_task[f'{name}_RRMSE']:.6f}  "
-            f"RMSE: {per_task[f'{name}_RMSE']:.6f}"
+            f"RMSE: {per_task[f'{name}_RMSE']:.6f}  "
+            f"MAE: {per_task[f'{name}_MAE']:.6f}  "
+            f"MedAE: {per_task[f'{name}_MedAE']:.6f}"
         )
         if name in log_task_names:
             print(
                 f"  ln-space RRMSE_log: {per_task[f'{name}_RRMSE_log']:.6f}  "
-                f"RMSE_log: {per_task[f'{name}_RMSE_log']:.6f}  |  "
+                f"RMSE_log: {per_task[f'{name}_RMSE_log']:.6f}  "
+                f"MedAE_log: {per_task.get(f'{name}_MedAE_log', float('nan')):.6f}  |  "
                 f"physical-mean RRMSE_mean: {per_task[f'{name}_RRMSE_mean']:.6f}"
             )
         print(format_relative_error_summary(name, rel_metrics_by_task[name], rel_tolerance=rel_tolerance))
@@ -604,6 +612,7 @@ def run_s2_toa_mtgpr(
         "Total_Time": train_time + prediction_time,
         "RMSE": aggregate_rmse,
         "aggregate_RRMSE": aggregate_rrmse,
+        "aggregate_MedAE": aggregate_medae,
         "aggregate_RRMSE_log_tasks": aggregate_rrmse_log,
         "aggregate_RRMSE_lognormal_mean_tasks": aggregate_rrmse_lnorm_mean,
         **per_task,
