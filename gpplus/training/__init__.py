@@ -12,6 +12,11 @@ from .parameter_initializer import (
     RFFParameterInitializer,
 )
 from .lrnn_mll import LRNNWoodburyMarginalLogLikelihood
+from .bound_penalty import BoundConfig, soft_probabilistic_bound_penalty
+from .bound_penalized_rff_mll import (
+    BoundPenalizedRFFWoodburyMarginalLogLikelihood,
+    bound_penalized_rff_mll_class,
+)
 from .rff_mll import RFFWoodburyMarginalLogLikelihood, WoodburyMarginalLogLikelihood
 from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
 from .stop_conditions import (

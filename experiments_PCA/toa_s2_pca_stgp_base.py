@@ -23,12 +23,13 @@ from experiments_toa.paths import pin_toa_import_paths
 
 pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _PCA_DIR)
 
+from experiments_toa.s2_bands import NComponentsSpec
 from toa_s2_stgp_base import RFF_SAMPLING_CHOICES, run_s2_toa_stgp
 
 
 def run_s2_toa_pca_stgp(
     *,
-    n_components: int = 100,
+    n_components: NComponentsSpec = 100,
     rff_sampling: Literal["rff", "orf", "sorf"] = "sorf",
     pca_svd_solver: str = "randomized",
     save_path: str | None = None,

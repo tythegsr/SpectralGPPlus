@@ -17,13 +17,13 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-NUM_RFF = 400
+NUM_RFF = 1600
 NUM_INITS = 1  # total random starts
 INIT_BATCH_SIZE = 1  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 2000
 LR = 0.01
 SEED = 42
 DEVICE = "cuda" # "cpu" | "cuda"
@@ -50,13 +50,24 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262307.nc"  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
-# None = auto from NetCDF attrs (output_log_scale / log_uniform_qois)
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size"]
+LOGIT_SCALE_QOI: list[str] | None = None
+# Soft probabilistic bounds: same length/order as QOI. None = no bound on that side.
+# Do not set bounds on log/logit-warped QoIs.
+BOUND_MIN: list[float | None] | None = None
+BOUND_MAX: list[float | None] | None = None
+BOUND_PENALTY_K = 2.0
+BOUND_PENALTY_LAMBDA = 0.0
+BOUND_PENALTY_LAMBDA_LEARNABLE = False
+BOUND_PENALTY_LAM_MIN = 1.0
+BOUND_PENALTY_ALPHA = 10.0
+BOUND_PENALTY_MAX_POINTS: int | None = 4096
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr.json"
+    "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -101,7 +112,7 @@ if __name__ == "__main__":
 
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July23/s2_toa_sorf_{NUM_INITS}inits"
+        f"experiments_SORF/results/July28/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"
@@ -122,7 +133,9 @@ if __name__ == "__main__":
     print(
         f"SORF IDE config  prior={RESPONSE_NOISE_PRIOR}  "
         f"frac={NOISE_VAR_FRACTION}  log_scale={NOISE_PRIOR_LOG_SCALE}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  "
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  "
+        f"bound_min={BOUND_MIN} bound_max={BOUND_MAX}  "
+        f"bound_lambda_learnable={BOUND_PENALTY_LAMBDA_LEARNABLE}  x_transform={X_TRANSFORM}  "
         f"init_overrides={init_pcs or {}}  qoi={QOI}"
     )
 
@@ -161,6 +174,15 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
+        bound_min=BOUND_MIN,
+        bound_max=BOUND_MAX,
+        bound_penalty_k=BOUND_PENALTY_K,
+        bound_penalty_lambda=BOUND_PENALTY_LAMBDA,
+        bound_penalty_lambda_learnable=BOUND_PENALTY_LAMBDA_LEARNABLE,
+        bound_penalty_lam_min=BOUND_PENALTY_LAM_MIN,
+        bound_penalty_alpha=BOUND_PENALTY_ALPHA,
+        bound_penalty_max_points=BOUND_PENALTY_MAX_POINTS,
         train_mode=TRAIN_MODE,
     )

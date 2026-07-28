@@ -36,7 +36,12 @@ from experiments_toa.data import (
     TOA_TRAIN_POOL_SIZE,
     TOA_VAL_POOL_SIZE,
 )
-from experiments_toa.s2_bands import band_config_metadata, load_task_band_config
+from experiments_toa.s2_bands import (
+    NComponentsSpec,
+    band_config_metadata,
+    load_task_band_config,
+    resolve_task_pca_components,
+)
 from experiments_toa.s2_constants import S2_DEFAULT_BAND_CONFIG_PATH, S2_INPUT_DIM, S2_TASK_NAMES
 from experiments_toa.s2_data import load_s2_toa_data
 from experiments_toa.s2_plotting import (
@@ -60,11 +65,17 @@ from experiments_toa.s2_utils import (
     map_ard_to_bands,
     select_bands,
 )
+from experiments_toa.s2_bound_penalty import (
+    bound_penalty_metrics,
+    learned_bound_penalty_lambda,
+    resolve_bound_penalty_for_tasks,
+)
 from experiments_toa.s2_y_transform import (
     forward_y_s2,
     inverse_y_s2,
-    resolve_log_scale,
+    resolve_y_warps,
     task_uses_log_scale,
+    task_uses_logit_scale,
 )
 from gpplus.models import RFFGPR
 from gpplus.training import (
@@ -84,6 +95,7 @@ from experiments_RFF.rff_gp_defaults import (
     rff_mll_class,
     woodbury_jitter_for_dtype,
 )
+from gpplus.training import bound_penalized_rff_mll_class
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
@@ -118,6 +130,9 @@ def run_s2_toa_stgp(
     x_standardize_method: int = 2,
     standardize_y: bool = True,
     log_scale: bool | None = None,
+    log_scale_qoi: Sequence[str] | None = None,
+    logit_scale_qoi: Sequence[str] | None = None,
+    logit_bounds: dict[str, tuple[float, float]] | None = None,
     ard: bool = True,
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
@@ -138,7 +153,7 @@ def run_s2_toa_stgp(
     noise_var_fraction: float = 0.001,
     noise_prior_log_scale: float = 0.5,
     initializer_parameter_configs: dict | None = None,
-    n_pca_components: int | None = None,
+    n_pca_components: NComponentsSpec | None = None,
     pca_svd_solver: str = "randomized",
     correct_sorf: bool = False,
     param_groups_fn=None,
@@ -148,6 +163,14 @@ def run_s2_toa_stgp(
     x_transform: str | None = None,
     train_mode: str = "independent",
     init_batch_size: int | None = None,
+    bound_min: Sequence[float | None] | None = None,
+    bound_max: Sequence[float | None] | None = None,
+    bound_penalty_k: float = 2.0,
+    bound_penalty_lambda: float = 1.0,
+    bound_penalty_alpha: float = 10.0,
+    bound_penalty_max_points: int | None = 4096,
+    bound_penalty_lambda_learnable: bool = False,
+    bound_penalty_lam_min: float = 1.0,
 ) -> dict:
     """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
     if init_batch_size is None:
@@ -161,11 +184,25 @@ def run_s2_toa_stgp(
         )
     if rff_sampling not in RFF_SAMPLING_CHOICES:
         raise ValueError(f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}")
+    if bound_penalty_lambda_learnable and float(bound_penalty_lambda) < float(bound_penalty_lam_min):
+        raise ValueError(
+            f"bound_penalty_lambda ({bound_penalty_lambda}) must be >= "
+            f"bound_penalty_lam_min ({bound_penalty_lam_min}) when learnable."
+        )
     correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
 
     names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
     band_cfg_path = task_band_config or str(S2_DEFAULT_BAND_CONFIG_PATH)
     bands_by_task = load_task_band_config(band_cfg_path, task_names=names, input_dim=S2_INPUT_DIM)
+    n_components_by_task: dict[str, int] | None = None
+    pca_components_meta: dict = {}
+    pca_title_token: str | None = None
+    if n_pca_components is not None:
+        n_components_by_task, pca_components_meta = resolve_task_pca_components(
+            n_pca_components, task_names=names
+        )
+        unique_ps = sorted(set(n_components_by_task.values()))
+        pca_title_token = str(unique_ps[0]) if len(unique_ps) == 1 else "perQoI"
 
     if save_path is None:
         save_path = _DEFAULT_SAVE_DIRS[rff_sampling]
@@ -191,9 +228,9 @@ def run_s2_toa_stgp(
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
     title = f"S2_TOA_nTrain{n_train}_nTest{n_test}_{rff_sampling}D{num_rff}"
-    if n_pca_components is not None:
+    if pca_title_token is not None:
         title = (
-            f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{n_pca_components}_"
+            f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{pca_title_token}_"
             f"{rff_sampling}D{num_rff}"
         )
     feature_dim = 2 * num_rff
@@ -205,13 +242,15 @@ def run_s2_toa_stgp(
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, init_batch_size={init_batch_size}, "
         f"epochs={num_epochs}, tasks={names}, input={input_variable}"
         + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
-        + (f", pca={n_pca_components}" if n_pca_components is not None else "")
+        + (f", pca={n_components_by_task}" if n_components_by_task is not None else "")
         + (f", train_mode={train_mode}" if train_mode != "independent" else "")
     )
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
     print(f"Device: {device}")
     print(f"Band config: {band_cfg_path}")
+    if pca_components_meta.get("config_path"):
+        print(f"PCA components config: {pca_components_meta['config_path']}")
     print("=" * 60)
 
     n_val = TOA_VAL_POOL_SIZE if monitor_validation else 0
@@ -236,13 +275,52 @@ def run_s2_toa_stgp(
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
     )
-    log_scale, log_scale_task_set, log_scale_source = resolve_log_scale(
-        log_scale, meta=data_meta
+    warps = resolve_y_warps(
+        log_scale_qoi,
+        logit_scale_qoi,
+        log_scale=log_scale,
+        meta=data_meta,
+        logit_bounds=logit_bounds,
     )
+    log_scale = warps.log_scale
+    log_scale_task_set = warps.log_tasks
+    log_scale_source = warps.log_source
+    logit_scale_task_set = warps.logit_tasks
     print(
-        f"Output log_scale={log_scale} (source={log_scale_source}); "
-        f"log tasks={sorted(log_scale_task_set) or '[]'}"
+        f"Output warps: log={sorted(log_scale_task_set) or '[]'} "
+        f"(source={log_scale_source}); "
+        f"logit={sorted(logit_scale_task_set) or '[]'} "
+        f"(source={warps.logit_source})"
     )
+    bound_by_task = resolve_bound_penalty_for_tasks(
+        names,
+        bound_min,
+        bound_max,
+        warps=warps,
+        k=bound_penalty_k,
+        lam=bound_penalty_lambda,
+        alpha=bound_penalty_alpha,
+        max_points=bound_penalty_max_points,
+    )
+    bound_active = [n for n, cfg in bound_by_task.items() if cfg is not None]
+    if bound_active:
+        lam_note = (
+            f"lambda=learnable(init={bound_penalty_lambda}, min={bound_penalty_lam_min})"
+            if bound_penalty_lambda_learnable
+            else f"lambda={bound_penalty_lambda}"
+        )
+        print(
+            "Soft probabilistic bounds: "
+            + ", ".join(
+                f"{n}[{bound_by_task[n].a}, {bound_by_task[n].b}]"
+                for n in bound_active
+            )
+            + f" (k={bound_penalty_k}, {lam_note}, "
+            f"alpha={bound_penalty_alpha}, max_points={bound_penalty_max_points})"
+        )
+    else:
+        print("Soft probabilistic bounds: off")
+    learned_lambda_by_task: dict[str, float | None] = {}
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
     y_train = y_train.to(dtype=dtype)
@@ -263,6 +341,8 @@ def run_s2_toa_stgp(
     y_pred_mode_all: list[np.ndarray] = []
     log_mu_all: list[np.ndarray] = []
     log_sigma_all: list[np.ndarray] = []
+    logit_mu_all: list[np.ndarray] = []
+    logit_sigma_all: list[np.ndarray] = []
     rel_metrics_by_task: dict[str, dict[str, float | int]] = {}
 
     for task_idx, task_name in enumerate(names):
@@ -286,15 +366,16 @@ def run_s2_toa_stgp(
 
         pca_meta = None
         input_dim_before_pca = int(x_tr.shape[-1])
-        if n_pca_components is not None:
+        if n_components_by_task is not None:
             _pca_dir = _ROOT / "experiments_PCA"
             if str(_pca_dir) not in sys.path:
                 sys.path.insert(0, str(_pca_dir))
             from toa_pca_utils import fit_pca_on_train, transform_pca
 
+            task_n_components = int(n_components_by_task[task_name])
             pca_fit = fit_pca_on_train(
                 x_tr,
-                n_components=n_pca_components,
+                n_components=task_n_components,
                 svd_solver=pca_svd_solver,
                 random_state=seed,
             )
@@ -334,9 +415,7 @@ def run_s2_toa_stgp(
         y_tr = y_train[:, task_idx]
         y_te = y_test[:, task_idx]
         y_va = y_val[:, task_idx] if y_val.numel() > 0 else y_val
-        y_tr_model = forward_y_s2(
-            y_tr, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        )
+        y_tr_model = forward_y_s2(y_tr, task_name, warps=warps)
 
         y_scaler = None
         if standardize_y:
@@ -348,9 +427,7 @@ def run_s2_toa_stgp(
 
         y_val_scaled = y_va
         if y_va.numel() > 0:
-            y_va_model = forward_y_s2(
-                y_va, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-            )
+            y_va_model = forward_y_s2(y_va, task_name, warps=warps)
             if standardize_y and y_scaler is not None:
                 y_val_scaled = y_scaler.transform(y_va_model.unsqueeze(-1)).squeeze(-1)
             else:
@@ -438,9 +515,26 @@ def run_s2_toa_stgp(
             batch_shape=lik_batch_shape if len(lik_batch_shape) > 0 else None,
             init_batch_size=concurrent if train_mode == "batched" else None,
         )
+        bound_cfg = bound_by_task.get(task_name)
+        if bound_cfg is not None and bound_penalty_lambda_learnable:
+            model.register_learnable_bound_penalty_lambda(
+                lam_init=bound_penalty_lambda,
+                lam_min=bound_penalty_lam_min,
+            )
+        if bound_cfg is not None:
+            y_mean_b = float(y_scaler.mean.squeeze()) if y_scaler is not None else 0.0
+            y_std_b = float(y_scaler.std.squeeze()) if y_scaler is not None else 1.0
+            task_mll_class = bound_penalized_rff_mll_class(
+                bound_cfg,
+                y_mean=y_mean_b,
+                y_std=y_std_b,
+                woodbury_form=DEFAULT_WOODBURY_FORM,
+            )
+        else:
+            task_mll_class = rff_mll_class()
         trainer = GPTrainer(
             model,
-            mll_class=rff_mll_class(),
+            mll_class=task_mll_class,
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -477,6 +571,10 @@ def run_s2_toa_stgp(
         best_run = min(successful, key=lambda r: r["loss"])
         model.load_state_dict(best_run["state_dict"])
         best_loss = float(best_run["loss"])
+        final_bound_lam = learned_bound_penalty_lambda(model)
+        if final_bound_lam is not None:
+            learned_lambda_by_task[task_name] = final_bound_lam
+            print(f"{task_name} learned bound penalty lambda: {final_bound_lam:.6f}")
         y_std_for_noise = y_scaler.std.squeeze() if y_scaler is not None else None
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
         ard_info = extract_ard_lengthscales(model)
@@ -484,7 +582,7 @@ def run_s2_toa_stgp(
             ard_info["lengthscale"],
             band_indices,
             wavelengths_nm=wavelengths_np,
-            ard_space="pca_components" if n_pca_components is not None else "bands",
+            ard_space="pca_components" if n_components_by_task is not None else "bands",
         )
         if ard_info["outputscale"] is not None:
             ard_mapped["outputscale"] = ard_info["outputscale"]
@@ -524,28 +622,35 @@ def run_s2_toa_stgp(
                 data_path=data_path,
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
-                log_grain=task_uses_log_scale(
-                    task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-                ),
-                logit_cos=False,
+                log_grain=task_uses_log_scale(task_name, warps=warps),
+                logit_cos=task_uses_logit_scale(task_name, warps=warps),
                 input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
                 model_config={
                     "num_rff": num_rff,
                     "ard": ard,
                     "rff_sampling": rff_sampling,
                     "correct_sorf": correct_sorf,
-                    "n_pca_components": n_pca_components,
+                    "n_pca_components": (
+                        int(n_components_by_task[task_name])
+                        if n_components_by_task is not None
+                        else None
+                    ),
                     "input_variable": input_variable,
                     "x_transform": x_transform or "none",
                     "dataset": "s2",
                     "band_indices": list(band_indices),
                     "ard_mapping": ard_mapped,
                     "data_meta": data_meta,
-                    "log_scale": task_uses_log_scale(
-                        task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-                    ),
+                    "log_scale": task_uses_log_scale(task_name, warps=warps),
+                    "logit_scale": task_uses_logit_scale(task_name, warps=warps),
                     "log_scale_source": log_scale_source,
                     "log_scale_tasks": sorted(log_scale_task_set),
+                    "logit_scale_tasks": sorted(logit_scale_task_set),
+                    "logit_bounds": {
+                        k: list(v)
+                        for k, v in warps.logit_bounds.items()
+                        if k in logit_scale_task_set
+                    },
                 },
             )
             learned_noise["checkpoint_path"] = str(ckpt_path)
@@ -560,7 +665,7 @@ def run_s2_toa_stgp(
         prediction_time = time.time() - t_pred
         total_prediction_time += prediction_time
 
-        # Inverse Y standardization (+ log-normal for log-scaled QoIs).
+        # Inverse Y standardization (+ log-/logit-normal for warped QoIs).
         inv = inverse_y_s2(
             pred_mean.detach().cpu(),
             pred_std.detach().cpu(),
@@ -569,8 +674,7 @@ def run_s2_toa_stgp(
             task_name=task_name,
             y_scaler=y_scaler,
             standardize_y=standardize_y,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
             extended=True,
         )
         pred_mean, pred_std, lower, upper = inv.as_tuple()
@@ -584,9 +688,7 @@ def run_s2_toa_stgp(
             training_time=train_time,
             prediction_time=prediction_time,
         )
-        if task_uses_log_scale(
-            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        ):
+        if task_uses_log_scale(task_name, warps=warps):
             computed["log_scale"] = True
             if inv.log_mu is None:
                 raise RuntimeError(f"log_mu missing after inverse for log-scale task {task_name}")
@@ -596,6 +698,8 @@ def run_s2_toa_stgp(
                 point_mean_physical=inv.point_mean,
             )
             computed.update(extra)
+        elif task_uses_logit_scale(task_name, warps=warps):
+            computed["logit_scale"] = True
         tm: dict = {
             "best_train_loss": best_loss,
             **learned_noise,
@@ -607,6 +711,10 @@ def run_s2_toa_stgp(
             tm["final_lr"] = float(best_run["final_lr"])
         if noise_prior_meta is not None:
             tm.update(noise_prior_meta)
+        if final_bound_lam is not None:
+            tm["bound_penalty_lambda_final"] = final_bound_lam
+            tm["bound_penalty_lambda_init"] = float(bound_penalty_lambda)
+            tm["bound_penalty_lam_min"] = float(bound_penalty_lam_min)
         task_metrics[task_name] = tm
         task_runs[task_name] = runs
         task_best_runs[task_name] = best_run
@@ -630,11 +738,18 @@ def run_s2_toa_stgp(
             log_sigma_all.append(inv.log_sigma.numpy())
         else:
             log_sigma_all.append(np.full_like(pred_mean.numpy(), np.nan))
+        if inv.logit_mu is not None:
+            logit_mu_all.append(inv.logit_mu.numpy())
+        else:
+            logit_mu_all.append(np.full_like(pred_mean.numpy(), np.nan))
+        if inv.logit_sigma is not None:
+            logit_sigma_all.append(inv.logit_sigma.numpy())
+        else:
+            logit_sigma_all.append(np.full_like(pred_mean.numpy(), np.nan))
         print_task_test_metrics(
             task_name,
             computed,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
         )
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
@@ -645,6 +760,8 @@ def run_s2_toa_stgp(
     y_pred_mode_stacked = np.stack(y_pred_mode_all, axis=1)
     log_mu_stacked = np.stack(log_mu_all, axis=1)
     log_sigma_stacked = np.stack(log_sigma_all, axis=1)
+    logit_mu_stacked = np.stack(logit_mu_all, axis=1)
+    logit_sigma_stacked = np.stack(logit_sigma_all, axis=1)
     y_test_np = y_test.detach().cpu().numpy()
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked, names)
 
@@ -667,11 +784,8 @@ def run_s2_toa_stgp(
     aggregate_medae = macro_metric(per_task, names, "MedAE")
 
     # Flatten per-task log extras into per_task for aggregates / JSON.
-    log_task_names = [
-        n
-        for n in names
-        if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
-    ]
+    log_task_names = [n for n in names if task_uses_log_scale(n, warps=warps)]
+    logit_task_names = [n for n in names if task_uses_logit_scale(n, warps=warps)]
     for name in log_task_names:
         tm = task_metrics[name]
         for key in (
@@ -720,8 +834,27 @@ def run_s2_toa_stgp(
         "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
-        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)],
+        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, warps=warps)],
         "log_scale_source": log_scale_source,
+        "logit_scale_tasks": list(logit_task_names),
+        "logit_scale_source": warps.logit_source,
+        "logit_bounds": {
+            k: list(v) for k, v in warps.logit_bounds.items() if k in logit_scale_task_set
+        },
+        "bound_penalty_k": float(bound_penalty_k),
+        "bound_penalty_lambda": float(bound_penalty_lambda),
+        "bound_penalty_alpha": float(bound_penalty_alpha),
+        "bound_penalty_max_points": (
+            None if bound_penalty_max_points is None else int(bound_penalty_max_points)
+        ),
+        "bound_penalty_lambda_learnable": bool(bound_penalty_lambda_learnable),
+        "bound_penalty_lam_min": float(bound_penalty_lam_min),
+        **bound_penalty_metrics(
+            bound_by_task,
+            bound_penalty_lambda_learnable=bound_penalty_lambda_learnable,
+            bound_penalty_lam_min=bound_penalty_lam_min,
+            learned_lambda_by_task=learned_lambda_by_task,
+        ),
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),
@@ -742,8 +875,13 @@ def run_s2_toa_stgp(
         "RMSE": aggregate_rmse,
         **per_task,
     }
-    if n_pca_components is not None:
-        metrics["n_pca_components"] = n_pca_components
+    if n_components_by_task is not None:
+        unique_ps = sorted(set(n_components_by_task.values()))
+        metrics["n_pca_components"] = (
+            n_components_by_task if len(unique_ps) > 1 else unique_ps[0]
+        )
+        metrics["n_components_by_task"] = dict(n_components_by_task)
+        metrics["pca_components_meta"] = pca_components_meta
         metrics["pca_svd_solver"] = pca_svd_solver
 
     for task_name in names:
@@ -794,11 +932,11 @@ def run_s2_toa_stgp(
             seed=seed,
             explicit_indices=posterior_example_indices,
         )
-        log_task_names_plot = [
-            n
-            for n in names
-            if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
+        log_task_names_plot = [n for n in names if task_uses_log_scale(n, warps=warps)]
+        logit_task_names_plot = [
+            n for n in names if task_uses_logit_scale(n, warps=warps)
         ]
+        warped_plot = bool(log_task_names_plot or logit_task_names_plot)
         out_npz = save_s2_predictions_npz(
             save_path,
             title=title,
@@ -814,11 +952,14 @@ def run_s2_toa_stgp(
             val_idx=val_idx.cpu().numpy(),
             test_idx=test_idx.cpu().numpy(),
             bands_by_task=bands_by_task,
-            y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+            y_pred_mean=y_pred_mean_stacked if warped_plot else None,
             y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
             log_mu=log_mu_stacked if log_task_names_plot else None,
             log_sigma=log_sigma_stacked if log_task_names_plot else None,
             log_scale_tasks=log_task_names_plot,
+            logit_mu=logit_mu_stacked if logit_task_names_plot else None,
+            logit_sigma=logit_sigma_stacked if logit_task_names_plot else None,
+            logit_scale_tasks=logit_task_names_plot,
         )
         print(f"Saved predictions to {out_npz}")
         metrics["predictions_npz"] = str(out_npz)
@@ -866,7 +1007,7 @@ def run_s2_toa_stgp(
                 rel_metrics_by_task=rel_metrics_by_task,
                 rel_tolerance=rel_tolerance,
                 log_scale_tasks=log_task_names_plot,
-                y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+                y_pred_mean=y_pred_mean_stacked if warped_plot else None,
                 y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
                 log_mu=log_mu_stacked if log_task_names_plot else None,
                 log_sigma=log_sigma_stacked if log_task_names_plot else None,

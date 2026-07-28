@@ -20,7 +20,10 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-N_COMPONENTS = 20
+# int (shared p) or path to per-QoI JSON from s2_pca_svd_analysis.py
+N_COMPONENTS: int | str = (
+    "experiments_toa/configs/s2_task_pca_components_var99_subset.json"
+)
 PARTITION_SIZE = 2000
 NUM_INITS = 4
 NUM_EPOCHS = 1
@@ -50,7 +53,10 @@ LOG_FILE: str | None = None
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p"
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
+# Pair full-band PCA configs with s2_task_bands_all.json
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -83,7 +89,7 @@ if __name__ == "__main__":
 
     print(
         f"PCA-GPR IDE config  prior={RESPONSE_NOISE_PRIOR}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
     )
 
     run_s2_toa_pca_gpr(
@@ -119,5 +125,6 @@ if __name__ == "__main__":
         top_m_partitions=TOP_M_PARTITIONS,
         single_partition_index=SINGLE_PARTITION_INDEX,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
     )

@@ -22,6 +22,28 @@ from experiments_toa.s2_constants import S2_TASK_NAMES
 QOI_NAMES = list(S2_TASK_NAMES)
 
 
+def _safe_max_abs_corr(
+    corr_col: np.ndarray,
+    wl: np.ndarray,
+) -> dict[str, float | int | None]:
+    """Summarize max |r| for one QoI; handles constant (all-NaN) columns."""
+    abs_r = np.abs(np.asarray(corr_col, dtype=np.float64))
+    if not np.any(np.isfinite(abs_r)):
+        return {
+            "max_abs_r": float("nan"),
+            "band_index": None,
+            "wavelength_nm": None,
+            "constant_qoi": True,
+        }
+    idx = int(np.nanargmax(abs_r))
+    return {
+        "max_abs_r": float(abs_r[idx]),
+        "band_index": idx,
+        "wavelength_nm": float(wl[idx]),
+        "constant_qoi": False,
+    }
+
+
 def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with h5py.File(path, "r") as f:
         wl = np.asarray(f["wl"][:], dtype=np.float64)
@@ -223,8 +245,8 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
     print("QoI–QoI correlation...")
     qoi_corr = _plot_qoi_corr(Y, out_dir / "qoi_correlation_matrix.png")
     off = qoi_corr[np.triu_indices(len(QOI_NAMES), 1)]
-    meta["qoi_offdiag_abs_pearson_mean"] = float(np.mean(np.abs(off)))
-    meta["qoi_offdiag_abs_pearson_max"] = float(np.max(np.abs(off)))
+    meta["qoi_offdiag_abs_pearson_mean"] = float(np.nanmean(np.abs(off)))
+    meta["qoi_offdiag_abs_pearson_max"] = float(np.nanmax(np.abs(off)))
 
     print("Band–band correlations...")
     corr_refl = np.corrcoef(refl, rowvar=False)
@@ -304,21 +326,13 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
         title="Joint radiance + QoI Pearson correlation",
     )
 
-    # Per-QoI max |r| (reflectance and radiance)
+    # Per-QoI max |r| (reflectance and radiance); NaN if QoI is constant.
     meta["band_qoi_max_abs_pearson"] = {
-        name: {
-            "max_abs_r": float(np.nanmax(np.abs(band_qoi_refl[:, t]))),
-            "band_index": int(np.nanargmax(np.abs(band_qoi_refl[:, t]))),
-            "wavelength_nm": float(wl[int(np.nanargmax(np.abs(band_qoi_refl[:, t])))]),
-        }
+        name: _safe_max_abs_corr(band_qoi_refl[:, t], wl)
         for t, name in enumerate(QOI_NAMES)
     }
     meta["radiance_band_qoi_max_abs_pearson"] = {
-        name: {
-            "max_abs_r": float(np.nanmax(np.abs(band_qoi_rad[:, t]))),
-            "band_index": int(np.nanargmax(np.abs(band_qoi_rad[:, t]))),
-            "wavelength_nm": float(wl[int(np.nanargmax(np.abs(band_qoi_rad[:, t])))]),
-        }
+        name: _safe_max_abs_corr(band_qoi_rad[:, t], wl)
         for t, name in enumerate(QOI_NAMES)
     }
 
@@ -337,9 +351,13 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
     print(f"  drop bands: {len(drop)}")
     print(f"  QoI off-diag |r| mean={meta['qoi_offdiag_abs_pearson_mean']:.2e}")
     for name, info in meta["band_qoi_max_abs_pearson"].items():
-        print(f"  refl {name:14s} max|r|={info['max_abs_r']:.3f} @ band {info['band_index']}")
+        r = info["max_abs_r"]
+        r_s = f"{r:.3f}" if r == r else "nan"
+        print(f"  refl {name:14s} max|r|={r_s} @ band {info['band_index']}")
     for name, info in meta["radiance_band_qoi_max_abs_pearson"].items():
-        print(f"  rad  {name:14s} max|r|={info['max_abs_r']:.3f} @ band {info['band_index']}")
+        r = info["max_abs_r"]
+        r_s = f"{r:.3f}" if r == r else "nan"
+        print(f"  rad  {name:14s} max|r|={r_s} @ band {info['band_index']}")
     return meta
 
 

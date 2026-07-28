@@ -43,8 +43,9 @@ from experiments_toa.s2_utils import apply_x_transform, compute_per_task_metrics
 from experiments_toa.s2_y_transform import (
     forward_y_s2,
     inverse_y_s2,
-    resolve_log_scale,
+    resolve_y_warps,
     task_uses_log_scale,
+    task_uses_logit_scale,
 )
 from gpplus.models import LRNNGPR
 from gpplus.training import (
@@ -90,6 +91,9 @@ def run_s2_toa_lrnn(
     x_standardize_method: int = 2,
     standardize_y: bool = True,
     log_scale: bool | None = None,
+    log_scale_qoi: Sequence[str] | None = None,
+    logit_scale_qoi: Sequence[str] | None = None,
+    logit_bounds: dict[str, tuple[float, float]] | None = None,
     predict_chunk_size: int = 512,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
@@ -175,12 +179,22 @@ def run_s2_toa_lrnn(
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
     )
-    log_scale, log_scale_task_set, log_scale_source = resolve_log_scale(
-        log_scale, meta=data_meta
+    warps = resolve_y_warps(
+        log_scale_qoi,
+        logit_scale_qoi,
+        log_scale=log_scale,
+        meta=data_meta,
+        logit_bounds=logit_bounds,
     )
+    log_scale = warps.log_scale
+    log_scale_task_set = warps.log_tasks
+    log_scale_source = warps.log_source
+    logit_scale_task_set = warps.logit_tasks
     print(
-        f"Output log_scale={log_scale} (source={log_scale_source}); "
-        f"log tasks={sorted(log_scale_task_set) or '[]'}"
+        f"Output warps: log={sorted(log_scale_task_set) or '[]'} "
+        f"(source={log_scale_source}); "
+        f"logit={sorted(logit_scale_task_set) or '[]'} "
+        f"(source={warps.logit_source})"
     )
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
@@ -202,6 +216,8 @@ def run_s2_toa_lrnn(
     y_pred_mode_all: list[np.ndarray] = []
     log_mu_all: list[np.ndarray] = []
     log_sigma_all: list[np.ndarray] = []
+    logit_mu_all: list[np.ndarray] = []
+    logit_sigma_all: list[np.ndarray] = []
 
     for task_idx, task_name in enumerate(names):
         print(f"\n--- Task: {task_name} ---")
@@ -245,9 +261,7 @@ def run_s2_toa_lrnn(
         y_tr = y_train[:, task_idx]
         y_te = y_test[:, task_idx]
         y_va = y_val[:, task_idx] if y_val.numel() > 0 else y_val
-        y_tr_model = forward_y_s2(
-            y_tr, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        )
+        y_tr_model = forward_y_s2(y_tr, task_name, warps=warps)
         y_scaler = None
         if standardize_y:
             y_scaler = StandardScaler()
@@ -257,9 +271,7 @@ def run_s2_toa_lrnn(
             y_tr_fit = y_tr_model
         y_val_scaled = y_va
         if y_va.numel() > 0:
-            y_va_model = forward_y_s2(
-                y_va, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-            )
+            y_va_model = forward_y_s2(y_va, task_name, warps=warps)
             y_val_scaled = (
                 y_scaler.transform(y_va_model.unsqueeze(-1)).squeeze(-1)
                 if standardize_y and y_scaler is not None
@@ -359,9 +371,8 @@ def run_s2_toa_lrnn(
             "ard_space": "lrnn_features",
         }
 
-        uses_log = task_uses_log_scale(
-            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        )
+        uses_log = task_uses_log_scale(task_name, warps=warps)
+        uses_logit = task_uses_logit_scale(task_name, warps=warps)
         if save_checkpoint and save_path:
             ckpt_path = save_toa_lrnn_checkpoint(
                 checkpoint_path_for_run(save_path, title, task_name),
@@ -387,7 +398,7 @@ def run_s2_toa_lrnn(
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
                 log_grain=uses_log,
-                logit_cos=False,
+                logit_cos=uses_logit,
                 input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
                 model_config={
                     "hidden_dims": hidden,
@@ -398,8 +409,15 @@ def run_s2_toa_lrnn(
                     "band_indices": list(band_indices),
                     "x_transform": x_transform or "none",
                     "log_scale": uses_log,
+                    "logit_scale": uses_logit,
                     "log_scale_source": log_scale_source,
                     "log_scale_tasks": sorted(log_scale_task_set),
+                    "logit_scale_tasks": sorted(logit_scale_task_set),
+                    "logit_bounds": {
+                        k: list(v)
+                        for k, v in warps.logit_bounds.items()
+                        if k in logit_scale_task_set
+                    },
                 },
             )
             learned_noise["checkpoint_path"] = str(ckpt_path)
@@ -420,8 +438,7 @@ def run_s2_toa_lrnn(
             task_name=task_name,
             y_scaler=y_scaler,
             standardize_y=standardize_y,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
             extended=True,
         )
         pred_mean, pred_std, lower, upper = inv.as_tuple()
@@ -440,8 +457,7 @@ def run_s2_toa_lrnn(
             y_true=y_te,
             inv=inv,
             task_name=task_name,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
         )
         tm = {
             "best_train_loss": best_loss,
@@ -466,12 +482,13 @@ def run_s2_toa_lrnn(
             y_pred_mode_all=y_pred_mode_all,
             log_mu_all=log_mu_all,
             log_sigma_all=log_sigma_all,
+            logit_mu_all=logit_mu_all,
+            logit_sigma_all=logit_sigma_all,
         )
         print_task_test_metrics(
             task_name,
             computed,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
         )
 
     y_pred_stacked = np.stack(y_pred_all, axis=1)
@@ -482,6 +499,8 @@ def run_s2_toa_lrnn(
     y_pred_mode_stacked = stack_or_none(y_pred_mode_all)
     log_mu_stacked = stack_or_none(log_mu_all)
     log_sigma_stacked = stack_or_none(log_sigma_all)
+    logit_mu_stacked = stack_or_none(logit_mu_all)
+    logit_sigma_stacked = stack_or_none(logit_sigma_all)
     y_test_np = y_test.detach().cpu().numpy()
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked, names)
     rel_metrics_by_task = attach_relative_error_fields(
@@ -498,9 +517,9 @@ def run_s2_toa_lrnn(
         per_task,
         task_metrics,
         names=names,
-        log_scale=log_scale,
-        log_scale_tasks=log_scale_task_set,
+        warps=warps,
     )
+    logit_task_names = [n for n in names if task_uses_logit_scale(n, warps=warps)]
     aggregate_medae = macro_metric(per_task, names, "MedAE")
 
     metrics: dict = {
@@ -526,12 +545,13 @@ def run_s2_toa_lrnn(
         "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
-        "log_scale_tasks": [
-            n
-            for n in names
-            if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
-        ],
+        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, warps=warps)],
         "log_scale_source": log_scale_source,
+        "logit_scale_tasks": list(logit_task_names),
+        "logit_scale_source": warps.logit_source,
+        "logit_bounds": {
+            k: list(v) for k, v in warps.logit_bounds.items() if k in logit_scale_task_set
+        },
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),
@@ -616,5 +636,8 @@ def run_s2_toa_lrnn(
             y_pred_mode_stacked=y_pred_mode_stacked,
             log_mu_stacked=log_mu_stacked,
             log_sigma_stacked=log_sigma_stacked,
+            warps=warps,
+            logit_mu_stacked=logit_mu_stacked,
+            logit_sigma_stacked=logit_sigma_stacked,
         )
     return metrics

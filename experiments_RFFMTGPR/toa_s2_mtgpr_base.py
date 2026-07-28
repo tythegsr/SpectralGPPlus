@@ -54,9 +54,12 @@ from experiments_toa.s2_utils import (
 )
 from experiments_toa.s2_y_transform import (
     InverseYOutput,
+    YWarpConfig,
     forward_y_s2,
+    inverse_y_s2,
+    resolve_y_warps,
     task_uses_log_scale,
-    _lognormal_original_scale,
+    task_uses_logit_scale,
 )
 from gpplus.models import RFFMTGPR
 from gpplus.training import (
@@ -111,11 +114,21 @@ def forward_y_s2_matrix(
     y: torch.Tensor,
     task_names: Sequence[str],
     *,
+    warps: YWarpConfig | None = None,
     log_scale: bool = True,
+    log_scale_tasks: frozenset[str] | set[str] | None = None,
+    logit_scale_tasks: frozenset[str] | set[str] | None = None,
 ) -> torch.Tensor:
     out = y.clone()
     for t, name in enumerate(task_names):
-        out[:, t] = forward_y_s2(y[:, t], name, log_scale=log_scale)
+        out[:, t] = forward_y_s2(
+            y[:, t],
+            name,
+            warps=warps,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_tasks,
+            logit_scale_tasks=logit_scale_tasks,
+        )
     return out
 
 
@@ -128,9 +141,12 @@ def inverse_y_s2_matrix(
     task_names: Sequence[str],
     y_scaler: StandardScaler | None,
     standardize_y: bool,
+    warps: YWarpConfig | None = None,
     log_scale: bool = True,
+    log_scale_tasks: frozenset[str] | set[str] | None = None,
+    logit_scale_tasks: frozenset[str] | set[str] | None = None,
 ) -> InverseYOutput:
-    """Unstandardize multitask preds, then inverse log-scale columns."""
+    """Unstandardize multitask preds jointly, then inverse-warp each column."""
     pred_mean = pred_mean.clone()
     pred_std = pred_std.clone()
     lower = lower.clone()
@@ -143,36 +159,74 @@ def inverse_y_s2_matrix(
         lower = lower * y_std + y_mean
         upper = upper * y_std + y_mean
 
+    point = pred_mean.clone()
+    std = pred_std.clone()
+    lo = lower.clone()
+    hi = upper.clone()
     point_mean = pred_mean.clone()
-    point_mode = pred_mean.clone()
+    point_mode = torch.full_like(pred_mean, float("nan"))
     log_mu = torch.full_like(pred_mean, float("nan"))
     log_sigma = torch.full_like(pred_mean, float("nan"))
+    logit_mu = torch.full_like(pred_mean, float("nan"))
+    logit_sigma = torch.full_like(pred_mean, float("nan"))
 
+    any_log = False
+    any_logit = False
     for t, name in enumerate(task_names):
-        if not task_uses_log_scale(name, log_scale=log_scale):
-            continue
-        mu_log = pred_mean[:, t]
-        sigma_log = pred_std[:, t]
-        median, mean, mode, ln_std, lo, hi = _lognormal_original_scale(mu_log, sigma_log)
-        pred_mean[:, t] = median
-        pred_std[:, t] = ln_std
-        lower[:, t] = lo
-        upper[:, t] = hi
-        point_mean[:, t] = mean
-        point_mode[:, t] = mode
-        log_mu[:, t] = mu_log
-        log_sigma[:, t] = sigma_log
+        inv_t = inverse_y_s2(
+            pred_mean[:, t],
+            pred_std[:, t],
+            lower[:, t],
+            upper[:, t],
+            task_name=name,
+            y_scaler=None,
+            standardize_y=False,
+            warps=warps,
+            log_scale=log_scale,
+            log_scale_tasks=log_scale_tasks,
+            logit_scale_tasks=logit_scale_tasks,
+            extended=True,
+        )
+        point[:, t] = inv_t.point
+        std[:, t] = inv_t.std
+        lo[:, t] = inv_t.lower
+        hi[:, t] = inv_t.upper
+        if inv_t.point_mean is not None:
+            point_mean[:, t] = inv_t.point_mean
+            any_log = any_log or task_uses_log_scale(
+                name,
+                warps=warps,
+                log_scale=log_scale,
+                log_scale_tasks=log_scale_tasks,
+            )
+            any_logit = any_logit or task_uses_logit_scale(
+                name, warps=warps, logit_scale_tasks=logit_scale_tasks
+            )
+        if inv_t.point_mode is not None:
+            point_mode[:, t] = inv_t.point_mode
+        if inv_t.log_mu is not None:
+            log_mu[:, t] = inv_t.log_mu
+            any_log = True
+        if inv_t.log_sigma is not None:
+            log_sigma[:, t] = inv_t.log_sigma
+        if inv_t.logit_mu is not None:
+            logit_mu[:, t] = inv_t.logit_mu
+            any_logit = True
+        if inv_t.logit_sigma is not None:
+            logit_sigma[:, t] = inv_t.logit_sigma
 
-    any_log = any(task_uses_log_scale(n, log_scale=log_scale) for n in task_names)
+    any_warp = any_log or any_logit
     return InverseYOutput(
-        point=pred_mean,
-        std=pred_std,
-        lower=lower,
-        upper=upper,
-        point_mean=point_mean if any_log else None,
+        point=point,
+        std=std,
+        lower=lo,
+        upper=hi,
+        point_mean=point_mean if any_warp else None,
         point_mode=point_mode if any_log else None,
         log_mu=log_mu if any_log else None,
         log_sigma=log_sigma if any_log else None,
+        logit_mu=logit_mu if any_logit else None,
+        logit_sigma=logit_sigma if any_logit else None,
     )
 
 
@@ -207,7 +261,10 @@ def run_s2_toa_mtgpr(
     training_verbose: bool = True,
     log_every_n_epochs: int = 50,
     save_checkpoint: bool = True,
-    log_scale: bool = True,
+    log_scale: bool | None = True,
+    log_scale_qoi: Sequence[str] | None = None,
+    logit_scale_qoi: Sequence[str] | None = None,
+    logit_bounds: dict[str, tuple[float, float]] | None = None,
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
@@ -267,7 +324,7 @@ def run_s2_toa_mtgpr(
     print(
         f"Joint {sampling_label}-MTGP (Woodbury), D={num_rff}, m={feature_dim}, m*T={joint_width}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={names}, "
-        f"n_bands={len(shared_bands)}, log_scale={log_scale}"
+        f"n_bands={len(shared_bands)}"
         + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
     )
     print(f"Optimizer: {getattr(optimizer_class, '__name__', optimizer_class)}, kwargs={optimizer_kwargs}")
@@ -295,6 +352,24 @@ def run_s2_toa_mtgpr(
         data_path=data_path,
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
+    )
+
+    warps = resolve_y_warps(
+        log_scale_qoi,
+        logit_scale_qoi,
+        log_scale=log_scale,
+        meta=data_meta,
+        logit_bounds=logit_bounds,
+    )
+    log_scale = warps.log_scale
+    log_scale_task_set = warps.log_tasks
+    log_scale_source = warps.log_source
+    logit_scale_task_set = warps.logit_tasks
+    print(
+        f"Output warps: log={sorted(log_scale_task_set) or '[]'} "
+        f"(source={log_scale_source}); "
+        f"logit={sorted(logit_scale_task_set) or '[]'} "
+        f"(source={warps.logit_source})"
     )
 
     x_test_orig = x_test.clone()
@@ -331,8 +406,8 @@ def run_s2_toa_mtgpr(
             x_val = x_scaler.transform(x_val)
         print(f"X scaling: {x_scaling_type}")
 
-    y_train_model = forward_y_s2_matrix(y_train, names, log_scale=log_scale)
-    y_test_model = forward_y_s2_matrix(y_test, names, log_scale=log_scale)
+    y_train_model = forward_y_s2_matrix(y_train, names, warps=warps)
+    y_test_model = forward_y_s2_matrix(y_test, names, warps=warps)
 
     y_scaler = None
     if standardize_y:
@@ -345,7 +420,7 @@ def run_s2_toa_mtgpr(
     x_val_scaled = x_val
     y_val_scaled = y_val
     if y_val.numel() > 0:
-        y_val_model = forward_y_s2_matrix(y_val, names, log_scale=log_scale)
+        y_val_model = forward_y_s2_matrix(y_val, names, warps=warps)
         y_val_scaled = y_scaler.transform(y_val_model) if standardize_y and y_scaler is not None else y_val_model
 
     callbacks = []
@@ -474,7 +549,7 @@ def run_s2_toa_mtgpr(
         task_names=names,
         y_scaler=y_scaler,
         standardize_y=standardize_y,
-        log_scale=log_scale,
+        warps=warps,
     )
     y_true_np = y_test.cpu().numpy()
     y_pred_np = inv.point.numpy()
@@ -498,10 +573,7 @@ def run_s2_toa_mtgpr(
         per_task[f"{name}_mean_rel_error"] = float(rel_m["mean_rel_error"])
         per_task[f"{name}_median_rel_error"] = float(rel_m["median_rel_error"])
         per_task[f"{name}_pct_within_1pct"] = float(rel_m["pct_within_1pct"])
-        if (
-            task_uses_log_scale(name, log_scale=log_scale)
-            and inv.log_mu is not None
-        ):
+        if task_uses_log_scale(name, warps=warps) and inv.log_mu is not None:
             extra = compute_log_scale_extra_metrics(
                 y_true_np[:, t],
                 log_mu=inv.log_mu[:, t].numpy(),
@@ -511,11 +583,14 @@ def run_s2_toa_mtgpr(
             )
             for key, value in extra.items():
                 per_task[f"{name}_{key}"] = float(value)
+        elif task_uses_logit_scale(name, warps=warps):
+            per_task[f"{name}_logit_scale"] = True
 
     aggregate_rmse = float(np.sqrt(np.mean((y_pred_np - y_true_np) ** 2)))
     aggregate_rrmse = float(macro_rrmse(per_task, names))
     aggregate_medae = float(macro_metric(per_task, names, "MedAE"))
-    log_task_names = [n for n in names if task_uses_log_scale(n, log_scale=log_scale)]
+    log_task_names = [n for n in names if task_uses_log_scale(n, warps=warps)]
+    logit_task_names = [n for n in names if task_uses_logit_scale(n, warps=warps)]
     aggregate_rrmse_log = macro_metric(per_task, log_task_names, "RRMSE_log")
     aggregate_rrmse_lnorm_mean = macro_metric(per_task, log_task_names, "RRMSE_mean")
 
@@ -529,7 +604,7 @@ def run_s2_toa_mtgpr(
             "prediction_time": prediction_time / num_tasks,
         }
         if (
-            task_uses_log_scale(name, log_scale=log_scale)
+            task_uses_log_scale(name, warps=warps)
             and inv.log_mu is not None
             and inv.log_sigma is not None
         ):
@@ -570,6 +645,7 @@ def run_s2_toa_mtgpr(
     print(f"Total training time: {train_time:.1f}s")
 
     log_tasks = log_task_names
+    warped_tasks = bool(log_task_names or logit_task_names)
     metrics: dict = {
         "title": title,
         "dataset": "s2",
@@ -597,8 +673,14 @@ def run_s2_toa_mtgpr(
         "x_standardize_method": x_standardize_method,
         "x_scaling_type": x_scaling_type,
         "standardize_y": standardize_y,
-        "log_scale": log_scale,
+        "log_scale": bool(log_scale),
         "log_scale_tasks": log_tasks,
+        "log_scale_source": log_scale_source,
+        "logit_scale_tasks": list(logit_task_names),
+        "logit_scale_source": warps.logit_source,
+        "logit_bounds": {
+            k: list(v) for k, v in warps.logit_bounds.items() if k in logit_scale_task_set
+        },
         "response_noise_prior": bool(response_noise_prior),
         "best_train_loss": best_loss,
         "rel_tolerance": rel_tolerance,
@@ -655,7 +737,7 @@ def run_s2_toa_mtgpr(
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
                 log_grain=bool(log_tasks),
-                logit_cos=False,
+                logit_cos=bool(logit_task_names),
                 input_column_indices=torch.as_tensor(shared_bands, dtype=torch.int64),
                 model_config={
                     "num_tasks": num_tasks,
@@ -665,6 +747,16 @@ def run_s2_toa_mtgpr(
                     "correct_sorf": correct_sorf,
                     "rank_kernel": rank_kernel,
                     "rank_likelihood": 0,
+                    "log_scale": bool(log_scale),
+                    "logit_scale": bool(logit_task_names),
+                    "log_scale_source": log_scale_source,
+                    "log_scale_tasks": list(log_tasks),
+                    "logit_scale_tasks": list(logit_task_names),
+                    "logit_bounds": {
+                        k: list(v)
+                        for k, v in warps.logit_bounds.items()
+                        if k in logit_scale_task_set
+                    },
                 },
             )
             metrics["checkpoint_path"] = str(ckpt_path)
@@ -691,8 +783,22 @@ def run_s2_toa_mtgpr(
             val_idx=val_idx.cpu().numpy(),
             test_idx=test_idx.cpu().numpy(),
             bands_by_task=bands_by_task,
-            y_pred_mean=y_pred_mean_np if log_tasks else None,
+            y_pred_mean=y_pred_mean_np if warped_tasks else None,
             y_pred_mode=y_pred_mode_np if log_tasks else None,
+            log_mu=inv.log_mu.numpy() if log_tasks and inv.log_mu is not None else None,
+            log_sigma=inv.log_sigma.numpy() if log_tasks and inv.log_sigma is not None else None,
+            log_scale_tasks=log_tasks,
+            logit_mu=(
+                inv.logit_mu.numpy()
+                if logit_task_names and inv.logit_mu is not None
+                else None
+            ),
+            logit_sigma=(
+                inv.logit_sigma.numpy()
+                if logit_task_names and inv.logit_sigma is not None
+                else None
+            ),
+            logit_scale_tasks=logit_task_names,
         )
         print(f"Saved predictions to {out_npz}")
         metrics["predictions_npz"] = str(out_npz)
@@ -733,10 +839,14 @@ def run_s2_toa_mtgpr(
                     rel_metrics_by_task=rel_metrics_by_task,
                     rel_tolerance=rel_tolerance,
                     log_scale_tasks=log_tasks,
-                    y_pred_mean=y_pred_mean_np if log_tasks else None,
+                    y_pred_mean=y_pred_mean_np if warped_tasks else None,
                     y_pred_mode=y_pred_mode_np if log_tasks else None,
                     log_mu=inv.log_mu.numpy() if log_tasks and inv.log_mu is not None else None,
-                    log_sigma=inv.log_sigma.numpy() if log_tasks and inv.log_sigma is not None else None,
+                    log_sigma=(
+                        inv.log_sigma.numpy()
+                        if log_tasks and inv.log_sigma is not None
+                        else None
+                    ),
                     spectrum_ylabel=(
                         "Radiance"
                         if str(data_meta.get("input_variable", "")).endswith("radiance")

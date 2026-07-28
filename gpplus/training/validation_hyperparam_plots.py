@@ -14,6 +14,8 @@ SCALAR_HYPERPARAM_KEYS = (
     "raw_noise",
     "mean_constant",
 )
+# Signed / unconstrained parameters must use linear y-scale (log + >0 filter hides them).
+LINEAR_SCALE_HYPERPARAM_KEYS = frozenset({"raw_noise", "mean_constant", "outputscale"})
 
 
 def _step_axis(records: list[dict]) -> tuple[np.ndarray, str]:
@@ -156,12 +158,19 @@ def plot_hyperparameter_curves(
     for key in scalar_keys:
         ax = axes[panel // n_cols][panel % n_cols]
         series = _series_from_records(records, key)
-        positive = np.where(np.isfinite(series) & (series > 0), series, np.nan)
-        ax.plot(steps, positive, color="#7570B3", linewidth=2.0, marker="o", markersize=3)
-        ax.set_yscale("log")
+        use_linear = key in LINEAR_SCALE_HYPERPARAM_KEYS
+        if use_linear:
+            y = np.where(np.isfinite(series), series, np.nan)
+            ax.plot(steps, y, color="#7570B3", linewidth=2.0, marker="o", markersize=3)
+            ax.set_yscale("linear")
+            ax.grid(True, alpha=0.28)
+        else:
+            y = np.where(np.isfinite(series) & (series > 0), series, np.nan)
+            ax.plot(steps, y, color="#7570B3", linewidth=2.0, marker="o", markersize=3)
+            ax.set_yscale("log")
+            ax.grid(True, which="both", alpha=0.28)
         ax.set_xlabel(x_label)
         ax.set_ylabel(key)
-        ax.grid(True, which="both", alpha=0.28)
         panel += 1
 
     if lengthscale_keys:

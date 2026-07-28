@@ -30,6 +30,18 @@ S2_LOG_SCALE_TASK_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Default affine boxes for logit warps: map physical y in [a, b] to (0, 1) then logit.
+# Match TOA design ranges from experiments_toa/toa_log_data.py (not raw [0, 1]).
+S2_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
+    "cos_i": (0.06, 1.0),
+    "aot": (0.04, 1.0),
+    "cwv": (0.2, 5.2),
+    "fsnow": (0.0, 10.0),
+    "fPV": (0.0, 10.0),
+    "fNPV": (0.0, 10.0),
+    "fsoil": (0.0, 10.0),
+}
+
 S2_INPUT_VARIABLES: tuple[str, ...] = ("toa_reflectance", "toa_radiance")
 
 # Absorption / low-SNR bands identified from the joint correlation analysis.

@@ -13,6 +13,8 @@ from experiments_toa.s2_constants import (
     S2_TASK_NAMES,
 )
 
+NComponentsSpec = int | Mapping[str, int] | str | Path
+
 
 def expand_band_spec(
     spec: Sequence[int | Sequence[int]] | Mapping[str, Any] | None,
@@ -175,3 +177,110 @@ def band_config_metadata(
             entry["wavelength_nm"] = [float(wavelengths_nm[i]) for i in idxs]
         meta[name] = entry
     return meta
+
+
+def load_task_pca_components_config(
+    path: str | Path,
+    *,
+    task_names: Sequence[str] | None = None,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    """
+    Load per-QoI PCA component counts from JSON.
+
+    Returns ``(components_by_task, metadata)`` where metadata retains selection /
+    band_mode / thresholds and other non-task fields from the file.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Task PCA components config not found: {path}")
+
+    with path.open("r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"PCA components config must be a JSON object, got {type(payload)}")
+
+    task_specs = payload.get("tasks", {}) or {}
+    if not isinstance(task_specs, dict):
+        raise ValueError("'tasks' must be a JSON object mapping task -> n_components")
+
+    names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
+    requested_unknown = [n for n in names if n not in S2_TASK_NAMES]
+    if requested_unknown:
+        raise ValueError(f"Unknown requested task names: {requested_unknown}")
+
+    unknown = sorted(set(task_specs) - set(S2_TASK_NAMES))
+    if unknown:
+        raise ValueError(f"Unknown tasks in PCA components config: {unknown}")
+
+    default_raw = payload.get("default", None)
+    default_p: int | None = int(default_raw) if default_raw is not None else None
+    if default_p is not None and default_p < 1:
+        raise ValueError(f"default n_components must be >= 1, got {default_p}")
+
+    out: dict[str, int] = {}
+    for name in names:
+        if name in task_specs:
+            p = int(task_specs[name])
+        elif default_p is not None:
+            p = default_p
+        else:
+            raise ValueError(
+                f"PCA components config missing task {name!r} and has no 'default'"
+            )
+        if p < 1:
+            raise ValueError(f"n_components for {name!r} must be >= 1, got {p}")
+        out[name] = p
+
+    meta = {k: v for k, v in payload.items() if k != "tasks"}
+    meta["config_path"] = str(path)
+    return out, meta
+
+
+def resolve_task_pca_components(
+    n_components: NComponentsSpec,
+    *,
+    task_names: Sequence[str] | None = None,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    """
+    Resolve a shared int, per-task mapping, or JSON path to ``{task: p}``.
+
+    Returns ``(components_by_task, metadata)``. Metadata is empty for int/mapping
+    specs; for JSON paths it includes fields from the file.
+    """
+    names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
+    if isinstance(n_components, int):
+        if n_components < 1:
+            raise ValueError(f"n_components must be >= 1, got {n_components}")
+        return {name: int(n_components) for name in names}, {
+            "selection": "fixed",
+            "shared_n_components": int(n_components),
+        }
+
+    if isinstance(n_components, Mapping):
+        out: dict[str, int] = {}
+        for name in names:
+            if name not in n_components:
+                raise ValueError(f"n_components mapping missing task {name!r}")
+            p = int(n_components[name])
+            if p < 1:
+                raise ValueError(f"n_components for {name!r} must be >= 1, got {p}")
+            out[name] = p
+        return out, {"selection": "mapping"}
+
+    return load_task_pca_components_config(n_components, task_names=names)
+
+
+def resolve_task_n_components(
+    n_components: NComponentsSpec,
+    task_name: str,
+    *,
+    components_by_task: Mapping[str, int] | None = None,
+) -> int:
+    """Look up ``p`` for one task (optionally from a pre-resolved mapping)."""
+    if components_by_task is not None:
+        if task_name not in components_by_task:
+            raise ValueError(f"components_by_task missing task {task_name!r}")
+        return int(components_by_task[task_name])
+    by_task, _ = resolve_task_pca_components(n_components, task_names=[task_name])
+    return int(by_task[task_name])

@@ -16,11 +16,11 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
-N_TRAIN = 16000
+QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"]  # None = all 11; e.g. ["algae", "fsnow"]
+N_TRAIN = 40000
 N_TEST = 5000
 RFF_SAMPLING = "sorf"  # "rff" | "orf" | "sorf"
-NUM_RFF = 400
+NUM_RFF = 1600
 NUM_INITS = 1
 NUM_EPOCHS = 1000
 LR = 0.1
@@ -42,18 +42,20 @@ SAVE_CHECKPOINT = True
 RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.5
-LOG_SCALE = True
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
 RANK_KERNEL = 0  # 0 = independent tasks (QoIs are nearly orthogonal)
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 # Joint MT uses the band config "default" ranges (shared X), not per-QoI keeps.
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr.json"
+    "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -76,7 +78,7 @@ def run_s2_toa_mtgpr_entry(**kwargs) -> dict:
 
 if __name__ == "__main__":
     save_path = SAVE_PATH or (
-        f"experiments_RFFMTGPR/results/July21/s2_toa_mtgpr_{RFF_SAMPLING}_"
+        f"experiments_RFFMTGPR/results/July28/s2_toa_mtgpr_{RFF_SAMPLING}_"
         f"{NUM_INITS}inits_numrff{NUM_RFF}_lr{LR}_dtype{DTYPE}"
     )
     log_file = LOG_FILE
@@ -123,7 +125,8 @@ if __name__ == "__main__":
         noise_var_fraction=NOISE_VAR_FRACTION,
         noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
         correct_sorf=CORRECT_SORF,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
         rank_kernel=RANK_KERNEL,
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),

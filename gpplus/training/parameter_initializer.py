@@ -69,6 +69,8 @@ class DefaultParameterInitializer(ParameterInitializer):
         self.num_params = 0
         for name, param in model.named_parameters():
             if param.requires_grad and ".weight" not in name and ".bias" not in name:
+                if "raw_bound_penalty_lambda" in name:
+                    continue
                 if batch_size > 1 and param.dim() >= 1 and param.shape[0] == batch_size:
                     self.num_params += param[0].numel()
                 else:
@@ -430,6 +432,10 @@ class DefaultParameterInitializer(ParameterInitializer):
                     logger.debug(f"Skipping parameter: {name}")
                     continue
 
+                if "raw_bound_penalty_lambda" in name:
+                    logger.debug(f"Skipping learnable bound penalty lambda: {name}")
+                    continue
+
                 # Get initialization configuration
                 config = self.get_initialization_config(name, param, model)
 
@@ -511,6 +517,9 @@ class DefaultParameterInitializer(ParameterInitializer):
             idx = 0
             for name, param in model.named_parameters():
                 if not param.requires_grad or param.numel() == 0:
+                    continue
+
+                if "raw_bound_penalty_lambda" in name:
                     continue
 
                 config = self.get_initialization_config(name, param, model)

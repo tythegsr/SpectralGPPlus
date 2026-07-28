@@ -1,0 +1,18 @@
+{
+  "input_dim": 285,
+  "default": [[0, 284]],
+  "tasks": {
+    "algae": [[0, 284]],
+    "aot": [[0, 284]],
+    "cos_i": [[0, 284]],
+    "cwv": [[0, 284]],
+    "dust": [[0, 284]],
+    "fNPV": [[0, 284]],
+    "fPV": [[0, 284]],
+    "fsnow": [[0, 284]],
+    "fsoil": [[0, 284]],
+    "grain_size": [[0, 284]],
+    "liquid_water": [[0, 284]]
+  },
+  "notes": "All 285 wavelengths for every QoI. Pair with full-band PCA component configs (e.g. s2_task_pca_components_*_full.json)."
+}

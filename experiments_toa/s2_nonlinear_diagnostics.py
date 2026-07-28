@@ -168,6 +168,10 @@ def run_diagnostics(
         x_norm = np.linalg.norm(x_c, axis=0)
         if y_norm < 1e-12:
             pearson[:, t] = 0.0
+            spearman[:, t] = 0.0
+            mi[:, t] = 0.0
+            dcor[:, t] = 0.0
+            continue
         else:
             with np.errstate(invalid="ignore", divide="ignore"):
                 pearson[:, t] = (x_c.T @ y_c) / (x_norm * y_norm + 1e-12)
@@ -210,6 +214,35 @@ def run_diagnostics(
         task_bands = bands_by_task[name]
         Xt = X_all[idx][:, task_bands]
         yt = Y_all[idx][:, t]
+        y_std = float(np.std(yt))
+        if y_std < 1e-15:
+            row = {
+                "qoi": name,
+                "n_bands_shared": n_bands,
+                "n_bands_task": len(task_bands),
+                "max_abs_pearson": 0.0,
+                "max_abs_pearson_band": int(shared_bands[0]),
+                "max_abs_pearson_wl_nm": float(wl_shared[0]),
+                "max_abs_spearman": 0.0,
+                "max_abs_spearman_band": int(shared_bands[0]),
+                "max_abs_spearman_wl_nm": float(wl_shared[0]),
+                "max_mi": 0.0,
+                "max_mi_band": int(shared_bands[0]),
+                "max_mi_wl_nm": float(wl_shared[0]),
+                "max_dcor": 0.0,
+                "max_dcor_band": int(shared_bands[0]),
+                "max_dcor_wl_nm": float(wl_shared[0]),
+                "ridge_r2": 0.0,
+                "rf_r2": 0.0,
+                "rf_minus_ridge": 0.0,
+                "nonlinear_flag": False,
+                "constant_qoi": True,
+                "top_permutation_importance": [],
+            }
+            rows.append(row)
+            print("  constant QoI (std~0); skipped multivariate probes")
+            continue
+
         x_tr, x_te, y_tr, y_te = train_test_split(Xt, yt, test_size=0.25, random_state=seed)
 
         ridge = _ridge_r2(x_tr, y_tr, x_te, y_te)
@@ -243,19 +276,25 @@ def run_diagnostics(
                 }
             )
 
+        def _safe_argmax(vals: np.ndarray) -> int:
+            if not np.any(np.isfinite(vals)):
+                return 0
+            return int(np.nanargmax(vals))
+
         max_abs_pearson = float(np.nanmax(np.abs(pearson[:, t])))
         max_abs_spearman = float(np.nanmax(np.abs(spearman[:, t])))
         max_mi = float(np.nanmax(mi[:, t]))
-        max_dcor = float(np.nanmax(dcor[:, t]))
-        i_p = int(np.nanargmax(np.abs(pearson[:, t])))
-        i_s = int(np.nanargmax(np.abs(spearman[:, t])))
-        i_m = int(np.nanargmax(mi[:, t]))
-        i_d = int(np.nanargmax(dcor[:, t]))
+        dcor_col = dcor[:, t]
+        max_dcor = float(np.nanmax(dcor_col)) if np.any(np.isfinite(dcor_col)) else float("nan")
+        i_p = _safe_argmax(np.abs(pearson[:, t]))
+        i_s = _safe_argmax(np.abs(spearman[:, t]))
+        i_m = _safe_argmax(mi[:, t])
+        i_d = _safe_argmax(dcor_col)
 
         nonlinear_flag = bool(
             (rf_r2 - ridge) > 0.10
             or (max_mi > 0.05 and max_abs_pearson < 0.15)
-            or (max_dcor > 0.20 and max_abs_pearson < 0.15)
+            or (np.isfinite(max_dcor) and max_dcor > 0.20 and max_abs_pearson < 0.15)
         )
 
         row = {
@@ -278,6 +317,7 @@ def run_diagnostics(
             "rf_r2": rf_r2,
             "rf_minus_ridge": float(rf_r2 - ridge),
             "nonlinear_flag": nonlinear_flag,
+            "constant_qoi": False,
             "top_permutation_importance": perm_scores,
         }
         rows.append(row)

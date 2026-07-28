@@ -6,13 +6,16 @@ import os
 
 import gpytorch
 import torch
+import torch.nn.functional as F
 from gpytorch.distributions import MultivariateNormal
+from torch import nn
 from linear_operator.operators import LowRankRootLinearOperator
 
 from ..config import logger
 from ..kernels import LogScaleKernel, RFFKernel
 from ..likelihoods import LogGaussianLikelihood
 from ..utils.rff_utils import RffSampling, woodbury_predict, woodbury_predictive_obs_std
+from ..utils.transforms import inv_softplus
 
 
 def _drop_singleton_batch(t: torch.Tensor) -> torch.Tensor:
@@ -137,6 +140,48 @@ class RFFGPR(gpytorch.models.ExactGP):
     def invalidate_feature_cache(self) -> None:
         self._train_z_cache = None
         self._train_z_cache_key = None
+
+    def has_learnable_bound_penalty_lambda(self) -> bool:
+        return hasattr(self, "raw_bound_penalty_lambda")
+
+    def register_learnable_bound_penalty_lambda(
+        self,
+        *,
+        lam_init: float,
+        lam_min: float = 1.0,
+    ) -> None:
+        """
+        Register a scalar bound-penalty weight ``lambda_eff = lam_min + softplus(raw)``.
+
+        ``lam_init`` sets the initial effective weight; ``lam_min`` prevents collapse to zero.
+        """
+        if lam_min < 0:
+            raise ValueError(f"lam_min must be >= 0, got {lam_min}.")
+        if lam_init < lam_min:
+            raise ValueError(
+                f"lam_init must be >= lam_min for learnable bound penalty, "
+                f"got lam_init={lam_init}, lam_min={lam_min}."
+            )
+        if self.has_learnable_bound_penalty_lambda():
+            raise RuntimeError("Learnable bound penalty lambda already registered on this model.")
+
+        delta = max(float(lam_init) - float(lam_min), 1e-8)
+        raw_init = inv_softplus(torch.tensor(delta, dtype=self.dtype))
+        self.register_buffer(
+            "bound_penalty_lam_min",
+            torch.tensor(float(lam_min), dtype=self.dtype),
+        )
+        self.register_parameter("raw_bound_penalty_lambda", nn.Parameter(raw_init.clone()))
+
+    @property
+    def bound_penalty_lambda(self) -> torch.Tensor:
+        if not self.has_learnable_bound_penalty_lambda():
+            raise AttributeError("Model has no learnable bound_penalty_lambda parameter.")
+        lam_min = self.bound_penalty_lam_min.to(
+            device=self.raw_bound_penalty_lambda.device,
+            dtype=self.raw_bound_penalty_lambda.dtype,
+        )
+        return lam_min + F.softplus(self.raw_bound_penalty_lambda)
 
     def unscaled_features(self, x: torch.Tensor) -> torch.Tensor:
         z = self._rff_kernel.featurize(x)

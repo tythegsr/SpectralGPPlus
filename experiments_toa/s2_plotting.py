@@ -82,6 +82,9 @@ def save_s2_predictions_npz(
     log_mu: np.ndarray | None = None,
     log_sigma: np.ndarray | None = None,
     log_scale_tasks: Sequence[str] | None = None,
+    logit_mu: np.ndarray | None = None,
+    logit_sigma: np.ndarray | None = None,
+    logit_scale_tasks: Sequence[str] | None = None,
 ) -> Path:
     save_path = Path(save_path)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -109,6 +112,12 @@ def save_s2_predictions_npz(
         payload["log_sigma"] = np.asarray(log_sigma)
     if log_scale_tasks is not None:
         payload["log_scale_tasks"] = np.asarray(list(log_scale_tasks))
+    if logit_mu is not None:
+        payload["logit_mu"] = np.asarray(logit_mu)
+    if logit_sigma is not None:
+        payload["logit_sigma"] = np.asarray(logit_sigma)
+    if logit_scale_tasks is not None:
+        payload["logit_scale_tasks"] = np.asarray(list(logit_scale_tasks))
     for name, bands in bands_by_task.items():
         payload[f"bands_{name}"] = np.asarray(list(bands), dtype=np.int64)
     np.savez_compressed(out, **payload)

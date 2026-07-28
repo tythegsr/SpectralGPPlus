@@ -22,6 +22,24 @@ RESULTS_ROOT = Path("experiments_ORF/results/orf_batch")
 PLOT_OUTPUT_DIR = Path("experiments_ORF/results/orf_batch/plots")
 
 
+
+# Drop early transient epochs from validation loss figures (linear scale).
+SKIP_FIRST_EPOCHS = 100
+
+
+def _trim_early_epochs(records: list[dict], *, skip_first: int = SKIP_FIRST_EPOCHS) -> list[dict]:
+    """Keep records with epoch/lbfgs_iter >= skip_first; no-op if none remain."""
+    if not records or skip_first <= 0:
+        return records
+    if any("epoch" in r for r in records):
+        trimmed = [r for r in records if float(r.get("epoch", 0)) >= skip_first]
+    elif any("lbfgs_iter" in r for r in records):
+        trimmed = [r for r in records if float(r.get("lbfgs_iter", 0)) >= skip_first]
+    else:
+        trimmed = records[skip_first:] if len(records) > skip_first else []
+    return trimmed if trimmed else records
+
+
 def _parse_seed_from_path(path: Path) -> int | None:
     for part in path.parts:
         match = re.fullmatch(r"seed_(\d+)", part)
@@ -148,16 +166,10 @@ def _sanitize_stem(metrics: dict, source_path: str | None) -> str:
     return stem
 
 
-def _positive_for_log(values: np.ndarray) -> np.ndarray:
-    """Floor at tiny positive value so log-y plots stay valid."""
-    out = np.asarray(values, dtype=np.float64)
-    return np.maximum(out, 1e-12)
-
-
-def _configure_log_yaxis(ax: plt.Axes, ylabel: str) -> None:
-    ax.set_yscale("log")
-    ax.set_ylabel(f"{ylabel} (log scale)")
-    ax.grid(True, which="both", alpha=0.28)
+def _configure_linear_yaxis(ax: plt.Axes, ylabel: str) -> None:
+    ax.set_yscale("linear")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, alpha=0.28)
 
 
 def _plot_all_inits(
@@ -172,10 +184,10 @@ def _plot_all_inits(
 
     x_label = "Step"
     for i, key in enumerate(keys):
-        records = by_init[key]
+        records = _trim_early_epochs(by_init[key])
         steps, x_label = _step_axis(records)
-        val_nll = _positive_for_log(
-            np.array([float(r.get("val_NLL", np.nan)) for r in records], dtype=np.float64)
+        val_nll = np.array(
+            [float(r.get("val_NLL", np.nan)) for r in records], dtype=np.float64
         )
         init_idx = int(key)
         is_best = best_init is not None and init_idx == best_init
@@ -203,7 +215,7 @@ def _plot_all_inits(
     seed = metrics.get("_seed")
     subtitle_parts = [p for p in (f"optimizer={optimizer}", f"n_val={n_val}", f"seed={seed}") if p.split("=")[-1] not in ("None", "")]
     ax.set_xlabel(x_label)
-    _configure_log_yaxis(ax, "Validation NLL (val_NLL)")
+    _configure_linear_yaxis(ax, "Validation NLL (val_NLL)")
     ax.set_title(f"{title}\nValidation loss — all initializations" + (f" ({', '.join(subtitle_parts)})" if subtitle_parts else ""))
     if len(keys) <= 12:
         ax.legend(loc="best", fontsize=8, ncol=2)
@@ -226,16 +238,16 @@ def _plot_best_init(
     save_path: Path,
 ) -> None:
     key = str(best_init)
-    records = by_init.get(key)
+    records = _trim_early_epochs(by_init.get(key) or [])
     if not records:
         raise ValueError(f"No validation records for best init {best_init}")
 
     steps, x_label = _step_axis(records)
-    train_loss = _positive_for_log(
-        np.array([float(r.get("train_loss", np.nan)) for r in records], dtype=np.float64)
+    train_loss = np.array(
+        [float(r.get("train_loss", np.nan)) for r in records], dtype=np.float64
     )
-    val_nll = _positive_for_log(
-        np.array([float(r.get("val_NLL", np.nan)) for r in records], dtype=np.float64)
+    val_nll = np.array(
+        [float(r.get("val_NLL", np.nan)) for r in records], dtype=np.float64
     )
 
     fig, ax = plt.subplots(figsize=(10, 6), dpi=120)
@@ -259,7 +271,7 @@ def _plot_best_init(
     title = metrics.get("title", "ORF run")
     train_str = f"{float(best_train):.4f}" if best_train is not None else "?"
     ax.set_xlabel(x_label)
-    _configure_log_yaxis(ax, "Loss")
+    _configure_linear_yaxis(ax, "Loss")
     ax.set_title(f"{title}\nBest init {best_init + 1} (final train loss={train_str})")
     ax.legend(loc="best", fontsize=9)
     fig.tight_layout()

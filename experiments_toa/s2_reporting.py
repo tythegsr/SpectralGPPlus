@@ -16,7 +16,11 @@ from experiments_toa.s2_plotting import (
     select_posterior_example_indices,
 )
 from experiments_toa.s2_utils import compute_log_scale_extra_metrics, macro_metric, macro_rrmse
-from experiments_toa.s2_y_transform import task_uses_log_scale
+from experiments_toa.s2_y_transform import (
+    YWarpConfig,
+    task_uses_log_scale,
+    task_uses_logit_scale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +70,10 @@ def collect_log_scale_prediction_arrays(
     y_pred_mode_all: list[np.ndarray],
     log_mu_all: list[np.ndarray],
     log_sigma_all: list[np.ndarray],
+    logit_mu_all: list[np.ndarray] | None = None,
+    logit_sigma_all: list[np.ndarray] | None = None,
 ) -> None:
-    """Append median/mean/mode/log arrays for one task (NaN placeholders when unused)."""
+    """Append median/mean/mode/log/logit arrays for one task (NaN placeholders when unused)."""
     pred_np = (
         pred_mean.detach().cpu().numpy()
         if isinstance(pred_mean, torch.Tensor)
@@ -89,6 +95,16 @@ def collect_log_scale_prediction_arrays(
         log_sigma_all.append(inv.log_sigma.numpy())
     else:
         log_sigma_all.append(np.full_like(pred_np, np.nan))
+    if logit_mu_all is not None:
+        if getattr(inv, "logit_mu", None) is not None:
+            logit_mu_all.append(inv.logit_mu.numpy())
+        else:
+            logit_mu_all.append(np.full_like(pred_np, np.nan))
+    if logit_sigma_all is not None:
+        if getattr(inv, "logit_sigma", None) is not None:
+            logit_sigma_all.append(inv.logit_sigma.numpy())
+        else:
+            logit_sigma_all.append(np.full_like(pred_np, np.nan))
 
 
 def apply_log_scale_extra_metrics(
@@ -97,13 +113,16 @@ def apply_log_scale_extra_metrics(
     y_true: torch.Tensor | np.ndarray,
     inv: Any,
     task_name: str,
-    log_scale: bool,
+    log_scale: bool = True,
     log_scale_tasks: frozenset[str] | set[str] | None = None,
+    warps: YWarpConfig | None = None,
 ) -> dict:
     """Mutate ``computed`` with log-scale extras when the QoI is trained in ln-space."""
     if not task_uses_log_scale(
-        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks
+        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks, warps=warps
     ):
+        if task_uses_logit_scale(task_name, warps=warps):
+            computed["logit_scale"] = True
         return computed
     computed["log_scale"] = True
     if inv.log_mu is None:
@@ -121,11 +140,12 @@ def print_task_test_metrics(
     task_name: str,
     computed: Mapping[str, float],
     *,
-    log_scale: bool,
+    log_scale: bool = True,
     log_scale_tasks: frozenset[str] | set[str] | None = None,
+    warps: YWarpConfig | None = None,
 ) -> None:
     if task_uses_log_scale(
-        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks
+        task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks, warps=warps
     ):
         print(
             f"{task_name} Test (physical median) RMSE: {computed['RMSE']:.6f}  "
@@ -143,6 +163,12 @@ def print_task_test_metrics(
                 f"RRMSE_mean: {computed['RRMSE_mean']:.6f}  "
                 f"MedAE_mean: {computed.get('MedAE_mean', float('nan')):.6f}"
             )
+    elif task_uses_logit_scale(task_name, warps=warps):
+        print(
+            f"{task_name} Test (logit-warped physical) RMSE: {computed['RMSE']:.6f}  "
+            f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}  "
+            f"MedAE: {computed['MedAE']:.6f}"
+        )
     else:
         print(
             f"{task_name} Test RMSE: {computed['RMSE']:.6f}  "
@@ -181,14 +207,17 @@ def attach_log_scale_aggregate_fields(
     task_metrics: Mapping[str, Mapping[str, Any]],
     *,
     names: Sequence[str],
-    log_scale: bool,
+    log_scale: bool = True,
     log_scale_tasks: frozenset[str] | set[str] | None = None,
+    warps: YWarpConfig | None = None,
 ) -> tuple[list[str], float, float]:
     """Copy per-task log extras into ``per_task`` and return macros."""
     log_task_names = [
         n
         for n in names
-        if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_tasks)
+        if task_uses_log_scale(
+            n, log_scale=log_scale, log_scale_tasks=log_scale_tasks, warps=warps
+        )
     ]
     for name in log_task_names:
         tm = task_metrics[name]
@@ -297,6 +326,9 @@ def save_s2_summary_artifacts(
     y_pred_mode_stacked: np.ndarray | None = None,
     log_mu_stacked: np.ndarray | None = None,
     log_sigma_stacked: np.ndarray | None = None,
+    warps: YWarpConfig | None = None,
+    logit_mu_stacked: np.ndarray | None = None,
+    logit_sigma_stacked: np.ndarray | None = None,
 ) -> str:
     """Save NPZ + metrics JSON, optional validation/scatter/posterior plots. Returns JSON path."""
     example_indices = select_posterior_example_indices(
@@ -308,8 +340,14 @@ def save_s2_summary_artifacts(
     log_task_names_plot = [
         n
         for n in names
-        if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_tasks)
+        if task_uses_log_scale(
+            n, log_scale=log_scale, log_scale_tasks=log_scale_tasks, warps=warps
+        )
     ]
+    logit_task_names_plot = [
+        n for n in names if task_uses_logit_scale(n, warps=warps)
+    ]
+    warped_plot = bool(log_task_names_plot or logit_task_names_plot)
     out_npz = save_s2_predictions_npz(
         save_path,
         title=title,
@@ -325,11 +363,14 @@ def save_s2_summary_artifacts(
         val_idx=val_idx,
         test_idx=test_idx,
         bands_by_task=bands_by_task,
-        y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+        y_pred_mean=y_pred_mean_stacked if warped_plot else None,
         y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
         log_mu=log_mu_stacked if log_task_names_plot else None,
         log_sigma=log_sigma_stacked if log_task_names_plot else None,
         log_scale_tasks=log_task_names_plot,
+        logit_mu=logit_mu_stacked if logit_task_names_plot else None,
+        logit_sigma=logit_sigma_stacked if logit_task_names_plot else None,
+        logit_scale_tasks=logit_task_names_plot,
     )
     print(f"Saved predictions to {out_npz}")
     metrics["predictions_npz"] = str(out_npz)
@@ -372,7 +413,7 @@ def save_s2_summary_artifacts(
             rel_metrics_by_task=rel_metrics_by_task,
             rel_tolerance=rel_tolerance,
             log_scale_tasks=log_task_names_plot,
-            y_pred_mean=y_pred_mean_stacked if log_task_names_plot else None,
+            y_pred_mean=y_pred_mean_stacked if warped_plot else None,
             y_pred_mode=y_pred_mode_stacked if log_task_names_plot else None,
             log_mu=log_mu_stacked if log_task_names_plot else None,
             log_sigma=log_sigma_stacked if log_task_names_plot else None,

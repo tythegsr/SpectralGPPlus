@@ -57,7 +57,8 @@ BASELINE: dict[str, Any] = {
     "noise_var_fraction": 0.001,
     "noise_prior_log_scale": 0.5,
     "correct_sorf": True,
-    "log_scale": True,
+    "log_scale_qoi": ["algae", "dust", "grain_size", "liquid_water"],
+    "logit_scale_qoi": ["cos_i", "aot"],
 }
 
 
@@ -336,7 +337,8 @@ def run_one_trial(
         noise_prior_log_scale=trial["noise_prior_log_scale"],
         initializer_parameter_configs=trial["initializer_parameter_configs"] or None,
         correct_sorf=BASELINE["correct_sorf"],
-        log_scale=BASELINE["log_scale"],
+        log_scale_qoi=BASELINE["log_scale_qoi"],
+        logit_scale_qoi=BASELINE["logit_scale_qoi"],
         task_names=[task],
         parallel_verbose=0,
     )

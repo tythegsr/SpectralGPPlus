@@ -30,7 +30,9 @@ POSTERIOR_PDF_MODE = "tabpfn_bar"  # "gaussian" | "tabpfn_bar"
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p"
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -55,7 +57,7 @@ if __name__ == "__main__":
     save_path = SAVE_PATH or "experiments_TabPFN/results/s2_toa_tabpfn"
     print(
         f"TabPFN IDE config  qoi={QOI}  pfn_device={PFN_DEVICE}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}"
     )
 
     run_s2_toa_tabpfn(
@@ -76,5 +78,6 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
     )

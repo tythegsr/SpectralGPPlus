@@ -20,7 +20,10 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-N_COMPONENTS = 100
+# int (shared p) or path to per-QoI JSON from s2_pca_svd_analysis.py
+N_COMPONENTS: int | str = (
+    "experiments_toa/configs/s2_task_pca_components_var99_subset.json"
+)
 RFF_SAMPLING = "sorf"  # "rff" | "orf" | "sorf"
 NUM_RFF = 1600
 NUM_INITS = 1
@@ -53,7 +56,10 @@ TRAINING_LOG = True
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p"
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
+# Pair full-band PCA configs with s2_task_bands_all.json
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -77,8 +83,9 @@ def run_s2_toa_pca_rff_entry(**kwargs) -> dict:
 
 
 if __name__ == "__main__":
+    p_tag = N_COMPONENTS if isinstance(N_COMPONENTS, int) else "perQoI"
     save_path = SAVE_PATH or (
-        f"experiments_PCA/results/s2_toa_pca_{RFF_SAMPLING}_{NUM_INITS}inits_p{N_COMPONENTS}"
+        f"experiments_PCA/results/s2_toa_pca_{RFF_SAMPLING}_{NUM_INITS}inits_p{p_tag}"
     )
     log_file = LOG_FILE
     if log_file is None and DEVICE.startswith("cuda"):
@@ -91,7 +98,7 @@ if __name__ == "__main__":
 
     print(
         f"PCA-RFF IDE config  sampling={RFF_SAMPLING}  prior={RESPONSE_NOISE_PRIOR}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
     )
 
     run_s2_toa_pca_stgp(
@@ -130,5 +137,6 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
     )

@@ -1,0 +1,25 @@
+{
+  "selection": "variance",
+  "band_mode": "subset",
+  "variance_threshold": 0.99,
+  "r2_tol": 0.02,
+  "input_variable": "toa_radiance",
+  "task_band_config": "experiments_toa/configs/s2_task_bands_from_corr.json",
+  "n_train": 16000,
+  "x_transform": "none",
+  "seed": 42,
+  "default": 3,
+  "tasks": {
+    "algae": 2,
+    "aot": 3,
+    "cos_i": 3,
+    "cwv": 3,
+    "dust": 3,
+    "fNPV": 2,
+    "fPV": 1,
+    "fsnow": 1,
+    "fsoil": 3,
+    "grain_size": 3,
+    "liquid_water": 3
+  }
+}

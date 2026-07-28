@@ -26,7 +26,12 @@ from experiments_toa.paths import pin_toa_import_paths
 pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _GP_DIR, _PCA_DIR)
 
 from experiments_toa.data import TOA_TEST_POOL_SIZE, TOA_TRAIN_POOL_SIZE, TOA_VAL_POOL_SIZE
-from experiments_toa.s2_bands import band_config_metadata, load_task_band_config
+from experiments_toa.s2_bands import (
+    NComponentsSpec,
+    band_config_metadata,
+    load_task_band_config,
+    resolve_task_pca_components,
+)
 from experiments_toa.s2_constants import S2_DEFAULT_BAND_CONFIG_PATH, S2_INPUT_DIM, S2_TASK_NAMES
 from experiments_toa.s2_data import load_s2_toa_data
 from experiments_toa.s2_reporting import (
@@ -53,8 +58,10 @@ from experiments_toa.s2_y_transform import (
     InverseYOutput,
     forward_y_s2,
     inverse_y_s2,
-    resolve_log_scale,
+    logit_bounds_for_task,
+    resolve_y_warps,
     task_uses_log_scale,
+    task_uses_logit_scale,
 )
 from gpplus.training import evaluate_gp_model
 from gpplus.training.optimizers import LBFGSScipy
@@ -207,7 +214,7 @@ def _print_ensemble_comparison(
 def run_s2_toa_pca_gpr(
     n_train: int = 16000,
     n_test: int = 5000,
-    n_components: int = 30,
+    n_components: NComponentsSpec = 30,
     partition_size: int = 2000,
     seed: int = 42,
     num_inits: int = 4,
@@ -219,6 +226,9 @@ def run_s2_toa_pca_gpr(
     x_standardize_method: int = 2,
     standardize_y: bool = True,
     log_scale: bool | None = None,
+    log_scale_qoi: Sequence[str] | None = None,
+    logit_scale_qoi: Sequence[str] | None = None,
+    logit_bounds: dict[str, tuple[float, float]] | None = None,
     ard: bool = True,
     predict_chunk_size: int = 512,
     n_jobs: int | None = 1,
@@ -262,6 +272,13 @@ def run_s2_toa_pca_gpr(
     names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
     band_cfg_path = task_band_config or str(S2_DEFAULT_BAND_CONFIG_PATH)
     bands_by_task = load_task_band_config(band_cfg_path, task_names=names, input_dim=S2_INPUT_DIM)
+    n_components_by_task, pca_components_meta = resolve_task_pca_components(
+        n_components, task_names=names
+    )
+    unique_ps = sorted(set(n_components_by_task.values()))
+    pca_title_token = (
+        str(unique_ps[0]) if len(unique_ps) == 1 else "perQoI"
+    )
 
     set_seed(seed)
     if partition_size < 1:
@@ -269,16 +286,19 @@ def run_s2_toa_pca_gpr(
 
     n_partitions_est = int(np.ceil(n_train / partition_size))
     title = (
-        f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{n_components}_"
+        f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{pca_title_token}_"
         f"part{partition_size}_K{n_partitions_est}"
     )
     print("=" * 60)
     print(title)
     print(
-        f"S2 PCA + partitioned exact GPR, p={n_components}, partition_size={partition_size}, "
+        f"S2 PCA + partitioned exact GPR, p={n_components_by_task}, "
+        f"partition_size={partition_size}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, tasks={names}, input={input_variable}"
     )
     print(f"Band config: {band_cfg_path}")
+    if pca_components_meta.get("config_path"):
+        print(f"PCA components config: {pca_components_meta['config_path']}")
     if partition_size > _EXACT_GP_PARTITION_WARN:
         print(
             f"WARNING: exact GP is O(n^3) per partition; "
@@ -312,12 +332,22 @@ def run_s2_toa_pca_gpr(
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
     )
-    log_scale, log_scale_task_set, log_scale_source = resolve_log_scale(
-        log_scale, meta=data_meta
+    warps = resolve_y_warps(
+        log_scale_qoi,
+        logit_scale_qoi,
+        log_scale=log_scale,
+        meta=data_meta,
+        logit_bounds=logit_bounds,
     )
+    log_scale = warps.log_scale
+    log_scale_task_set = warps.log_tasks
+    log_scale_source = warps.log_source
+    logit_scale_task_set = warps.logit_tasks
     print(
-        f"Output log_scale={log_scale} (source={log_scale_source}); "
-        f"log tasks={sorted(log_scale_task_set) or '[]'}"
+        f"Output warps: log={sorted(log_scale_task_set) or '[]'} "
+        f"(source={log_scale_source}); "
+        f"logit={sorted(logit_scale_task_set) or '[]'} "
+        f"(source={warps.logit_source})"
     )
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
@@ -347,6 +377,8 @@ def run_s2_toa_pca_gpr(
     y_pred_mode_all: list[np.ndarray] = []
     log_mu_all: list[np.ndarray] = []
     log_sigma_all: list[np.ndarray] = []
+    logit_mu_all: list[np.ndarray] = []
+    logit_sigma_all: list[np.ndarray] = []
 
     y_test_np = y_test.detach().cpu().numpy()
 
@@ -360,10 +392,11 @@ def run_s2_toa_pca_gpr(
         if x_transform and x_transform != "none" and task_idx == 0:
             print(f"X transform: {x_transform} (before PCA / scaling)")
         input_dim_before_pca = int(x_tr.shape[-1])
+        task_n_components = int(n_components_by_task[task_name])
 
         pca_fit = fit_pca_on_train(
             x_tr,
-            n_components=n_components,
+            n_components=task_n_components,
             svd_solver=pca_svd_solver,
             random_state=seed,
         )
@@ -399,9 +432,7 @@ def run_s2_toa_pca_gpr(
 
         y_tr = y_train[:, task_idx]
         y_te = y_test[:, task_idx]
-        y_tr_model = forward_y_s2(
-            y_tr, task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        )
+        y_tr_model = forward_y_s2(y_tr, task_name, warps=warps)
         y_scaler = None
         if standardize_y:
             y_scaler = StandardScaler()
@@ -487,8 +518,7 @@ def run_s2_toa_pca_gpr(
                 task_name=task_name,
                 y_scaler=y_scaler,
                 standardize_y=standardize_y,
-                log_scale=log_scale,
-                log_scale_tasks=log_scale_task_set,
+                warps=warps,
                 extended=True,
             )
             pred_mean, pred_std, lower, upper = inv.as_tuple()
@@ -589,11 +619,9 @@ def run_s2_toa_pca_gpr(
         lower_primary_list.append(lower_full)
         upper_primary_list.append(upper_full)
 
-        # Primary-mode extras: for log QoIs, recover ln-space arrays from physical medians.
+        # Primary-mode extras: for warped QoIs, recover warped-space arrays from physical medians.
         primary_tm = dict(mode_metrics["full"][task_name])
-        if task_uses_log_scale(
-            task_name, log_scale=log_scale, log_scale_tasks=log_scale_task_set
-        ):
+        if task_uses_log_scale(task_name, warps=warps):
             log_mu_t = torch.as_tensor(np.log(np.clip(mu_full, 1e-300, None)))
             # Invert physical std ≈ median * sqrt(expm1(σ²)) for a rough σ.
             ratio = np.clip(std_full / np.clip(mu_full, 1e-300, None), 0.0, None)
@@ -617,8 +645,7 @@ def run_s2_toa_pca_gpr(
                 y_true=torch.as_tensor(y_true_task),
                 inv=inv_primary,
                 task_name=task_name,
-                log_scale=log_scale,
-                log_scale_tasks=log_scale_task_set,
+                warps=warps,
             )
             mode_metrics["full"][task_name] = primary_tm
             collect_log_scale_prediction_arrays(
@@ -628,6 +655,43 @@ def run_s2_toa_pca_gpr(
                 y_pred_mode_all=y_pred_mode_all,
                 log_mu_all=log_mu_all,
                 log_sigma_all=log_sigma_all,
+                logit_mu_all=logit_mu_all,
+                logit_sigma_all=logit_sigma_all,
+            )
+        elif task_uses_logit_scale(task_name, warps=warps):
+            a, b = logit_bounds_for_task(task_name, warps=warps)
+            u = np.clip((mu_full - a) / (b - a), 1e-4, 1.0 - 1e-4)
+            logit_mu_np = np.log(u / (1.0 - u))
+            u_factor = u * (1.0 - u)
+            logit_sigma_np = np.clip(
+                std_full / np.clip((b - a) * u_factor, 1e-12, None), 0.0, None
+            )
+            inv_primary = InverseYOutput(
+                point=torch.as_tensor(mu_full),
+                std=torch.as_tensor(std_full),
+                lower=torch.as_tensor(lower_full),
+                upper=torch.as_tensor(upper_full),
+                point_mean=torch.as_tensor(mu_full),
+                logit_mu=torch.as_tensor(logit_mu_np),
+                logit_sigma=torch.as_tensor(logit_sigma_np),
+            )
+            apply_log_scale_extra_metrics(
+                primary_tm,
+                y_true=torch.as_tensor(y_true_task),
+                inv=inv_primary,
+                task_name=task_name,
+                warps=warps,
+            )
+            mode_metrics["full"][task_name] = primary_tm
+            collect_log_scale_prediction_arrays(
+                inv_primary,
+                torch.as_tensor(mu_full),
+                y_pred_mean_all=y_pred_mean_all,
+                y_pred_mode_all=y_pred_mode_all,
+                log_mu_all=log_mu_all,
+                log_sigma_all=log_sigma_all,
+                logit_mu_all=logit_mu_all,
+                logit_sigma_all=logit_sigma_all,
             )
         else:
             collect_log_scale_prediction_arrays(
@@ -642,13 +706,14 @@ def run_s2_toa_pca_gpr(
                 y_pred_mode_all=y_pred_mode_all,
                 log_mu_all=log_mu_all,
                 log_sigma_all=log_sigma_all,
+                logit_mu_all=logit_mu_all,
+                logit_sigma_all=logit_sigma_all,
             )
         task_metrics[task_name] = primary_tm
         print_task_test_metrics(
             task_name,
             primary_tm,
-            log_scale=log_scale,
-            log_scale_tasks=log_scale_task_set,
+            warps=warps,
         )
 
     y_pred_stacked = np.stack(y_pred_primary_list, axis=1)
@@ -659,6 +724,8 @@ def run_s2_toa_pca_gpr(
     y_pred_mode_stacked = stack_or_none(y_pred_mode_all)
     log_mu_stacked = stack_or_none(log_mu_all)
     log_sigma_stacked = stack_or_none(log_sigma_all)
+    logit_mu_stacked = stack_or_none(logit_mu_all)
+    logit_sigma_stacked = stack_or_none(logit_sigma_all)
 
     per_task = compute_per_task_metrics(y_test_np, y_pred_stacked, names)
     rel_metrics_by_task = attach_relative_error_fields(
@@ -675,9 +742,9 @@ def run_s2_toa_pca_gpr(
         per_task,
         task_metrics,
         names=names,
-        log_scale=log_scale,
-        log_scale_tasks=log_scale_task_set,
+        warps=warps,
     )
+    logit_task_names = [n for n in names if task_uses_logit_scale(n, warps=warps)]
     aggregate_medae = macro_metric(per_task, names, "MedAE")
     n_partitions = int(next(iter(n_partitions_by_task.values()))) if n_partitions_by_task else 0
     opt_name = "LBFGSScipy" if num_epochs <= 1 else "Adam"
@@ -691,8 +758,10 @@ def run_s2_toa_pca_gpr(
         "n_test": n_test,
         "num_tasks": len(names),
         "task_names": list(names),
-        "n_components": n_components,
-        "n_pca_components": n_components,
+        "n_components": n_components_by_task if len(unique_ps) > 1 else unique_ps[0],
+        "n_pca_components": n_components_by_task if len(unique_ps) > 1 else unique_ps[0],
+        "n_components_by_task": dict(n_components_by_task),
+        "pca_components_meta": pca_components_meta,
         "pca_svd_solver": pca_svd_solver,
         "partition_size": partition_size,
         "n_partitions": n_partitions,
@@ -714,12 +783,13 @@ def run_s2_toa_pca_gpr(
         "x_transform": x_transform or "none",
         "standardize_y": standardize_y,
         "log_scale": bool(log_scale),
-        "log_scale_tasks": [
-            n
-            for n in names
-            if task_uses_log_scale(n, log_scale=log_scale, log_scale_tasks=log_scale_task_set)
-        ],
+        "log_scale_tasks": [n for n in names if task_uses_log_scale(n, warps=warps)],
         "log_scale_source": log_scale_source,
+        "logit_scale_tasks": list(logit_task_names),
+        "logit_scale_source": warps.logit_source,
+        "logit_bounds": {
+            k: list(v) for k, v in warps.logit_bounds.items() if k in logit_scale_task_set
+        },
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),
@@ -804,6 +874,9 @@ def run_s2_toa_pca_gpr(
             y_pred_mode_stacked=y_pred_mode_stacked,
             log_mu_stacked=log_mu_stacked,
             log_sigma_stacked=log_sigma_stacked,
+            warps=warps,
+            logit_mu_stacked=logit_mu_stacked,
+            logit_sigma_stacked=logit_sigma_stacked,
         )
         # Augment with ensemble / partition arrays (S1 parity).
         out_npz = metrics.get("predictions_npz")

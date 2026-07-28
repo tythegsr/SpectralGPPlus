@@ -17,11 +17,11 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["cos_i"]  # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"]  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
-HIDDEN_DIMS = [128, 256, 512, 1024, 512, 256, 128]
-FEATURE_RANK = 128
+HIDDEN_DIMS = [128, 256, 512, 1024, 2048, 1024, 512]
+FEATURE_RANK = 256
 ACTIVATION = "tanh"  # "tanh" | "relu" | "gelu" | "identity"
 VARIANCE_CORRECTION = True
 NUM_INITS = 1
@@ -49,13 +49,14 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_simulations_20262307.nc"
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc"
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
-# None = auto from NetCDF attrs (output_log_scale / log_uniform_qois)
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr.json"
+    "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -101,7 +102,7 @@ if __name__ == "__main__":
     print(
         f"LRNN IDE config  prior={RESPONSE_NOISE_PRIOR}  "
         f"frac={NOISE_VAR_FRACTION}  log_scale={NOISE_PRIOR_LOG_SCALE}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
     )
 
     run_s2_toa_lrnn(
@@ -138,5 +139,6 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
     )

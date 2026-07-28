@@ -46,7 +46,9 @@ TRAINING_LOG = True
 DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p"
-LOG_SCALE: bool | None = None
+# None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
+LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
+LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -82,7 +84,7 @@ if __name__ == "__main__":
 
     print(
         f"GP IDE config  prior={RESPONSE_NOISE_PRIOR}  "
-        f"output_log_scale={LOG_SCALE}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
     )
 
     run_s2_toa_gp(
@@ -115,5 +117,6 @@ if __name__ == "__main__":
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
-        log_scale=LOG_SCALE,
+        log_scale_qoi=LOG_SCALE_QOI,
+        logit_scale_qoi=LOGIT_SCALE_QOI,
     )

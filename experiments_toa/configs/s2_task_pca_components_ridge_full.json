@@ -1,0 +1,25 @@
+{
+  "selection": "supervised",
+  "band_mode": "full",
+  "variance_threshold": 0.99,
+  "r2_tol": 0.02,
+  "input_variable": "toa_radiance",
+  "task_band_config": "experiments_toa/configs/s2_task_bands_all.json",
+  "n_train": 16000,
+  "x_transform": "none",
+  "seed": 42,
+  "default": 132,
+  "tasks": {
+    "algae": 14,
+    "aot": 132,
+    "cos_i": 17,
+    "cwv": 24,
+    "dust": 28,
+    "fNPV": 9,
+    "fPV": 18,
+    "fsnow": 33,
+    "fsoil": 13,
+    "grain_size": 20,
+    "liquid_water": 16
+  }
+}
