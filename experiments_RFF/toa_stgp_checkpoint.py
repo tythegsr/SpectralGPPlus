@@ -20,6 +20,16 @@ from gpplus.utils import StandardScaler, UniformScaler
 from toa_mtgpr_checkpoint import CHECKPOINT_VERSION, scaler_from_dict, scaler_to_dict
 
 
+def _fs_path(path: Path) -> str:
+    """Absolute path string safe for Win32 paths longer than MAX_PATH (260)."""
+    resolved = path.expanduser().resolve()
+    text = str(resolved)
+    if os.name == "nt" and not text.startswith("\\\\?\\"):
+        # Extended-length path; required when repo + long run-dir names exceed 260.
+        return "\\\\?\\" + text
+    return text
+
+
 @dataclass
 class ToaStgpBundle:
     model: RFFGPR
@@ -109,8 +119,8 @@ def save_toa_stgp_checkpoint(
         "test_idx": test_idx.detach().cpu().to(torch.int64),
         "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
     }
-    torch.save(payload, path)
-    return path
+    torch.save(payload, _fs_path(path))
+    return path.resolve()
 
 
 def _dtype_from_str(name: str) -> torch.dtype:
@@ -123,10 +133,11 @@ def _dtype_from_str(name: str) -> torch.dtype:
 
 def load_toa_stgp_checkpoint(path: str | Path, device: str = "cpu") -> ToaStgpBundle:
     path = Path(path)
-    if not path.is_file():
+    fs = _fs_path(path)
+    if not os.path.isfile(fs):
         raise FileNotFoundError(f"No checkpoint found at {path}")
 
-    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload = torch.load(fs, map_location="cpu", weights_only=False)
     version = payload.get("version")
     if version != CHECKPOINT_VERSION:
         raise ValueError(f"Unsupported checkpoint version {version!r} (expected {CHECKPOINT_VERSION}).")

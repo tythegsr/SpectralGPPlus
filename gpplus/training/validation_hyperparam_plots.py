@@ -15,7 +15,9 @@ SCALAR_HYPERPARAM_KEYS = (
     "mean_constant",
 )
 # Signed / unconstrained parameters must use linear y-scale (log + >0 filter hides them).
+# RFF/SORF lengthscales use SoftClamp in [-6, 3] (can be negative), not Softplus.
 LINEAR_SCALE_HYPERPARAM_KEYS = frozenset({"raw_noise", "mean_constant", "outputscale"})
+LENGTHSCALE_USE_LINEAR_SCALE = True
 
 
 def _step_axis(records: list[dict]) -> tuple[np.ndarray, str]:
@@ -178,20 +180,30 @@ def plot_hyperparameter_curves(
         cmap = plt.get_cmap("viridis")
         for i, key in enumerate(lengthscale_keys):
             series = _series_from_records(records, key)
-            positive = np.where(np.isfinite(series) & (series > 0), series, np.nan)
+            if LENGTHSCALE_USE_LINEAR_SCALE:
+                y = np.where(np.isfinite(series), series, np.nan)
+            else:
+                y = np.where(np.isfinite(series) & (series > 0), series, np.nan)
             color = cmap(i / max(len(lengthscale_keys) - 1, 1))
             ax.plot(
                 steps,
-                positive,
+                y,
                 color=color,
                 linewidth=1.5,
                 alpha=0.9,
                 label=f"dim {i}",
             )
-        ax.set_yscale("log")
+        if LENGTHSCALE_USE_LINEAR_SCALE:
+            ax.set_yscale("linear")
+            ax.axhline(0.0, color="0.5", linewidth=0.8, linestyle="--", alpha=0.6)
+            ax.grid(True, alpha=0.28)
+            ylabel = "lengthscale (per input dim; SoftClamp)"
+        else:
+            ax.set_yscale("log")
+            ax.grid(True, which="both", alpha=0.28)
+            ylabel = "lengthscale (per input dim)"
         ax.set_xlabel(x_label)
-        ax.set_ylabel("lengthscale (per input dim)")
-        ax.grid(True, which="both", alpha=0.28)
+        ax.set_ylabel(ylabel)
         if len(lengthscale_keys) <= 12:
             ax.legend(loc="best", fontsize=7, ncol=2)
         else:

@@ -95,7 +95,7 @@ from experiments_RFF.rff_gp_defaults import (
     rff_mll_class,
     woodbury_jitter_for_dtype,
 )
-from gpplus.training import bound_penalized_rff_mll_class
+from gpplus.training import bound_penalized_rff_mll_class, pac_bayes_mll_class
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
@@ -171,6 +171,10 @@ def run_s2_toa_stgp(
     bound_penalty_max_points: int | None = 4096,
     bound_penalty_lambda_learnable: bool = False,
     bound_penalty_lam_min: float = 1.0,
+    pac_bayes: bool = False,
+    pac_bayes_temperature: float = 1.0,
+    pac_bayes_prior_std: float = 1.0,
+    pac_bayes_posterior_std: float = 0.1,
 ) -> dict:
     """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
     if init_batch_size is None:
@@ -320,6 +324,11 @@ def run_s2_toa_stgp(
         )
     else:
         print("Soft probabilistic bounds: off")
+    if pac_bayes:
+        print(
+            f"PAC-Bayes MLL: on (temperature={pac_bayes_temperature}, "
+            f"prior_std={pac_bayes_prior_std}, posterior_std={pac_bayes_posterior_std})"
+        )
     learned_lambda_by_task: dict[str, float | None] = {}
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
@@ -532,6 +541,13 @@ def run_s2_toa_stgp(
             )
         else:
             task_mll_class = rff_mll_class()
+        if pac_bayes:
+            task_mll_class = pac_bayes_mll_class(
+                task_mll_class,
+                temperature=pac_bayes_temperature,
+                prior_std=pac_bayes_prior_std,
+                posterior_std=pac_bayes_posterior_std,
+            )
         trainer = GPTrainer(
             model,
             mll_class=task_mll_class,
@@ -599,62 +615,67 @@ def run_s2_toa_stgp(
         }
 
         if save_checkpoint and save_path:
-            ckpt_path = save_toa_stgp_checkpoint(
-                checkpoint_path_for_run(save_path, title, task_name),
-                model=model,
-                task_name=task_name,
-                train_x=x_tr.cpu(),
-                train_y=y_tr_fit.cpu(),
-                x_scaler=x_scaler,
-                y_scaler=y_scaler,
-                standardize_x=standardize_x,
-                standardize_y=standardize_y,
-                x_standardize_method=x_standardize_method,
-                train_idx=train_idx,
-                val_idx=val_idx,
-                test_idx=test_idx,
-                title=title,
-                seed=seed,
-                best_train_loss=best_loss,
-                n_train=n_train,
-                n_test=n_test,
-                n_val=n_val,
-                data_path=data_path,
-                rel_tolerance=rel_tolerance,
-                dtype=dtype,
-                log_grain=task_uses_log_scale(task_name, warps=warps),
-                logit_cos=task_uses_logit_scale(task_name, warps=warps),
-                input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
-                model_config={
-                    "num_rff": num_rff,
-                    "ard": ard,
-                    "rff_sampling": rff_sampling,
-                    "correct_sorf": correct_sorf,
-                    "n_pca_components": (
-                        int(n_components_by_task[task_name])
-                        if n_components_by_task is not None
-                        else None
-                    ),
-                    "input_variable": input_variable,
-                    "x_transform": x_transform or "none",
-                    "dataset": "s2",
-                    "band_indices": list(band_indices),
-                    "ard_mapping": ard_mapped,
-                    "data_meta": data_meta,
-                    "log_scale": task_uses_log_scale(task_name, warps=warps),
-                    "logit_scale": task_uses_logit_scale(task_name, warps=warps),
-                    "log_scale_source": log_scale_source,
-                    "log_scale_tasks": sorted(log_scale_task_set),
-                    "logit_scale_tasks": sorted(logit_scale_task_set),
-                    "logit_bounds": {
-                        k: list(v)
-                        for k, v in warps.logit_bounds.items()
-                        if k in logit_scale_task_set
+            try:
+                ckpt_path = save_toa_stgp_checkpoint(
+                    checkpoint_path_for_run(save_path, title, task_name),
+                    model=model,
+                    task_name=task_name,
+                    train_x=x_tr.cpu(),
+                    train_y=y_tr_fit.cpu(),
+                    x_scaler=x_scaler,
+                    y_scaler=y_scaler,
+                    standardize_x=standardize_x,
+                    standardize_y=standardize_y,
+                    x_standardize_method=x_standardize_method,
+                    train_idx=train_idx,
+                    val_idx=val_idx,
+                    test_idx=test_idx,
+                    title=title,
+                    seed=seed,
+                    best_train_loss=best_loss,
+                    n_train=n_train,
+                    n_test=n_test,
+                    n_val=n_val,
+                    data_path=data_path,
+                    rel_tolerance=rel_tolerance,
+                    dtype=dtype,
+                    log_grain=task_uses_log_scale(task_name, warps=warps),
+                    logit_cos=task_uses_logit_scale(task_name, warps=warps),
+                    input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
+                    model_config={
+                        "num_rff": num_rff,
+                        "ard": ard,
+                        "rff_sampling": rff_sampling,
+                        "correct_sorf": correct_sorf,
+                        "n_pca_components": (
+                            int(n_components_by_task[task_name])
+                            if n_components_by_task is not None
+                            else None
+                        ),
+                        "input_variable": input_variable,
+                        "x_transform": x_transform or "none",
+                        "dataset": "s2",
+                        "band_indices": list(band_indices),
+                        "ard_mapping": ard_mapped,
+                        "data_meta": data_meta,
+                        "log_scale": task_uses_log_scale(task_name, warps=warps),
+                        "logit_scale": task_uses_logit_scale(task_name, warps=warps),
+                        "log_scale_source": log_scale_source,
+                        "log_scale_tasks": sorted(log_scale_task_set),
+                        "logit_scale_tasks": sorted(logit_scale_task_set),
+                        "logit_bounds": {
+                            k: list(v)
+                            for k, v in warps.logit_bounds.items()
+                            if k in logit_scale_task_set
+                        },
                     },
-                },
-            )
-            learned_noise["checkpoint_path"] = str(ckpt_path)
-            print(f"Saved checkpoint to {ckpt_path}")
+                )
+                learned_noise["checkpoint_path"] = str(ckpt_path)
+                print(f"Saved checkpoint to {ckpt_path}")
+            except (OSError, RuntimeError) as exc:
+                print(
+                    f"WARNING: checkpoint save failed ({exc}); continuing without checkpoint."
+                )
 
         model.eval()
         model.invalidate_feature_cache()
@@ -855,6 +876,10 @@ def run_s2_toa_stgp(
             bound_penalty_lam_min=bound_penalty_lam_min,
             learned_lambda_by_task=learned_lambda_by_task,
         ),
+        "pac_bayes": bool(pac_bayes),
+        "pac_bayes_temperature": float(pac_bayes_temperature),
+        "pac_bayes_prior_std": float(pac_bayes_prior_std),
+        "pac_bayes_posterior_std": float(pac_bayes_posterior_std),
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),

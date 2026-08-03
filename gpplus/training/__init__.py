@@ -17,6 +17,12 @@ from .bound_penalized_rff_mll import (
     BoundPenalizedRFFWoodburyMarginalLogLikelihood,
     bound_penalized_rff_mll_class,
 )
+from .pac_bayes import (
+    collect_learnable_params,
+    diagonal_gaussian_kl,
+    pac_bayes_complexity,
+    pac_bayes_mll_class,
+)
 from .rff_mll import RFFWoodburyMarginalLogLikelihood, WoodburyMarginalLogLikelihood
 from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
 from .stop_conditions import (

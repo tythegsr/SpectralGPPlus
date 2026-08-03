@@ -17,14 +17,15 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
+# QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["algae"]
 N_TRAIN = 16000
 N_TEST = 5000
 NUM_RFF = 1600
 NUM_INITS = 1  # total random starts
 INIT_BATCH_SIZE = 1  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
 NUM_EPOCHS = 2000
-LR = 0.01
+LR = 0.04
 SEED = 42
 DEVICE = "cuda" # "cpu" | "cuda"
 DTYPE = "float64"  # "float32" | "float64"
@@ -41,10 +42,16 @@ POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None  # e.g. "0,3,7" or None
 CORRECT_SORF = True
 SAVE_CHECKPOINT = True
-RESPONSE_NOISE_PRIOR = False
-NOISE_VAR_FRACTION = 0.001
+RESPONSE_NOISE_PRIOR = True
+NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.5
-USE_ABLATION_INIT_OVERRIDES = False
+# Parameter init overrides for raw_noise / raw_lengthscale / raw_outputscale.
+# None or {} = library defaults. Example:
+#   {"raw_noise": {"method": "uniform", "lower": -5.0, "upper": -1.0},
+#    "raw_lengthscale": {"method": "normal", "mean": -1.0, "std": 1.0},
+#    "raw_outputscale": {"method": "normal", "mean": -2.0, "std": 1.5}}
+INITIALIZER_PARAMETER_CONFIGS: dict | None = {"raw_lengthscale": {"method": "normal", "mean": -1.0, "std": 1.0}}
+USE_ABLATION_INIT_OVERRIDES = False  # if True and INITIALIZER_PARAMETER_CONFIGS empty, use ablation winners
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
@@ -54,7 +61,8 @@ DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_2026270
 INPUT_VARIABLE = "toa_radiance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
-LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size"]
+# LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size"]
+LOG_SCALE_QOI: list[str] | None = None
 LOGIT_SCALE_QOI: list[str] | None = None
 # Soft probabilistic bounds: same length/order as QOI. None = no bound on that side.
 # Do not set bounds on log/logit-warped QoIs.
@@ -63,9 +71,14 @@ BOUND_MAX: list[float | None] | None = None
 BOUND_PENALTY_K = 2.0
 BOUND_PENALTY_LAMBDA = 0.0
 BOUND_PENALTY_LAMBDA_LEARNABLE = False
-BOUND_PENALTY_LAM_MIN = 1.0
+BOUND_PENALTY_LAM_MIN = 0.0
 BOUND_PENALTY_ALPHA = 10.0
 BOUND_PENALTY_MAX_POINTS: int | None = 4096
+# Catoni PAC-Bayes KL on learnable parameters (wraps base / bound-penalized MLL).
+PAC_BAYES = True
+PAC_BAYES_TEMPERATURE = 4.0
+PAC_BAYES_PRIOR_STD = 0.5
+PAC_BAYES_POSTERIOR_STD = 0.1
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
@@ -92,8 +105,8 @@ def run_s2_toa_sorf_entry(**kwargs) -> dict:
 if __name__ == "__main__":
     _sorf_defs = sorf_defaults_from_recommendations()
 
-    init_pcs = None
-    if USE_ABLATION_INIT_OVERRIDES:
+    init_pcs = dict(INITIALIZER_PARAMETER_CONFIGS) if INITIALIZER_PARAMETER_CONFIGS else None
+    if not init_pcs and USE_ABLATION_INIT_OVERRIDES:
         init_pcs = _sorf_defs.get("initializer_parameter_configs") or None
         if init_pcs == {}:
             init_pcs = None
@@ -112,7 +125,7 @@ if __name__ == "__main__":
 
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July28/s2_toa_sorf_{NUM_INITS}inits"
+        f"experiments_SORF/results/July29/adjusted_init_ls_pacbayes/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
         f"dtype{DTYPE}"
@@ -136,7 +149,7 @@ if __name__ == "__main__":
         f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  "
         f"bound_min={BOUND_MIN} bound_max={BOUND_MAX}  "
         f"bound_lambda_learnable={BOUND_PENALTY_LAMBDA_LEARNABLE}  x_transform={X_TRANSFORM}  "
-        f"init_overrides={init_pcs or {}}  qoi={QOI}"
+        f"pac_bayes={PAC_BAYES}  init_overrides={init_pcs or {}}  qoi={QOI}"
     )
 
     run_s2_toa_sorf(
@@ -184,5 +197,9 @@ if __name__ == "__main__":
         bound_penalty_lam_min=BOUND_PENALTY_LAM_MIN,
         bound_penalty_alpha=BOUND_PENALTY_ALPHA,
         bound_penalty_max_points=BOUND_PENALTY_MAX_POINTS,
+        pac_bayes=PAC_BAYES,
+        pac_bayes_temperature=PAC_BAYES_TEMPERATURE,
+        pac_bayes_prior_std=PAC_BAYES_PRIOR_STD,
+        pac_bayes_posterior_std=PAC_BAYES_POSTERIOR_STD,
         train_mode=TRAIN_MODE,
     )

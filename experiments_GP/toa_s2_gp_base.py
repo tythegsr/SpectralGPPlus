@@ -65,6 +65,7 @@ from gpplus.training import (
     GPTrainer,
     MinLossChangeStopCondition,
     evaluate_gp_model,
+    pac_bayes_mll_class,
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
@@ -125,6 +126,10 @@ def run_s2_toa_gp(
     task_names: Sequence[str] | None = None,
     task_band_config: str | None = None,
     x_transform: str | None = None,
+    pac_bayes: bool = False,
+    pac_bayes_temperature: float = 1.0,
+    pac_bayes_prior_std: float = 1.0,
+    pac_bayes_posterior_std: float = 0.1,
 ) -> dict:
     """Train independent exact GPR models on the S2 11-QoI dataset."""
     if save_path is None:
@@ -374,8 +379,20 @@ def run_s2_toa_gp(
         if likelihood is not None:
             model.likelihood = likelihood
 
+        task_mll_class = None
+        if pac_bayes:
+            import gpytorch
+
+            task_mll_class = pac_bayes_mll_class(
+                gpytorch.mlls.ExactMarginalLogLikelihood,
+                temperature=pac_bayes_temperature,
+                prior_std=pac_bayes_prior_std,
+                posterior_std=pac_bayes_posterior_std,
+            )
+
         trainer = GPTrainer(
             model,
+            mll_class=task_mll_class,
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -539,6 +556,10 @@ def run_s2_toa_gp(
             k: list(v) for k, v in warps.logit_bounds.items() if k in logit_scale_task_set
         },
         "response_noise_prior": bool(response_noise_prior),
+        "pac_bayes": bool(pac_bayes),
+        "pac_bayes_temperature": float(pac_bayes_temperature),
+        "pac_bayes_prior_std": float(pac_bayes_prior_std),
+        "pac_bayes_posterior_std": float(pac_bayes_posterior_std),
         "rel_tolerance": rel_tolerance,
         "task_band_config": str(band_cfg_path),
         "bands_by_task": band_config_metadata(bands_by_task, wavelengths_nm=wavelengths_np),
