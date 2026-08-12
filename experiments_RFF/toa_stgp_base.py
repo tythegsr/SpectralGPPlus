@@ -462,6 +462,11 @@ def run_toa_stgp(
         best_run = min(successful, key=lambda r: r["loss"])
         model.load_state_dict(best_run["state_dict"])
         best_loss = float(best_run["loss"])
+        if best_run.get("aborted"):
+            print(
+                f"WARNING: {task_name} training aborted mid-run; using salvaged best "
+                f"epoch (loss={best_loss:.6f}). Error: {best_run.get('error', 'unknown')}"
+            )
         y_std_for_noise = y_scaler.std.squeeze() if y_scaler is not None else None
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
 

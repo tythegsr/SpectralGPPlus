@@ -273,7 +273,8 @@ class BatchedGPTrainer:
                         best_losses[i] = li
                         no_improvement[i] = 0
                         snapshot_init_into_state_dict(best_state, self.model, i, B)
-                    else:
+                    elif epoch + 1 > self.min_epochs:
+                        # Do not accumulate patience before min_epochs (e.g. NIGP freeze).
                         no_improvement[i] += 1
 
                 # Sum (not mean): per-init grads match independent training scale.

@@ -22,11 +22,11 @@ N_TEST = 5000
 RFF_SAMPLING = "sorf"  # "rff" | "orf" | "sorf"
 NUM_RFF = 1600
 NUM_INITS = 1
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 2000
 LR = 0.1
 SEED = 42
 DEVICE = "cuda"
-DTYPE = "float64"  # "float32" | "float64"
+DTYPE = "float32"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 ARD = True
@@ -43,19 +43,23 @@ RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.5
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
-LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
-LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
-RANK_KERNEL = 0  # 0 = independent tasks (QoIs are nearly orthogonal)
+LOG_SCALE_QOI: list[str] | None = []
+LOGIT_SCALE_QOI: list[str] | None = []
+RANK_KERNEL = 1  # 0 = independent tasks (QoIs are nearly orthogonal)
+# Classic NIGP on joint MT (diag task noise). Default off for baseline MT runs.
+NIGP = True
+FREEZE_EPOCH_NIGP = 100
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc"  # None = snow_toa_simulations_20262107.nc
-INPUT_VARIABLE = "toa_radiance"
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20260308.nc"  # None = snow_toa_simulations_20262107.nc
+INPUT_VARIABLE = "toa_reflectance"
 # Joint MT uses the band config "default" ranges (shared X), not per-QoI keeps.
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
+    "experiments_toa/configs/s2_task_bands_all.json"
+    # "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -78,7 +82,7 @@ def run_s2_toa_mtgpr_entry(**kwargs) -> dict:
 
 if __name__ == "__main__":
     save_path = SAVE_PATH or (
-        f"experiments_RFFMTGPR/results/July28/s2_toa_mtgpr_{RFF_SAMPLING}_"
+        f"experiments_RFFMTGPR/results/Aug08/s2_toa_mtgpr_{RFF_SAMPLING}_"
         f"{NUM_INITS}inits_numrff{NUM_RFF}_lr{LR}_dtype{DTYPE}"
     )
     log_file = LOG_FILE
@@ -92,6 +96,7 @@ if __name__ == "__main__":
 
     print(
         f"S2 MTGPR IDE config  sampling={RFF_SAMPLING}  prior={RESPONSE_NOISE_PRIOR}  "
+        f"nigp={NIGP}  freeze_epoch_nigp={FREEZE_EPOCH_NIGP}  "
         f"qoi={QOI}  input={INPUT_VARIABLE}"
     )
 
@@ -131,4 +136,6 @@ if __name__ == "__main__":
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
+        nigp=NIGP,
+        freeze_epoch_nigp=FREEZE_EPOCH_NIGP,
     )

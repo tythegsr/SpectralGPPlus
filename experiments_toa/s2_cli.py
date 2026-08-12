@@ -99,6 +99,8 @@ def parse_example_indices(raw: str | None) -> list[int] | None:
 
 
 def ensure_parent_dir(path: str | Path) -> Path:
+    from gpplus.utils.fs_path import ensure_dir
+
     p = Path(path)
-    p.mkdir(parents=True, exist_ok=True)
+    ensure_dir(p)
     return p

@@ -88,6 +88,236 @@ def map_ard_to_bands(
     }
 
 
+def extract_nigp_input_noise(model) -> dict[str, Any] | None:
+    """
+    Extract learned NIGP per-dimension input noise if ``model.nigp`` is enabled.
+
+    Returns ``None`` when NIGP is off or parameters are missing.
+    """
+    if not bool(getattr(model, "nigp", False)):
+        return None
+    if not hasattr(model, "raw_input_noise"):
+        return None
+    try:
+        raw = model.raw_input_noise.detach().cpu().reshape(-1)
+        std = model.input_noise.detach().cpu().reshape(-1)
+        var = model.input_noise_var.detach().cpu().reshape(-1)
+    except Exception:
+        return None
+    return {
+        "raw_input_noise": [float(v) for v in raw.tolist()],
+        "input_noise": [float(v) for v in std.tolist()],
+        "input_noise_var": [float(v) for v in var.tolist()],
+    }
+
+
+def compute_nigp_grad_diagnostics(
+    model,
+    x: torch.Tensor,
+    *,
+    band_indices: Sequence[int] | None = None,
+    wavelengths_nm: Sequence[float] | None = None,
+    noise_space: str = "bands",
+    jitter: float = 1e-6,
+    max_points: int = 4096,
+    seed: int = 0,
+) -> dict[str, Any] | None:
+    """
+    Per-dimension NIGP diagnostics from ``∇_x μ`` and learned ``σ_x``.
+
+    Computes on up to ``max_points`` rows of ``x`` (subsampled if larger):
+
+    - ``grad_mu_abs_mean[d]`` = mean_i |∂_{x_d} μ(x_i)|
+    - ``grad_mu_sq_mean[d]`` = mean_i (∂_{x_d} μ)^2
+    - ``input_noise_contrib_mean[d]`` = mean_i σ_{x,d}^2 (∂_{x_d} μ)^2
+      (the per-dim term that enters effective observation noise)
+    - ``input_noise_contrib_frac[d]`` = normalized contrib across dimensions
+    - ``effective_input_term_mean`` = mean_i Σ_d σ_{x,d}^2 (∂_{x_d} μ)^2
+
+    Returns ``None`` when NIGP is off.
+    """
+    if not bool(getattr(model, "nigp", False)) or not hasattr(model, "raw_input_noise"):
+        return None
+
+    from gpplus.utils.nigp_utils import (
+        exact_posterior_mean_grad_wrt_x,
+        posterior_mean_grad_wrt_x,
+    )
+
+    try:
+        from gpplus.models.rff_gpr import _drop_singleton_batch
+    except Exception:  # pragma: no cover
+        def _drop_singleton_batch(t):  # type: ignore[misc]
+            return t.squeeze(0) if t.dim() > 1 and t.shape[0] == 1 else t
+
+    # Align all tensors to the model device (x may be CPU while model is CUDA).
+    param = next(model.parameters())
+    device = param.device
+    dtype = param.dtype
+
+    train_x = model.train_inputs[0]
+    if isinstance(train_x, (tuple, list)):
+        train_x = train_x[0]
+    train_x = _drop_singleton_batch(train_x).to(device=device, dtype=dtype)
+    train_y = _drop_singleton_batch(model.train_targets).to(device=device, dtype=dtype)
+
+    noise = model.likelihood.noise
+    if noise.dim() > 1:
+        noise = noise.reshape(noise.shape[0])
+    noise = noise.to(device=device, dtype=dtype)
+
+    mean_train = model.mean_module(train_x)
+    if mean_train.dim() > 1 and mean_train.shape[0] == 1:
+        mean_train = mean_train.squeeze(0)
+    y_centered = train_y - mean_train.reshape(train_y.shape)
+
+    x_eval = x.detach().to(device=device, dtype=dtype)
+    n = int(x_eval.shape[0])
+    n_used = n
+    if max_points is not None and n > int(max_points):
+        g = torch.Generator(device="cpu")
+        g.manual_seed(int(seed))
+        idx = torch.randperm(n, generator=g)[: int(max_points)]
+        x_eval = x_eval[idx.to(device=device)]
+        n_used = int(x_eval.shape[0])
+
+    was_training = bool(model.training)
+    model.eval()
+    try:
+        with torch.enable_grad():
+            if hasattr(model, "scaled_features"):
+                grad = posterior_mean_grad_wrt_x(
+                    model,
+                    x_eval,
+                    y_centered,
+                    noise,
+                    train_x=train_x,
+                    jitter=jitter,
+                )
+            else:
+                grad = exact_posterior_mean_grad_wrt_x(
+                    model,
+                    x_eval,
+                    noise,
+                    train_x=train_x,
+                    jitter=jitter,
+                )
+    finally:
+        if was_training:
+            model.train()
+
+    grad = grad.detach()
+    if grad.dim() == 1:
+        grad = grad.unsqueeze(0)
+    abs_g = grad.abs()
+    g2 = grad * grad
+    sx2 = model.input_noise_var.detach().to(device=grad.device, dtype=grad.dtype).reshape(-1)
+    if sx2.numel() == 1 and grad.shape[-1] > 1:
+        sx2 = sx2.expand(grad.shape[-1])
+    contrib = g2 * sx2  # (n, D)
+    contrib_mean = contrib.mean(dim=0)
+    contrib_sum = float(contrib_mean.sum().clamp_min(1e-30).item())
+    contrib_frac = contrib_mean / contrib_sum
+
+    grad_mu_abs_mean = [float(v) for v in abs_g.mean(dim=0).cpu().tolist()]
+    grad_mu_abs_median = [float(v) for v in abs_g.median(dim=0).values.cpu().tolist()]
+    grad_mu_sq_mean = [float(v) for v in g2.mean(dim=0).cpu().tolist()]
+    input_noise_contrib_mean = [float(v) for v in contrib_mean.cpu().tolist()]
+    input_noise_contrib_frac = [float(v) for v in contrib_frac.cpu().tolist()]
+    input_noise = [float(v) for v in model.input_noise.detach().cpu().reshape(-1).tolist()]
+    input_noise_var = [float(v) for v in sx2.detach().cpu().tolist()]
+
+    d = len(grad_mu_abs_mean)
+    indices = list(band_indices) if band_indices is not None else list(range(d))
+    entries: list[dict[str, Any]] = []
+    for i in range(d):
+        if noise_space == "pca_components":
+            entry: dict[str, Any] = {"component": i}
+        else:
+            band = int(indices[i]) if i < len(indices) else i
+            entry = {"band_index": band}
+            if wavelengths_nm is not None and band < len(wavelengths_nm):
+                entry["wavelength_nm"] = float(wavelengths_nm[band])
+        entry["input_noise"] = input_noise[i] if i < len(input_noise) else None
+        entry["input_noise_var"] = input_noise_var[i] if i < len(input_noise_var) else None
+        entry["grad_mu_abs_mean"] = grad_mu_abs_mean[i]
+        entry["grad_mu_abs_median"] = grad_mu_abs_median[i]
+        entry["grad_mu_sq_mean"] = grad_mu_sq_mean[i]
+        entry["input_noise_contrib_mean"] = input_noise_contrib_mean[i]
+        entry["input_noise_contrib_frac"] = input_noise_contrib_frac[i]
+        entries.append(entry)
+
+    out: dict[str, Any] = {
+        "nigp_space": noise_space,
+        "n_points_total": n,
+        "n_points_used": n_used,
+        "max_points": int(max_points) if max_points is not None else None,
+        "jitter": float(jitter),
+        "input_noise": input_noise,
+        "input_noise_var": input_noise_var,
+        "grad_mu_abs_mean": grad_mu_abs_mean,
+        "grad_mu_abs_median": grad_mu_abs_median,
+        "grad_mu_sq_mean": grad_mu_sq_mean,
+        "input_noise_contrib_mean": input_noise_contrib_mean,
+        "input_noise_contrib_frac": input_noise_contrib_frac,
+        "effective_input_term_mean": float(contrib.sum(dim=-1).mean().item()),
+        "entries": entries,
+    }
+    if noise_space == "pca_components" and band_indices is not None:
+        out["physical_band_indices"] = [int(b) for b in band_indices]
+    return out
+
+
+def map_input_noise_to_bands(
+    input_noise: Sequence[float],
+    band_indices: Sequence[int],
+    *,
+    input_noise_var: Sequence[float] | None = None,
+    wavelengths_nm: Sequence[float] | None = None,
+    noise_space: str = "bands",
+) -> dict[str, Any]:
+    """Attach per-dimension NIGP input-noise std/var to bands or PCA components."""
+    stds = [float(v) for v in input_noise]
+    vars_ = (
+        [float(v) for v in input_noise_var]
+        if input_noise_var is not None
+        else [s * s for s in stds]
+    )
+    if noise_space == "bands":
+        entries = []
+        for i, band in enumerate(band_indices):
+            entry = {
+                "band_index": int(band),
+                "input_noise": float(stds[i]) if i < len(stds) else None,
+                "input_noise_var": float(vars_[i]) if i < len(vars_) else None,
+            }
+            if wavelengths_nm is not None:
+                entry["wavelength_nm"] = float(wavelengths_nm[int(band)])
+            entries.append(entry)
+        return {
+            "nigp_space": "bands",
+            "entries": entries,
+            "input_noise": stds,
+            "input_noise_var": vars_,
+        }
+
+    entries = [
+        {
+            "component": i,
+            "input_noise": float(stds[i]) if i < len(stds) else None,
+            "input_noise_var": float(vars_[i]) if i < len(vars_) else None,
+        }
+        for i in range(len(stds))
+    ]
+    return {
+        "nigp_space": "pca_components",
+        "physical_band_indices": [int(b) for b in band_indices],
+        "entries": entries,
+        "input_noise": stds,
+        "input_noise_var": vars_,
+    }
+
+
 def compute_per_task_metrics(
     y_true: np.ndarray | torch.Tensor,
     y_pred: np.ndarray | torch.Tensor,

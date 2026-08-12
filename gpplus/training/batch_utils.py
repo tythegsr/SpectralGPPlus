@@ -389,6 +389,7 @@ def build_unbatched_model_shell(batched_model: nn.Module) -> nn.Module:
             ard=ard,
             rff_sampling=batched_model.rff_sampling,
             correct_sorf=bool(getattr(batched_model, "correct_sorf", False)),
+            spectral_kernel=getattr(batched_model, "spectral_kernel", "rbf"),
             batch_shape=torch.Size([]),
         )
     elif isinstance(batched_model, RFFMTGPR):
@@ -401,6 +402,7 @@ def build_unbatched_model_shell(batched_model: nn.Module) -> nn.Module:
             ard=ard,
             rff_sampling=batched_model.rff_sampling,
             correct_sorf=bool(getattr(batched_model, "correct_sorf", False)),
+            spectral_kernel=getattr(batched_model, "spectral_kernel", "rbf"),
             rank_kernel=batched_model.rank_kernel,
             rank_likelihood=batched_model.rank_likelihood,
             batch_shape=torch.Size([]),

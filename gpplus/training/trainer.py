@@ -430,7 +430,17 @@ class GPTrainer:
         if best_run is not None:
             best_loss = best_run["loss"]
             self.model.load_state_dict(best_run["state_dict"])
-            logger.info("Best run found: #%s with loss=%.4f.", best_run["run_index"], best_loss)
+            if best_run.get("aborted"):
+                logger.warning(
+                    "Best run found: #%s with salvaged loss=%.4f (mid-train abort: %s).",
+                    best_run["run_index"],
+                    best_loss,
+                    best_run.get("error", "unknown"),
+                )
+            else:
+                logger.info(
+                    "Best run found: #%s with loss=%.4f.", best_run["run_index"], best_loss
+                )
         else:
             logger.warning("No valid best run found. Model was not updated.")
         return results

@@ -105,6 +105,9 @@ class DefaultParameterInitializer(ParameterInitializer):
             return "covar_factor"
         elif "raw_var" in name and "task_covar" in name:
             return "task_raw_var"
+        elif "raw_input_noise" in name:
+            # Must precede raw_noise: name is raw_input_noise (not a raw_noise substring).
+            return "raw_input_noise"
         elif "raw_noise" in name:
             return "raw_noise"
         elif "weight" in name and param.dim() >= 2:
@@ -147,6 +150,13 @@ class DefaultParameterInitializer(ParameterInitializer):
                 "mean": -2.0,
                 "std": 0.5,
                 "description": "Outputscale parameter - log scale",
+            }
+        elif param_type == "raw_input_noise":
+            return {
+                "method": "normal",
+                "mean": -3.0,
+                "std": 0.35,
+                "description": "NIGP input-noise raw (log10 SoftClamp; σ_x in [1e-4, 0.1])",
             }
         elif param_type == "raw_noise":
             return {
@@ -613,14 +623,16 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             return
 
         self._rff_sampling = rff_kernel.rff_sampling
+        self._spectral_kernel = getattr(rff_kernel, "spectral_kernel", "rbf")
 
         if self.seed is not None:
             torch.manual_seed(self.seed)
 
         logger.info(
-            "RFF weight draws will be generated lazily (%s draws, %s, master seed=%s)",
+            "RFF weight draws will be generated lazily (%s draws, %s, spectral_kernel=%s, master seed=%s)",
             self.num_inits,
             self._rff_sampling.upper(),
+            self._spectral_kernel,
             self.seed,
         )
 
@@ -646,6 +658,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         num_dims = model.train_inputs[0].shape[-1]
         rff_sampling = rff_kernel.rff_sampling
         correct_sorf = bool(getattr(rff_kernel, "correct_sorf", False))
+        spectral_kernel = getattr(rff_kernel, "spectral_kernel", "rbf")
 
         from ..utils.rff_utils import init_rbf_weights
 
@@ -658,6 +671,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
                     dtype=rff_kernel.raw_lengthscale.dtype,
                     rff_sampling=rff_sampling,
                     correct_sorf=correct_sorf,
+                    spectral_kernel=spectral_kernel,
                 )
             )
         weights = self._rff_weight_draws[run_index]
@@ -667,13 +681,15 @@ class RFFParameterInitializer(DefaultParameterInitializer):
             randn_weights=weights,
             spectral=False,
             rff_sampling=rff_sampling,
+            spectral_kernel=spectral_kernel,
         )
 
         invalidate()
         feature_kind = rff_sampling.upper()
         logger.info(
-            "Assigned %s frequencies for run #%s (master seed=%s, lazy draw)",
+            "Assigned %s frequencies (spectral_kernel=%s) for run #%s (master seed=%s, lazy draw)",
             feature_kind,
+            spectral_kernel,
             run_index,
             self.seed,
         )
@@ -713,6 +729,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
         num_dims = model.train_inputs[0].shape[-1]
         rff_sampling = rff_kernel.rff_sampling
         correct_sorf = bool(getattr(rff_kernel, "correct_sorf", False))
+        spectral_kernel = getattr(rff_kernel, "spectral_kernel", "rbf")
         while len(self._rff_weight_draws) < end:
             self._rff_weight_draws.append(
                 init_rbf_weights(
@@ -722,6 +739,7 @@ class RFFParameterInitializer(DefaultParameterInitializer):
                     dtype=rff_kernel.raw_lengthscale.dtype,
                     rff_sampling=rff_sampling,
                     correct_sorf=correct_sorf,
+                    spectral_kernel=spectral_kernel,
                 )
             )
         stacked = torch.stack(self._rff_weight_draws[start_index:end], dim=0)

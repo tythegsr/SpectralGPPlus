@@ -2,10 +2,12 @@ import os
 
 import gpytorch
 import torch
+from torch import nn
 
 from ..config import logger
 from ..kernels import GaussianKernel, LogScaleKernel
 from ..likelihoods import LogGaussianLikelihood
+from ..utils.nigp_utils import input_noise_softclamp, raw_input_noise_init_value
 
 
 class GPR(gpytorch.models.ExactGP):
@@ -30,6 +32,8 @@ class GPR(gpytorch.models.ExactGP):
         mean_module: gpytorch.means.Mean = None,
         kernel_module: gpytorch.kernels.Kernel = None,
         batch_shape: torch.Size | None = None,
+        nigp: bool = False,
+        input_noise_init: float | None = None,
     ):
         """Initializes GPR.
 
@@ -42,6 +46,9 @@ class GPR(gpytorch.models.ExactGP):
             kernel_module (gpytorch.kernels.Kernel, optional): Covariance kernel function.
                 Defaults to a ScaleKernel * Gaussian combo if None.
             batch_shape: Optional leading init-batch shape, e.g. ``torch.Size([num_inits])``.
+            nigp: If True, register learnable per-dimension input noise (classic NIGP).
+            input_noise_init: Optional physical ``σ_x`` placeholder in ``(1e-6, 1)`` before
+                the parameter initializer runs; ``None`` uses mid-range default.
 
         Raises:
             TypeError: If any of `train_x`, `train_y`, or `likelihood` are of incorrect types.
@@ -75,12 +82,6 @@ class GPR(gpytorch.models.ExactGP):
                 input_dim,
             )
 
-        if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
-            logger.error("train_x and train_y must be torch.Tensor instances.")
-            raise TypeError("train_x and train_y must be torch.Tensor instances.")
-
-        logger.debug(f"train_x shape: {train_x.shape}, train_y shape: {train_y.shape}")
-
         if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
             logger.error("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
             raise TypeError("likelihood must be an instance of gpytorch.likelihoods.Likelihood.")
@@ -89,11 +90,47 @@ class GPR(gpytorch.models.ExactGP):
 
         self.mean_module = mean_module
         self.covar_module = kernel_module
+        self.nigp = bool(nigp)
+        # When False (freeze warm-start), MLL ignores σ_x (standard exact GP).
+        self.nigp_correction_enabled = True
 
         # Ensure all components use the same dtype as the input data
         self.mean_module = self.mean_module.to(dtype=self.dtype)
         self.covar_module = self.covar_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)
+
+        if self.nigp:
+            input_dim = int(train_x.shape[-1])
+            raw_init = raw_input_noise_init_value(input_noise_init, dtype=self.dtype)
+            if len(self.batch_shape) > 0:
+                raw_init = raw_init.expand(*self.batch_shape, input_dim).clone()
+            else:
+                raw_init = raw_init.expand(input_dim).clone()
+            self.register_parameter("raw_input_noise", nn.Parameter(raw_init))
+            self.register_constraint(
+                "raw_input_noise",
+                input_noise_softclamp(dtype=self.dtype),
+            )
+            logger.info(
+                "NIGP enabled on GPR: learnable per-dim input noise "
+                "(D=%s, sigma_x=10^SoftClamp(raw) in (1e-6, 1)).",
+                input_dim,
+            )
+
+    @property
+    def input_noise(self) -> torch.Tensor:
+        """Per-dimension input noise std ``σ_x = 10^{SoftClamp(raw)}`` (``nigp=True``)."""
+        if not getattr(self, "nigp", False) or not hasattr(self, "raw_input_noise"):
+            raise AttributeError("Model has no NIGP input_noise (construct with nigp=True).")
+        return torch.pow(
+            10.0, self.raw_input_noise_constraint.transform(self.raw_input_noise)
+        )
+
+    @property
+    def input_noise_var(self) -> torch.Tensor:
+        """Per-dimension input noise variance ``σ_x²``."""
+        s = self.input_noise
+        return s * s
 
     def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
         """Runs the forward pass of the Gaussian Process model with ensembling

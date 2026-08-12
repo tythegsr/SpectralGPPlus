@@ -75,6 +75,36 @@ def evaluate_gp_model(
 
         if isinstance(model.likelihood, MultiLikelihood):
             model.likelihood.set_fidelity_indices(test_x, is_test=True)
+
+        from ..utils.nigp_utils import nigp_correction_enabled
+
+        use_nigp = nigp_correction_enabled(model)
+        if use_nigp:
+            from ..utils.nigp_utils import (
+                effective_noise_variance,
+                exact_posterior_mean_grad_wrt_x,
+            )
+
+            latent_pred = model(test_x)
+            mean = latent_pred.mean
+            f_var = latent_pred.variance
+            noise = model.likelihood.noise
+            if noise.dim() > 1:
+                noise = noise.reshape(noise.shape[0])
+            with torch.enable_grad():
+                grad_mu_test = exact_posterior_mean_grad_wrt_x(
+                    model, test_x, noise, jitter=1e-6
+                )
+            d_test = effective_noise_variance(
+                noise, model.input_noise_var, grad_mu_test
+            )
+            obs_var = (f_var + d_test).clamp_min(0.0)
+            stddev = obs_var.sqrt()
+            lower = mean - 2.0 * stddev
+            upper = mean + 2.0 * stddev
+            logger.info("Evaluation completed (exact NIGP observation noise).")
+            return mean, lower, upper, stddev
+
         observed_pred = model.likelihood(model(test_x))
 
         # Get the mean, lower and upper confidence bounds
@@ -103,6 +133,10 @@ def evaluate_rff_gp_model(
     Default ``woodbury_form="primal"`` uses ``M = I + ΦᵀΦ/σ²``.
     ``woodbury_form="dual"`` factors ``Λ = ΦᵀΦ + σ² I`` (stable for small ``σ²``).
 
+    When ``model.nigp`` is enabled, uses diag-noise Woodbury
+    ``Σ = diag(d) + ΦΦᵀ`` with McHutchon effective noise on train and test
+    (same correction as :meth:`~gpplus.models.rff_gpr.RFFGPR.predict`).
+
     Prefer this over :func:`evaluate_gp_model` for RFF models so inference avoids
     dense n x n linear algebra.
     """
@@ -119,67 +153,133 @@ def evaluate_rff_gp_model(
             return empty, empty, empty, empty, empty
         return empty, empty, empty, empty
 
+    from ..utils.nigp_utils import nigp_correction_enabled
+
+    use_nigp = nigp_correction_enabled(model)
+
     with torch.no_grad():
         train_x = _drop_singleton_batch(model.train_inputs[0])
         train_y = _drop_singleton_batch(model.train_targets)
         z_train = model.train_features()
         noise = model.likelihood.noise
+        if noise.dim() > 1:
+            noise = noise.reshape(noise.shape[0])
         mean_train = model.mean_module(train_x)
         if mean_train.dim() > 1 and mean_train.shape[0] == 1:
             mean_train = mean_train.squeeze(0)
         y_centered = train_y - mean_train
-
-        use_dual = woodbury_form == "dual"
-        if use_dual:
-            chol, noise_clamped, z_lin = woodbury_factor_dual(noise, z_train, jitter=jitter)
-        else:
-            chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
-            z_lin = z_train
 
         mean_chunks = []
         lower_chunks = []
         upper_chunks = []
         f_var_chunks: list[torch.Tensor] = []
         step = n_test if chunk_size <= 0 else chunk_size
-        for start in range(0, n_test, step):
-            chunk_x = test_x[start : start + step]
-            z_test = model.scaled_features(chunk_x)
+
+        if use_nigp:
+            from ..utils.nigp_utils import (
+                effective_noise_variance,
+                posterior_mean_grad_wrt_x,
+            )
+            from ..utils.rff_utils import woodbury_posterior_weights_diag_noise
+
+            # Gradients need an enabled graph; temporarily allow grad for ∇μ only.
+            with torch.enable_grad():
+                grad_mu_train = posterior_mean_grad_wrt_x(
+                    model, train_x, y_centered, noise, jitter=jitter
+                )
+            d_train = effective_noise_variance(
+                noise, model.input_noise_var, grad_mu_train
+            )
+            w, chol, _z_hat = woodbury_posterior_weights_diag_noise(
+                d_train, z_train, y_centered, jitter=jitter
+            )
+            ones = z_train.new_ones(())
+
+            for start in range(0, n_test, step):
+                chunk_x = test_x[start : start + step]
+                z_test = model.scaled_features(chunk_x)
+                z_test_c = z_test.to(dtype=chol.dtype)
+                if w.dim() == 1:
+                    f_mean = (z_test_c @ w).to(dtype=z_test.dtype)
+                else:
+                    f_mean = (
+                        (z_test_c @ w.unsqueeze(-1)).squeeze(-1).to(dtype=z_test.dtype)
+                    )
+                f_mean = f_mean + model.mean_module(chunk_x)
+                f_var = woodbury_predictive_var_diag_dual(ones, z_test, chol=chol)
+                with torch.enable_grad():
+                    grad_mu_test = posterior_mean_grad_wrt_x(
+                        model,
+                        chunk_x,
+                        y_centered,
+                        noise,
+                        train_x=train_x,
+                        jitter=jitter,
+                    )
+                d_test = effective_noise_variance(
+                    noise, model.input_noise_var, grad_mu_test
+                )
+                obs_std = woodbury_predictive_obs_std(f_var, d_test)
+                mean_chunks.append(f_mean)
+                lower_chunks.append(f_mean - 2 * obs_std)
+                upper_chunks.append(f_mean + 2 * obs_std)
+                if return_latent_var:
+                    f_var_chunks.append(f_var)
+        else:
+            use_dual = woodbury_form == "dual"
             if use_dual:
-                f_mean = woodbury_predictive_mean_dual(
-                    noise_clamped, z_lin, z_test, y_centered, chol=chol
+                chol, noise_clamped, z_lin = woodbury_factor_dual(
+                    noise, z_train, jitter=jitter
                 )
-                f_var = woodbury_predictive_var_diag_dual(noise_clamped, z_test, chol=chol)
             else:
-                f_mean = woodbury_predictive_mean(
-                    noise,
-                    z_train,
-                    z_test,
-                    y_centered,
-                    jitter=jitter,
-                    chol=chol,
-                    noise=noise_clamped,
-                )
-                f_var = woodbury_predictive_var_diag(
-                    noise,
-                    z_train,
-                    z_test,
-                    jitter=jitter,
-                    chol=chol,
-                    noise=noise_clamped,
-                )
-            f_mean = f_mean + model.mean_module(chunk_x)
-            obs_std = woodbury_predictive_obs_std(f_var, noise)
-            mean_chunks.append(f_mean)
-            lower_chunks.append(f_mean - 2 * obs_std)
-            upper_chunks.append(f_mean + 2 * obs_std)
-            if return_latent_var:
-                f_var_chunks.append(f_var)
+                chol, noise_clamped = woodbury_factor(noise, z_train, jitter=jitter)
+                z_lin = z_train
+
+            for start in range(0, n_test, step):
+                chunk_x = test_x[start : start + step]
+                z_test = model.scaled_features(chunk_x)
+                if use_dual:
+                    f_mean = woodbury_predictive_mean_dual(
+                        noise_clamped, z_lin, z_test, y_centered, chol=chol
+                    )
+                    f_var = woodbury_predictive_var_diag_dual(
+                        noise_clamped, z_test, chol=chol
+                    )
+                else:
+                    f_mean = woodbury_predictive_mean(
+                        noise,
+                        z_train,
+                        z_test,
+                        y_centered,
+                        jitter=jitter,
+                        chol=chol,
+                        noise=noise_clamped,
+                    )
+                    f_var = woodbury_predictive_var_diag(
+                        noise,
+                        z_train,
+                        z_test,
+                        jitter=jitter,
+                        chol=chol,
+                        noise=noise_clamped,
+                    )
+                f_mean = f_mean + model.mean_module(chunk_x)
+                obs_std = woodbury_predictive_obs_std(f_var, noise)
+                mean_chunks.append(f_mean)
+                lower_chunks.append(f_mean - 2 * obs_std)
+                upper_chunks.append(f_mean + 2 * obs_std)
+                if return_latent_var:
+                    f_var_chunks.append(f_var)
+
         mean = torch.cat(mean_chunks, dim=0)
         lower = torch.cat(lower_chunks, dim=0)
         upper = torch.cat(upper_chunks, dim=0)
         stddev = (upper - lower) / 4.0
 
-    logger.info("RFF evaluation completed.")
+    logger.info(
+        "RFF evaluation completed%s.",
+        " (NIGP observation noise)" if use_nigp else "",
+    )
     if return_latent_var:
         f_var_out = torch.cat(f_var_chunks, dim=0)
         return mean, lower, upper, stddev, f_var_out
@@ -276,10 +376,14 @@ def evaluate_rff_mt_gp_model(
     Default ``method="eigen"`` (alias of ``primal_eigen``). Factors the Woodbury
     middle matrix once per call and reuses it across test chunks.
 
+    When ``model.nigp`` correction is enabled, uses per-(i,t) diag-noise Woodbury
+    with McHutchon effective noise on train and test.
+
     Returns mean, lower, upper, stddev each of shape ``(n_test, T)``.
     If ``return_latent_var`` is True, also returns latent ``f_var`` (before adding noise).
     """
     from ..models.rff_mtgpr import RFFMTGPR
+    from ..utils.nigp_utils import nigp_correction_enabled
 
     if not isinstance(model, RFFMTGPR):
         raise TypeError("evaluate_rff_mt_gp_model requires RFFMTGPR.")
@@ -298,6 +402,8 @@ def evaluate_rff_mt_gp_model(
             return empty, empty, empty, empty, empty
         return empty, empty, empty, empty
 
+    use_nigp = nigp_correction_enabled(model)
+
     with torch.no_grad():
         train_x = _drop_singleton_batch(model.train_inputs[0])
         train_y = _drop_singleton_batch(model.train_targets)
@@ -307,59 +413,113 @@ def evaluate_rff_mt_gp_model(
         mean_train = model.mean_module(train_x)
         y_centered = flatten_multitask_targets(train_y - mean_train)
         task_noises = model.task_noises()
-        factor, noise = woodbury_factor_mt(
-            task_noises, phi_train, r_b, jitter=jitter, method=method
-        )
 
         step = n_test if chunk_size <= 0 else chunk_size
         mean_chunks: list[torch.Tensor] = []
         lower_chunks: list[torch.Tensor] = []
         upper_chunks: list[torch.Tensor] = []
         f_var_chunks: list[torch.Tensor] = []
-        for start in range(0, n_test, step):
-            chunk_x = test_x[start : start + step]
-            phi_test = model.scaled_spatial_features(chunk_x)
-            f_mean = woodbury_predictive_mean_mt(
-                task_noises,
-                phi_train,
-                phi_test,
-                r_b,
-                n_train,
-                y_centered,
-                jitter=jitter,
-                factor=factor,
-                noise=noise,
-                method=method,
+
+        if use_nigp:
+            from ..utils.nigp_utils import (
+                effective_noise_variance_mt,
+                posterior_mean_grad_wrt_x_mt,
             )
-            f_mean = unflatten_multitask_targets(f_mean, num_tasks) + model.mean_module(chunk_x)
-            f_var = unflatten_multitask_targets(
-                woodbury_predictive_var_diag_mt(
+            from ..utils.rff_utils import woodbury_predict_mt_diag_noise
+
+            with torch.enable_grad():
+                grad_mu_train = posterior_mean_grad_wrt_x_mt(
+                    model, train_x, y_centered, task_noises, jitter=jitter
+                )
+            d_train = effective_noise_variance_mt(
+                task_noises, model.input_noise_var, grad_mu_train
+            )
+
+            for start in range(0, n_test, step):
+                chunk_x = test_x[start : start + step]
+                phi_test = model.scaled_spatial_features(chunk_x)
+                with torch.enable_grad():
+                    grad_mu_test = posterior_mean_grad_wrt_x_mt(
+                        model,
+                        chunk_x,
+                        y_centered,
+                        task_noises,
+                        train_x=train_x,
+                        jitter=jitter,
+                    )
+                d_test = effective_noise_variance_mt(
+                    task_noises, model.input_noise_var, grad_mu_test
+                )
+                f_mean, f_var, obs_std = woodbury_predict_mt_diag_noise(
+                    d_train,
+                    phi_train,
+                    phi_test,
+                    r_b,
+                    n_train,
+                    num_tasks,
+                    y_centered,
+                    jitter=jitter,
+                    d_test=d_test,
+                )
+                f_mean = f_mean + model.mean_module(chunk_x)
+                mean_chunks.append(f_mean)
+                lower_chunks.append(f_mean - 2 * obs_std)
+                upper_chunks.append(f_mean + 2 * obs_std)
+                if return_latent_var:
+                    f_var_chunks.append(f_var)
+        else:
+            factor, noise = woodbury_factor_mt(
+                task_noises, phi_train, r_b, jitter=jitter, method=method
+            )
+            for start in range(0, n_test, step):
+                chunk_x = test_x[start : start + step]
+                phi_test = model.scaled_spatial_features(chunk_x)
+                f_mean = woodbury_predictive_mean_mt(
                     task_noises,
                     phi_train,
                     phi_test,
                     r_b,
                     n_train,
+                    y_centered,
                     jitter=jitter,
                     factor=factor,
                     noise=noise,
                     method=method,
-                ),
-                num_tasks,
-            )
-            noise_rows = task_noises.view(1, -1).expand(f_mean.shape[0], -1)
-            obs_std = woodbury_predictive_obs_std(f_var, noise_rows)
-            mean_chunks.append(f_mean)
-            lower_chunks.append(f_mean - 2 * obs_std)
-            upper_chunks.append(f_mean + 2 * obs_std)
-            if return_latent_var:
-                f_var_chunks.append(f_var)
+                )
+                f_mean = unflatten_multitask_targets(f_mean, num_tasks) + model.mean_module(
+                    chunk_x
+                )
+                f_var = unflatten_multitask_targets(
+                    woodbury_predictive_var_diag_mt(
+                        task_noises,
+                        phi_train,
+                        phi_test,
+                        r_b,
+                        n_train,
+                        jitter=jitter,
+                        factor=factor,
+                        noise=noise,
+                        method=method,
+                    ),
+                    num_tasks,
+                )
+                noise_rows = task_noises.view(1, -1).expand(f_mean.shape[0], -1)
+                obs_std = woodbury_predictive_obs_std(f_var, noise_rows)
+                mean_chunks.append(f_mean)
+                lower_chunks.append(f_mean - 2 * obs_std)
+                upper_chunks.append(f_mean + 2 * obs_std)
+                if return_latent_var:
+                    f_var_chunks.append(f_var)
 
         mean = torch.cat(mean_chunks, dim=0)
         lower = torch.cat(lower_chunks, dim=0)
         upper = torch.cat(upper_chunks, dim=0)
         stddev = (upper - lower) / 4.0
 
-    logger.info("RFF multitask evaluation completed.")
+    logger.info(
+        "RFF multitask evaluation completed%s.",
+        " (NIGP observation noise)" if use_nigp else "",
+    )
     if return_latent_var:
         f_var_out = torch.cat(f_var_chunks, dim=0)
         return mean, lower, upper, stddev, f_var_out

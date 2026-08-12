@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from ..config import logger
+from ..utils.line_profile import profile
 from .callbacks import Callback
 from .optimizers import LBFGSScipy
 from .stop_conditions import (
@@ -118,6 +119,7 @@ class GPTrainerSingleProcess:
         for cb in self.callbacks:
             getattr(cb, hook_name)(ctx)
 
+    @profile
     def _negative_mll_loss(self, mll, train_x: torch.Tensor, train_y: torch.Tensor) -> torch.Tensor:
         """MLL loss; skips ExactGP forward when using Woodbury MLL."""
         if isinstance(mll, _WOODBURY_MLL_TYPES):
@@ -175,6 +177,8 @@ class GPTrainerSingleProcess:
         no_improvement_epochs = 0
         previous_loss = None
         epochs_trained = 0
+        abort_error: str | None = None
+        abort_epoch: int | None = None
 
         self._emit_callbacks(
             "on_train_start",
@@ -195,7 +199,23 @@ class GPTrainerSingleProcess:
                     "on_epoch_start",
                     {"epoch": epoch, "model": self.model, "trainer": self, "device": self.device},
                 )
-                loss = train_epoch(optimizer, mll)
+                try:
+                    loss = train_epoch(optimizer, mll)
+                except Exception as exc:
+                    # Keep the best earlier checkpoint instead of discarding the run.
+                    if best_state_dict is not None:
+                        abort_error = str(exc)
+                        abort_epoch = epoch
+                        logger.exception(
+                            "Training aborted at epoch %s/%s; recovering best checkpoint "
+                            "(best_loss=%.6f). Error: %s",
+                            epoch + 1,
+                            self.num_epochs,
+                            best_loss,
+                            exc,
+                        )
+                        break
+                    raise
                 self._emit_callbacks(
                     "on_epoch_end",
                     {
@@ -210,7 +230,8 @@ class GPTrainerSingleProcess:
                     best_loss = loss
                     best_state_dict = copy.deepcopy(self.model.state_dict())
                     no_improvement_epochs = 0
-                else:
+                elif epoch + 1 > self.min_epochs:
+                    # Do not accumulate patience before min_epochs (e.g. NIGP freeze).
                     no_improvement_epochs += 1
                 stop_context = {
                     "epoch": epoch,
@@ -234,12 +255,22 @@ class GPTrainerSingleProcess:
                 previous_loss = loss
 
         final_lr = _optimizer_lr(optimizer)
-        logger.info("Training completed. Best loss: %.6f", best_loss)
+        if abort_error is not None:
+            logger.warning(
+                "Training ended early via salvage. Best loss: %.6f (abort at epoch %s).",
+                best_loss,
+                abort_epoch + 1 if abort_epoch is not None else "?",
+            )
+        else:
+            logger.info("Training completed. Best loss: %.6f", best_loss)
         logger.info("Total epochs trained: %s", epochs_trained)
         if final_lr is not None:
             logger.info("Final learning rate: %g", final_lr)
         if best_state_dict is None:
             logger.warning("No model state was captured during training; verify epoch count and optimizer behavior.")
+        else:
+            # Ensure callbacks / callers see the best weights, not a crashed mid-step state.
+            self.model.load_state_dict(best_state_dict)
 
         final_epoch = max(0, epochs_trained - 1)
         self._emit_callbacks(
@@ -251,6 +282,8 @@ class GPTrainerSingleProcess:
                 "best_loss": best_loss,
                 "best_state_dict": best_state_dict,
                 "device": self.device,
+                "aborted": abort_error is not None,
+                "abort_error": abort_error,
             },
         )
         callback_data: dict = {}
@@ -267,8 +300,14 @@ class GPTrainerSingleProcess:
         }
         if final_lr is not None:
             result["final_lr"] = final_lr
+        if abort_error is not None:
+            result["error"] = abort_error
+            result["aborted"] = True
+            if abort_epoch is not None:
+                result["aborted_epoch"] = abort_epoch
         return result
 
+    @profile
     def _train_standard_epoch(self, optimizer, mll) -> float:
         optimizer.zero_grad()
         train_x = self.train_x.to(dtype=self.dtype)

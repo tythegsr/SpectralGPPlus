@@ -58,11 +58,14 @@ from experiments_toa.s2_reporting import (
 from experiments_toa.s2_utils import (
     apply_x_transform,
     compute_log_scale_extra_metrics,
+    compute_nigp_grad_diagnostics,
     compute_per_task_metrics,
     extract_ard_lengthscales,
+    extract_nigp_input_noise,
     macro_metric,
     macro_rrmse,
     map_ard_to_bands,
+    map_input_noise_to_bands,
     select_bands,
 )
 from experiments_toa.s2_bound_penalty import (
@@ -77,6 +80,7 @@ from experiments_toa.s2_y_transform import (
     task_uses_log_scale,
     task_uses_logit_scale,
 )
+from gpplus.means import NeuralMean
 from gpplus.models import RFFGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
@@ -95,7 +99,11 @@ from experiments_RFF.rff_gp_defaults import (
     rff_mll_class,
     woodbury_jitter_for_dtype,
 )
-from gpplus.training import bound_penalized_rff_mll_class, pac_bayes_mll_class
+from gpplus.training import (
+    bound_penalized_rff_mll_class,
+    nigp_woodbury_mll_class,
+    pac_bayes_mll_class,
+)
 from mtgpr_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
     DEFAULT_LBFGS_KWARGS,
@@ -113,6 +121,7 @@ from rff_experiment_utils import extract_learned_likelihood_noise
 from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
 
 RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
+SPECTRAL_KERNEL_CHOICES = ("rbf", "matern32")
 
 
 def run_s2_toa_stgp(
@@ -120,6 +129,7 @@ def run_s2_toa_stgp(
     n_test: int = 5000,
     num_rff: int | None = None,
     rff_sampling: Literal["rff", "orf", "sorf"] = "rff",
+    spectral_kernel: Literal["rbf", "matern32"] = "rbf",
     seed: int = 42,
     num_inits: int = 1,
     num_epochs: int = 1000,
@@ -175,6 +185,14 @@ def run_s2_toa_stgp(
     pac_bayes_temperature: float = 1.0,
     pac_bayes_prior_std: float = 1.0,
     pac_bayes_posterior_std: float = 0.1,
+    nigp: bool = False,
+    freeze_epoch_nigp: int = 100,
+    nigp_slope_refreshes: int | None = None,
+    freeze_epoch_noise: int = 0,
+    adam_stop_patience: int | None = None,
+    mean_type: Literal["constant", "neural"] = "constant",
+    neural_mean_hidden: Sequence[int] | None = (64, 32),
+    neural_mean_activation: str = "relu",
 ) -> dict:
     """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
     if init_batch_size is None:
@@ -186,8 +204,23 @@ def run_s2_toa_stgp(
         raise ValueError(
             f"num_inits ({num_inits}) must be divisible by init_batch_size ({init_batch_size})."
         )
+    if mean_type not in ("constant", "neural"):
+        raise ValueError(f"mean_type must be 'constant' or 'neural', got {mean_type!r}")
+    if mean_type == "neural" and train_mode == "batched":
+        raise ValueError(
+            "NeuralMean does not support train_mode='batched' (no batch_shape). "
+            "Use train_mode='independent'."
+        )
+    if mean_type == "neural":
+        if neural_mean_hidden is None:
+            neural_mean_hidden = (64, 32)
+        neural_mean_hidden = tuple(int(d) for d in neural_mean_hidden)
     if rff_sampling not in RFF_SAMPLING_CHOICES:
         raise ValueError(f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}")
+    if spectral_kernel not in SPECTRAL_KERNEL_CHOICES:
+        raise ValueError(
+            f"spectral_kernel must be one of {SPECTRAL_KERNEL_CHOICES}, got {spectral_kernel!r}"
+        )
     if bound_penalty_lambda_learnable and float(bound_penalty_lambda) < float(bound_penalty_lam_min):
         raise ValueError(
             f"bound_penalty_lambda ({bound_penalty_lambda}) must be >= "
@@ -215,18 +248,25 @@ def run_s2_toa_stgp(
     if num_rff is None:
         num_rff = min(512, max(64, n_train // 3))
 
+    if adam_stop_patience is None:
+        adam_stop_patience = int(DEFAULT_TOA_ADAM_STOP_PATIENCE)
+    else:
+        adam_stop_patience = int(adam_stop_patience)
+    if adam_stop_patience < 1:
+        raise ValueError(f"adam_stop_patience must be >= 1, got {adam_stop_patience}.")
+
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
         default_optimizer_kwargs = DEFAULT_LBFGS_KWARGS
         stop_conditions = [
-            ConvergencePatienceStopCondition(patience=10),
+            ConvergencePatienceStopCondition(patience=adam_stop_patience),
             MinLossChangeStopCondition(min_loss_change=1e-7),
         ]
     else:
         optimizer_class = torch.optim.Adam
         default_optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": DEFAULT_TOA_ADAM_LR}
         stop_conditions = [
-            ConvergencePatienceStopCondition(patience=DEFAULT_TOA_ADAM_STOP_PATIENCE),
+            ConvergencePatienceStopCondition(patience=adam_stop_patience),
         ]
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
@@ -237,14 +277,17 @@ def run_s2_toa_stgp(
             f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{pca_title_token}_"
             f"{rff_sampling}D{num_rff}"
         )
+    if spectral_kernel != "rbf":
+        title = f"{title}_{spectral_kernel}"
     feature_dim = 2 * num_rff
     sampling_label = rff_sampling.upper()
     print("=" * 60)
     print(title)
     print(
         f"S2 Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
-        f"ARD={ard}, dtype={dtype}, inits={num_inits}, init_batch_size={init_batch_size}, "
-        f"epochs={num_epochs}, tasks={names}, input={input_variable}"
+        f"spectral_kernel={spectral_kernel}, ARD={ard}, dtype={dtype}, inits={num_inits}, "
+        f"init_batch_size={init_batch_size}, epochs={num_epochs}, tasks={names}, "
+        f"input={input_variable}"
         + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
         + (f", pca={n_components_by_task}" if n_components_by_task is not None else "")
         + (f", train_mode={train_mode}" if train_mode != "independent" else "")
@@ -329,6 +372,14 @@ def run_s2_toa_stgp(
             f"PAC-Bayes MLL: on (temperature={pac_bayes_temperature}, "
             f"prior_std={pac_bayes_prior_std}, posterior_std={pac_bayes_posterior_std})"
         )
+    if nigp:
+        print(
+            f"NIGP: on (independent input noise, "
+            f"sigma_x=10^SoftClamp(raw), freeze_epochs={int(freeze_epoch_nigp)}, "
+            f"slope_refreshes={nigp_slope_refreshes})"
+        )
+    else:
+        print("NIGP: off")
     learned_lambda_by_task: dict[str, float | None] = {}
     wavelengths_np = wavelengths.detach().cpu().numpy()
     x_test_orig = x_test_full.clone()
@@ -443,6 +494,24 @@ def run_s2_toa_stgp(
                 y_val_scaled = y_va_model
 
         callbacks = []
+        if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1:
+            from gpplus.training import NIGPInputNoiseFreezeCallback
+
+            callbacks.append(
+                NIGPInputNoiseFreezeCallback(
+                    freeze_epochs=int(freeze_epoch_nigp),
+                    verbose=training_verbose,
+                )
+            )
+        if int(freeze_epoch_noise) > 0 and num_epochs > 1:
+            from gpplus.training import LikelihoodNoiseFreezeCallback
+
+            callbacks.append(
+                LikelihoodNoiseFreezeCallback(
+                    freeze_epochs=int(freeze_epoch_noise),
+                    verbose=training_verbose,
+                )
+            )
         if num_epochs > 1 and training_verbose:
             callbacks.append(
                 make_train_loss_callback(
@@ -513,18 +582,45 @@ def run_s2_toa_stgp(
             pcs_merged = dict(initializer_kwargs.get("parameter_configs") or {})
             pcs_merged.update(override_pcs)
             initializer_kwargs = {**initializer_kwargs, "parameter_configs": pcs_merged}
+        mean_module = None
+        if mean_type == "neural":
+            mean_module = NeuralMean.from_hidden(
+                int(x_tr.shape[-1]),
+                neural_mean_hidden,
+                activation=neural_mean_activation,
+            )
         model = RFFGPR(
             x_tr,
             y_tr_fit,
             likelihood=likelihood,
+            mean_module=mean_module,
             num_rff=num_rff,
             ard=ard,
             rff_sampling=rff_sampling,
             correct_sorf=correct_sorf,
+            spectral_kernel=spectral_kernel,
             batch_shape=lik_batch_shape if len(lik_batch_shape) > 0 else None,
             init_batch_size=concurrent if train_mode == "batched" else None,
+            nigp=bool(nigp),
         )
         bound_cfg = bound_by_task.get(task_name)
+        nigp_mll_kwargs: dict = {}
+        if nigp:
+            slope_r = (
+                None
+                if nigp_slope_refreshes is None
+                else int(nigp_slope_refreshes)
+            )
+            if slope_r is not None:
+                nigp_mll_kwargs["nigp_slope_refreshes"] = slope_r
+                nigp_mll_kwargs["nigp_active_epochs"] = max(
+                    1, int(num_epochs) - max(0, int(freeze_epoch_nigp))
+                )
+            nigp_base_mll = nigp_woodbury_mll_class(
+                DEFAULT_WOODBURY_FORM, **nigp_mll_kwargs
+            )
+        else:
+            nigp_base_mll = None
         if bound_cfg is not None and bound_penalty_lambda_learnable:
             model.register_learnable_bound_penalty_lambda(
                 lam_init=bound_penalty_lambda,
@@ -538,7 +634,10 @@ def run_s2_toa_stgp(
                 y_mean=y_mean_b,
                 y_std=y_std_b,
                 woodbury_form=DEFAULT_WOODBURY_FORM,
+                base_mll_class=nigp_base_mll,
             )
+        elif nigp:
+            task_mll_class = nigp_base_mll
         else:
             task_mll_class = rff_mll_class()
         if pac_bayes:
@@ -569,6 +668,11 @@ def run_s2_toa_stgp(
             parallel_verbose=parallel_verbose,
             train_mode=train_mode,
             init_batch_size=concurrent if train_mode == "batched" else None,
+            min_epochs=(
+                int(freeze_epoch_nigp)
+                if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
+                else 0
+            ),
         )
         t_train = time.time()
         runs = trainer.train()
@@ -587,6 +691,17 @@ def run_s2_toa_stgp(
         best_run = min(successful, key=lambda r: r["loss"])
         model.load_state_dict(best_run["state_dict"])
         best_loss = float(best_run["loss"])
+        if best_run.get("aborted"):
+            print(
+                f"WARNING: {task_name} training aborted mid-run; using salvaged best "
+                f"epoch (loss={best_loss:.6f}"
+                + (
+                    f", abort_epoch={int(best_run['aborted_epoch']) + 1}"
+                    if best_run.get("aborted_epoch") is not None
+                    else ""
+                )
+                + f"). Error: {best_run.get('error', 'unknown')}"
+            )
         final_bound_lam = learned_bound_penalty_lambda(model)
         if final_bound_lam is not None:
             learned_lambda_by_task[task_name] = final_bound_lam
@@ -594,11 +709,12 @@ def run_s2_toa_stgp(
         y_std_for_noise = y_scaler.std.squeeze() if y_scaler is not None else None
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
         ard_info = extract_ard_lengthscales(model)
+        ard_space = "pca_components" if n_components_by_task is not None else "bands"
         ard_mapped = map_ard_to_bands(
             ard_info["lengthscale"],
             band_indices,
             wavelengths_nm=wavelengths_np,
-            ard_space="pca_components" if n_components_by_task is not None else "bands",
+            ard_space=ard_space,
         )
         if ard_info["outputscale"] is not None:
             ard_mapped["outputscale"] = ard_info["outputscale"]
@@ -606,6 +722,44 @@ def run_s2_toa_stgp(
         ard_mapped["model_input_dim"] = int(x_tr.shape[-1])
         if pca_meta is not None:
             ard_mapped["pca"] = pca_meta
+        nigp_info = extract_nigp_input_noise(model)
+        nigp_mapped = None
+        if nigp_info is not None:
+            nigp_mapped = map_input_noise_to_bands(
+                nigp_info["input_noise"],
+                band_indices,
+                input_noise_var=nigp_info["input_noise_var"],
+                wavelengths_nm=wavelengths_np,
+                noise_space=ard_space,
+            )
+            nigp_mapped["raw_input_noise"] = nigp_info["raw_input_noise"]
+            try:
+                nigp_grad = compute_nigp_grad_diagnostics(
+                    model,
+                    x_tr,
+                    band_indices=band_indices,
+                    wavelengths_nm=wavelengths_np,
+                    noise_space=ard_space,
+                )
+            except Exception as exc:
+                print(f"{task_name} NIGP grad diagnostics failed: {exc}")
+                nigp_grad = None
+            if nigp_grad is not None:
+                for key in (
+                    "grad_mu_abs_mean",
+                    "grad_mu_abs_median",
+                    "grad_mu_sq_mean",
+                    "input_noise_contrib_mean",
+                    "input_noise_contrib_frac",
+                    "effective_input_term_mean",
+                    "n_points_total",
+                    "n_points_used",
+                    "max_points",
+                    "jitter",
+                ):
+                    if key in nigp_grad:
+                        nigp_mapped[key] = nigp_grad[key]
+                nigp_mapped["entries"] = nigp_grad["entries"]
         input_bands_by_task[task_name] = {
             "indices": list(band_indices),
             "wavelength_nm": [float(wavelengths_np[i]) for i in band_indices],
@@ -613,6 +767,15 @@ def run_s2_toa_stgp(
             "x_scaling_type": x_scaling_type,
             **ard_mapped,
         }
+        if nigp_mapped is not None:
+            input_bands_by_task[task_name]["nigp"] = nigp_mapped
+            input_bands_by_task[task_name]["input_noise"] = nigp_mapped["input_noise"]
+            input_bands_by_task[task_name]["input_noise_var"] = nigp_mapped[
+                "input_noise_var"
+            ]
+            input_bands_by_task[task_name]["raw_input_noise"] = nigp_mapped[
+                "raw_input_noise"
+            ]
 
         if save_checkpoint and save_path:
             try:
@@ -647,6 +810,7 @@ def run_s2_toa_stgp(
                         "ard": ard,
                         "rff_sampling": rff_sampling,
                         "correct_sorf": correct_sorf,
+                        "spectral_kernel": spectral_kernel,
                         "n_pca_components": (
                             int(n_components_by_task[task_name])
                             if n_components_by_task is not None
@@ -657,6 +821,14 @@ def run_s2_toa_stgp(
                         "dataset": "s2",
                         "band_indices": list(band_indices),
                         "ard_mapping": ard_mapped,
+                        "nigp": bool(nigp),
+                        "freeze_epoch_nigp": int(freeze_epoch_nigp),
+                        "nigp_slope_refreshes": (
+                            None
+                            if nigp_slope_refreshes is None
+                            else int(nigp_slope_refreshes)
+                        ),
+                        "nigp_mapping": nigp_mapped,
                         "data_meta": data_meta,
                         "log_scale": task_uses_log_scale(task_name, warps=warps),
                         "logit_scale": task_uses_logit_scale(task_name, warps=warps),
@@ -728,6 +900,27 @@ def run_s2_toa_stgp(
             "n_bands": len(band_indices),
             "model_input_dim": int(x_tr.shape[-1]),
         }
+        if best_run.get("aborted"):
+            tm["training_aborted"] = True
+            tm["abort_error"] = str(best_run.get("error", "unknown"))
+            if best_run.get("aborted_epoch") is not None:
+                tm["aborted_epoch"] = int(best_run["aborted_epoch"]) + 1
+        if nigp_info is not None:
+            tm["input_noise"] = list(nigp_info["input_noise"])
+            tm["input_noise_var"] = list(nigp_info["input_noise_var"])
+            tm["raw_input_noise"] = list(nigp_info["raw_input_noise"])
+            if nigp_mapped is not None:
+                tm["nigp_band_mapping"] = nigp_mapped
+                for key in (
+                    "grad_mu_abs_mean",
+                    "grad_mu_abs_median",
+                    "grad_mu_sq_mean",
+                    "input_noise_contrib_mean",
+                    "input_noise_contrib_frac",
+                    "effective_input_term_mean",
+                ):
+                    if key in nigp_mapped:
+                        tm[key] = nigp_mapped[key]
         if best_run.get("final_lr") is not None:
             tm["final_lr"] = float(best_run["final_lr"])
         if noise_prior_meta is not None:
@@ -837,6 +1030,7 @@ def run_s2_toa_stgp(
         "num_rff": num_rff,
         "rff_sampling": rff_sampling,
         "correct_sorf": correct_sorf,
+        "spectral_kernel": spectral_kernel,
         "feature_dim": feature_dim,
         "ard": ard,
         "model_class": "RFFGPR",
@@ -880,6 +1074,19 @@ def run_s2_toa_stgp(
         "pac_bayes_temperature": float(pac_bayes_temperature),
         "pac_bayes_prior_std": float(pac_bayes_prior_std),
         "pac_bayes_posterior_std": float(pac_bayes_posterior_std),
+        "nigp": bool(nigp),
+        "freeze_epoch_nigp": int(freeze_epoch_nigp),
+        "nigp_slope_refreshes": (
+            None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
+        ),
+        "adam_stop_patience": int(adam_stop_patience),
+        "mean_type": mean_type,
+        "neural_mean_hidden": (
+            list(neural_mean_hidden) if mean_type == "neural" and neural_mean_hidden is not None else None
+        ),
+        "neural_mean_activation": (
+            str(neural_mean_activation) if mean_type == "neural" else None
+        ),
         "response_noise_prior": bool(response_noise_prior),
         "noise_var_fraction": float(noise_var_fraction),
         "noise_prior_log_scale": float(noise_prior_log_scale),

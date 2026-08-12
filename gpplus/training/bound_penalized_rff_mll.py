@@ -51,16 +51,13 @@ class BoundPenalizedRFFWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikel
         # Fixed stride subsample (deterministic, covers the train set evenly).
         return torch.linspace(0, n - 1, steps=int(max_pts), device=device).round().long().unique()
 
-    def forward(
+    def _apply_soft_bound_penalty(
         self,
-        function_samples: torch.Tensor | gpytorch.distributions.MultivariateNormal,
+        mll: torch.Tensor,
         target: torch.Tensor,
-        *args,
-        **kwargs,
     ) -> torch.Tensor:
+        """Subtract ``lam * soft_bound_penalty`` from an already-computed Woodbury MLL."""
         from ..models.rff_gpr import _drop_singleton_batch
-
-        mll = super().forward(function_samples, target, *args, **kwargs)
 
         model = self.model
         train_x = _drop_singleton_batch(model.train_inputs[0])
@@ -117,6 +114,16 @@ class BoundPenalizedRFFWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikel
             lam = penalty.new_tensor(float(cfg.lam))
         return mll - lam * penalty
 
+    def forward(
+        self,
+        function_samples: torch.Tensor | gpytorch.distributions.MultivariateNormal,
+        target: torch.Tensor,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        mll = super().forward(function_samples, target, *args, **kwargs)
+        return self._apply_soft_bound_penalty(mll, target)
+
 
 def bound_penalized_rff_mll_class(
     bound_config: BoundConfig,
@@ -124,10 +131,79 @@ def bound_penalized_rff_mll_class(
     y_mean: float | torch.Tensor = 0.0,
     y_std: float | torch.Tensor = 1.0,
     woodbury_form: WoodburyForm = "dual",
+    base_mll_class: type[RFFWoodburyMarginalLogLikelihood] | None = None,
 ) -> type[BoundPenalizedRFFWoodburyMarginalLogLikelihood]:
-    """Bind bound config + y scaler for :class:`~gpplus.training.GPTrainer`."""
+    """Bind bound config + y scaler for :class:`~gpplus.training.GPTrainer`.
 
-    class BoundConfiguredMLL(BoundPenalizedRFFWoodburyMarginalLogLikelihood):
+    ``base_mll_class`` defaults to :class:`BoundPenalizedRFFWoodburyMarginalLogLikelihood`
+    (homoskedastic Woodbury). Pass
+    :class:`~gpplus.training.nigp_mll.NIGPWoodburyMarginalLogLikelihood` to stack
+    soft bounds on top of NIGP diag-noise Woodbury via ``super().forward``.
+    """
+    if base_mll_class is None:
+        parent = BoundPenalizedRFFWoodburyMarginalLogLikelihood
+    else:
+        if not (
+            isinstance(base_mll_class, type)
+            and issubclass(base_mll_class, RFFWoodburyMarginalLogLikelihood)
+        ):
+            raise TypeError(
+                "base_mll_class must subclass RFFWoodburyMarginalLogLikelihood, "
+                f"got {base_mll_class}."
+            )
+
+        class BoundPenalizedFromBase(base_mll_class):
+            """Bound penalty on top of an alternate Woodbury MLL (e.g. NIGP)."""
+
+            def __init__(
+                self,
+                likelihood,
+                model,
+                jitter: float = 1e-6,
+                woodbury_form: WoodburyForm = "primal",
+                *,
+                bound_config: BoundConfig,
+                y_mean: float | torch.Tensor = 0.0,
+                y_std: float | torch.Tensor = 1.0,
+            ):
+                super().__init__(
+                    likelihood, model, jitter=jitter, woodbury_form=woodbury_form
+                )
+                self.bound_config = bound_config
+                self.y_mean = (
+                    float(y_mean) if not torch.is_tensor(y_mean) else float(y_mean.detach().cpu())
+                )
+                self.y_std = (
+                    float(y_std) if not torch.is_tensor(y_std) else float(y_std.detach().cpu())
+                )
+                if self.y_std <= 0:
+                    raise ValueError(
+                        f"y_std must be > 0 for bound penalty unstandardization, got {self.y_std}"
+                    )
+
+            _constraint_indices = (
+                BoundPenalizedRFFWoodburyMarginalLogLikelihood._constraint_indices
+            )
+            _apply_soft_bound_penalty = (
+                BoundPenalizedRFFWoodburyMarginalLogLikelihood._apply_soft_bound_penalty
+            )
+
+            def forward(
+                self,
+                function_samples,
+                target,
+                *args,
+                **kwargs,
+            ):
+                # Must be a real method on this class so zero-arg super() resolves
+                # to base_mll_class (e.g. NIGP). Copying BoundPenalized*.forward
+                # breaks because that method's __class__ cell is the wrong type.
+                mll = super().forward(function_samples, target, *args, **kwargs)
+                return self._apply_soft_bound_penalty(mll, target)
+
+        parent = BoundPenalizedFromBase
+
+    class BoundConfiguredMLL(parent):
         def __init__(self, likelihood, model, jitter: float = 1e-6):
             super().__init__(
                 likelihood,

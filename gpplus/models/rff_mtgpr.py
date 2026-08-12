@@ -8,17 +8,27 @@ import gpytorch
 import torch
 from gpytorch.distributions import MultitaskMultivariateNormal
 from gpytorch.priors import Prior
+from torch import nn
 
 from ..config import logger
 from ..kernels import LogIndexKernel, LogScaleKernel, RFFKernel
 from ..priors.response_noise import align_registered_priors, build_multitask_noise_likelihood
+from ..utils.nigp_utils import (
+    effective_noise_variance_mt,
+    input_noise_softclamp,
+    nigp_correction_enabled,
+    posterior_mean_grad_wrt_x_mt,
+    raw_input_noise_init_value,
+)
 from ..utils.rff_utils import (
     RffSampling,
+    SpectralKernel,
     WoodburyMtMethod,
     build_icm_joint_features,
     flatten_multitask_targets,
     task_psd_factor,
     woodbury_predict_mt,
+    woodbury_predict_mt_diag_noise,
     woodbury_predictive_obs_std,
 )
 from .rff_gpr import _drop_singleton_batch
@@ -28,7 +38,9 @@ class RFFMTGPR(gpytorch.models.ExactGP):
     """
     Multitask GP with RFF spatial kernel, ICM task covariance, and Woodbury inference.
 
-    Use with :class:`~gpplus.training.rff_mt_mll.RFFMTWoodburyMarginalLogLikelihood`.
+    Use with :class:`~gpplus.training.rff_mt_mll.RFFMTWoodburyMarginalLogLikelihood`
+    or :class:`~gpplus.training.nigp_mt_mll.NIGPMTWoodburyMarginalLogLikelihood`
+    when ``nigp=True``.
     """
 
     def __init__(
@@ -43,12 +55,15 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         ard: bool = False,
         rff_sampling: RffSampling = "rff",
         correct_sorf: bool = False,
+        spectral_kernel: SpectralKernel = "rbf",
         rank_kernel: int = 1,
         rank_likelihood: int = 0,
         noise_prior: Prior | None = None,
         outputscale_prior: Prior | None = None,
         lengthscale_prior: Prior | None = None,
         batch_shape: torch.Size | None = None,
+        nigp: bool = False,
+        input_noise_init: float | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -61,7 +76,14 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         self.num_rff = num_rff
         self.rff_sampling = rff_sampling
         self.correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
+        self.spectral_kernel = spectral_kernel
         self.batch_shape = torch.Size([]) if batch_shape is None else torch.Size(batch_shape)
+        self.nigp = bool(nigp)
+
+        if self.nigp and int(self.rank_likelihood) > 0:
+            raise ValueError(
+                "NIGP on RFFMTGPR requires rank_likelihood=0 (diagonal task noise)."
+            )
 
         if likelihood is None:
             likelihood = build_multitask_noise_likelihood(
@@ -90,6 +112,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
                     num_dims=input_dim,
                     rff_sampling=rff_sampling,
                     correct_sorf=self.correct_sorf,
+                    spectral_kernel=spectral_kernel,
                     **kernel_kwargs,
                 ),
                 outputscale_prior=outputscale_prior,
@@ -98,7 +121,8 @@ class RFFMTGPR(gpytorch.models.ExactGP):
             feature_kind = rff_sampling.upper()
             logger.warning(
                 "No kernel_module provided. Using MultitaskKernel(LogScaleKernel(RFFKernel(...))) "
-                f"({feature_kind}, num_rff={num_rff}, ard={ard}, input_dim={input_dim}"
+                f"({feature_kind}, spectral_kernel={spectral_kernel}, num_rff={num_rff}, "
+                f"ard={ard}, input_dim={input_dim}"
                 + (f", correct_sorf={self.correct_sorf}" if rff_sampling == "sorf" else "")
                 + f", batch_shape={self.batch_shape})."
             )
@@ -136,6 +160,26 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         align_registered_priors(self)
         self._train_phi_cache: torch.Tensor | None = None
         self._train_phi_cache_key: tuple | None = None
+        # When False (freeze warm-start), MLL/predict ignore σ_x (standard MT GP).
+        self.nigp_correction_enabled = True
+
+        if self.nigp:
+            input_dim = int(train_x.shape[-1])
+            raw_init = raw_input_noise_init_value(input_noise_init, dtype=self.dtype)
+            if len(self.batch_shape) > 0:
+                raw_init = raw_init.expand(*self.batch_shape, input_dim).clone()
+            else:
+                raw_init = raw_init.expand(input_dim).clone()
+            self.register_parameter("raw_input_noise", nn.Parameter(raw_init))
+            self.register_constraint(
+                "raw_input_noise",
+                input_noise_softclamp(dtype=self.dtype),
+            )
+            logger.info(
+                "NIGP enabled: learnable per-dim input noise "
+                "(D=%s, sigma_x=10^SoftClamp(raw) in (1e-6, 1)).",
+                input_dim,
+            )
 
     def to(self, *args, **kwargs):
         out = super().to(*args, **kwargs)
@@ -164,6 +208,21 @@ class RFFMTGPR(gpytorch.models.ExactGP):
     def invalidate_feature_cache(self) -> None:
         self._train_phi_cache = None
         self._train_phi_cache_key = None
+
+    @property
+    def input_noise(self) -> torch.Tensor:
+        """Per-dimension input noise std ``σ_x = 10^{SoftClamp(raw)}`` (``nigp=True``)."""
+        if not getattr(self, "nigp", False) or not hasattr(self, "raw_input_noise"):
+            raise AttributeError("Model has no NIGP input_noise (construct with nigp=True).")
+        return torch.pow(
+            10.0, self.raw_input_noise_constraint.transform(self.raw_input_noise)
+        )
+
+    @property
+    def input_noise_var(self) -> torch.Tensor:
+        """Per-dimension input noise variance ``σ_x²``."""
+        s = self.input_noise
+        return s * s
 
     def scaled_spatial_features(self, x: torch.Tensor) -> torch.Tensor:
         z = self._rff_kernel.featurize(x)
@@ -229,6 +288,48 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         mean_train = self.mean_module(train_x)
         y_centered = flatten_multitask_targets(train_y - mean_train)
         task_noises = self.task_noises()
+
+        if nigp_correction_enabled(self):
+            with torch.enable_grad():
+                grad_mu_train = posterior_mean_grad_wrt_x_mt(
+                    self, train_x, y_centered, task_noises, jitter=jitter
+                )
+            d_train = effective_noise_variance_mt(
+                task_noises, self.input_noise_var, grad_mu_train
+            )
+            with torch.enable_grad():
+                grad_mu_test = posterior_mean_grad_wrt_x_mt(
+                    self,
+                    test_x,
+                    y_centered,
+                    task_noises,
+                    train_x=train_x,
+                    jitter=jitter,
+                )
+            d_test = effective_noise_variance_mt(
+                task_noises, self.input_noise_var, grad_mu_test
+            )
+            f_mean, f_var, obs_std = woodbury_predict_mt_diag_noise(
+                d_train,
+                phi_train,
+                phi_test,
+                r_b,
+                n_train,
+                self.num_tasks,
+                y_centered,
+                jitter=jitter,
+                d_test=d_test,
+            )
+            f_mean = f_mean + self.mean_module(test_x)
+            out_dtype = test_x.dtype
+            if f_mean.dtype != out_dtype:
+                f_mean = f_mean.to(out_dtype)
+                f_var = f_var.to(out_dtype)
+                obs_std = obs_std.to(out_dtype)
+            if return_latent:
+                f_std = f_var.clamp_min(0.0).sqrt()
+                return f_mean, f_mean - 2 * f_std, f_mean + 2 * f_std
+            return f_mean, f_mean - 2 * obs_std, f_mean + 2 * obs_std
 
         f_mean, f_var = woodbury_predict_mt(
             task_noises,

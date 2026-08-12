@@ -47,7 +47,9 @@ def plot_per_task_validation_curves(
     }
     if json_path:
         task_metrics["_source_file"] = json_path
-    out_dir = Path(save_path) / "validation" / task_name
+    from gpplus.utils.fs_path import ensure_dir
+
+    out_dir = ensure_dir(Path(save_path) / "validation" / task_name)
     try:
         return [str(p) for p in plot_run(task_metrics, out_dir)]
     except Exception as exc:

@@ -63,24 +63,24 @@ FAIL_COST = 1e3
 
 # Match successful LOOK / IDE baselines (not searched).
 FIXED = {
-    "n_train": 16000,
+    "n_train": 30000,
     "n_test": 5000,
     "num_rff": 1600,
     "num_inits": 1,
     "ard": True,
     "correct_sorf": True,
     "dtype": torch.float64,
-    "data_path": "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc",
+    "data_path": "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20260308.nc",
     "input_variable": "toa_radiance",
     "task_band_config": "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json",
     "x_transform": "none",
-    "log_scale_qoi": None,
-    "logit_scale_qoi": None,
+    "log_scale_qoi": [],
+    "logit_scale_qoi": [],
     # Bound knobs held fixed; on/off + lambda are searched.
     "bound_penalty_k": 2.0,
     "bound_penalty_alpha": 10.0,
     "bound_penalty_max_points": 4096,
-    "bound_penalty_lambda_learnable": False,
+    "bound_penalty_lambda_learnable": True,
 }
 
 
@@ -117,7 +117,7 @@ def build_configspace(seed: int) -> ConfigurationSpace:
     # Soft physical floor for algae; lambda searched wide (weak ↔ strong).
     bound_penalty = Categorical("bound_penalty", [False, True], default=False)
     bound_penalty_lambda = Float(
-        "bound_penalty_lambda", (1e-4, 1e2), default=1.0, log=True
+        "bound_penalty_lambda", (1e-4, 1e3), default=1.0, log=True
     )
     cs.add(
         [
@@ -346,13 +346,13 @@ def make_target(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--n-trials", type=int, default=60)
+    p.add_argument("--n-trials", type=int, default=30)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument(
         "--save-root",
         type=str,
-        default="experiments_SORF/results/smac_s2_sorf_algae_bounds",
+        default="experiments_SORF/results/Aug03/smac_s2_sorf_algae_bounds",
     )
     p.add_argument("--n-train", type=int, default=FIXED["n_train"])
     p.add_argument("--n-test", type=int, default=FIXED["n_test"])
@@ -366,7 +366,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--max-budget",
         type=int,
-        default=500,
+        default=400,
         help="Max fidelity (num_epochs). Use 50 for smoke.",
     )
     return p.parse_args(argv)

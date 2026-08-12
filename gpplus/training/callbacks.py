@@ -93,6 +93,152 @@ class PrintLossCallback(Callback):
         print(f"Epoch {context['epoch']} - Loss: {context['loss']:.4f}")
 
 
+class NIGPInputNoiseFreezeCallback(Callback):
+    """
+    Paper-style NIGP warm start for the first ``freeze_epochs`` Adam epochs.
+
+    While frozen (epochs ``0 .. freeze_epochs-1``):
+
+    - ``model.nigp_correction_enabled = False`` so the MLL / predict path is a
+      **standard GP** (no ``σ_x`` term) — McHutchon–Rasmussen step 1.
+    - ``raw_input_noise.requires_grad = False``.
+
+    At epoch ``freeze_epochs``, the correction is turned on and ``σ_x`` becomes
+    trainable; slopes continue to come from the homoskedastic posterior mean.
+    Set ``freeze_epochs=0`` to disable. No-op when the model has no NIGP parameter.
+    """
+
+    def __init__(self, freeze_epochs: int = 100, *, verbose: bool = True):
+        self.freeze_epochs = max(0, int(freeze_epochs))
+        self.verbose = bool(verbose)
+        self._frozen = False
+        self._unfrozen_logged = False
+
+    @staticmethod
+    def _raw_param(model):
+        if not bool(getattr(model, "nigp", False)):
+            return None
+        return getattr(model, "raw_input_noise", None)
+
+    def _set_frozen(self, model, frozen: bool) -> bool:
+        param = self._raw_param(model)
+        if param is None:
+            return False
+        model.nigp_correction_enabled = not bool(frozen)
+        param.requires_grad_(not bool(frozen))
+        return True
+
+    def on_train_start(self, context: dict) -> None:
+        if self.freeze_epochs <= 0:
+            return
+        model = context.get("model")
+        if model is None:
+            return
+        if not self._set_frozen(model, True):
+            return
+        self._frozen = True
+        self._unfrozen_logged = False
+        if self.verbose:
+            from ..config import logger
+
+            logger.info(
+                "NIGP: standard-GP warm start for first %s epochs "
+                "(no sigma_x correction; early stopping deferred until freeze ends).",
+                self.freeze_epochs,
+            )
+
+    def on_epoch_start(self, context: dict) -> None:
+        if not self._frozen or self.freeze_epochs <= 0:
+            return
+        epoch = int(context.get("epoch", 0))
+        if epoch < self.freeze_epochs:
+            return
+        model = context.get("model")
+        if model is None:
+            return
+        if not self._set_frozen(model, False):
+            return
+        self._frozen = False
+        if self.verbose and not self._unfrozen_logged:
+            from ..config import logger
+
+            logger.info(
+                "NIGP: enabling sigma_x correction and unfreezing raw_input_noise at epoch %s.",
+                epoch,
+            )
+            self._unfrozen_logged = True
+
+
+class LikelihoodNoiseFreezeCallback(Callback):
+    """
+    Freeze observation noise for the first ``freeze_epochs`` Adam epochs.
+
+    Sets ``likelihood.noise_covar.raw_noise.requires_grad = False`` so dual
+    Woodbury backward skips ``tr(Λ⁻¹)`` (``O(m³)``). Default ``freeze_epochs=0``
+    (disabled). No-op when the model has no raw noise parameter.
+    """
+
+    def __init__(self, freeze_epochs: int = 0, *, verbose: bool = True):
+        self.freeze_epochs = max(0, int(freeze_epochs))
+        self.verbose = bool(verbose)
+        self._frozen = False
+        self._unfrozen_logged = False
+
+    @staticmethod
+    def _raw_noise(model):
+        lik = getattr(model, "likelihood", None)
+        if lik is None:
+            return None
+        covar = getattr(lik, "noise_covar", None)
+        if covar is None:
+            return getattr(lik, "raw_noise", None)
+        return getattr(covar, "raw_noise", None)
+
+    def _set_frozen(self, model, frozen: bool) -> bool:
+        param = self._raw_noise(model)
+        if param is None:
+            return False
+        param.requires_grad_(not bool(frozen))
+        return True
+
+    def on_train_start(self, context: dict) -> None:
+        if self.freeze_epochs <= 0:
+            return
+        model = context.get("model")
+        if model is None:
+            return
+        if not self._set_frozen(model, True):
+            return
+        self._frozen = True
+        self._unfrozen_logged = False
+        if self.verbose:
+            from ..config import logger
+
+            logger.info(
+                "Likelihood noise frozen for first %s epochs "
+                "(skips Woodbury tr(Λ⁻¹) in backward).",
+                self.freeze_epochs,
+            )
+
+    def on_epoch_start(self, context: dict) -> None:
+        if not self._frozen or self.freeze_epochs <= 0:
+            return
+        epoch = int(context.get("epoch", 0))
+        if epoch < self.freeze_epochs:
+            return
+        model = context.get("model")
+        if model is None:
+            return
+        if not self._set_frozen(model, False):
+            return
+        self._frozen = False
+        if self.verbose and not self._unfrozen_logged:
+            from ..config import logger
+
+            logger.info("Likelihood noise unfrozen at epoch %s.", epoch)
+            self._unfrozen_logged = True
+
+
 class TrainLossLoggingCallback(Callback):
     """Log training loss each epoch (Adam) via the gpplus logger."""
 

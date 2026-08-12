@@ -4,7 +4,7 @@ from .eval import (
     evaluate_rff_gp_model,
     evaluate_rff_mt_gp_model,
 )
-from .callbacks import ValidationMetricsCallback
+from .callbacks import NIGPInputNoiseFreezeCallback, LikelihoodNoiseFreezeCallback, ValidationMetricsCallback
 from .parameter_initializer import (
     DefaultParameterInitializer,
     ParameterInitializer,
@@ -23,6 +23,12 @@ from .pac_bayes import (
     pac_bayes_complexity,
     pac_bayes_mll_class,
 )
+from .nigp_mll import (
+    NIGPExactMarginalLogLikelihood,
+    NIGPWoodburyMarginalLogLikelihood,
+    nigp_woodbury_mll_class,
+)
+from .nigp_mt_mll import NIGPMTWoodburyMarginalLogLikelihood
 from .rff_mll import RFFWoodburyMarginalLogLikelihood, WoodburyMarginalLogLikelihood
 from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
 from .stop_conditions import (

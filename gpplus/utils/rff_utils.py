@@ -32,6 +32,8 @@ from typing import Callable, Literal, NamedTuple, Union
 import torch
 from torch import Tensor
 
+from .line_profile import profile
+
 logger = logging.getLogger(__name__)
 
 _WOODBURY_JITTER_DEFAULT = 1e-6
@@ -82,7 +84,17 @@ def _woodbury_linalg_dtype(dtype: torch.dtype) -> torch.dtype:
 
     Float32 feature maps promote these small matrices to float64. The eigen MT
     path forms ``G = Phi^T Phi`` in ``Phi``'s dtype first (mixed precision).
+
+    Opt-in override: ``GPPLUS_WOODBURY_LINALG=float32`` forces float32 factors
+    even for float64 features (speed/accuracy trade; off by default).
     """
+    try:
+        from .woodbury_mll_autograd import use_float32_woodbury_linalg
+
+        if use_float32_woodbury_linalg():
+            return torch.float32
+    except Exception:
+        pass
     return torch.float64 if dtype == torch.float32 else dtype
 
 
@@ -242,11 +254,43 @@ def _woodbury_eigen_factor_from_grams(
 RffSampling = Literal["rff", "orf", "sorf"]
 RFF_SAMPLING_MODES = frozenset({"rff", "orf", "sorf"})
 
+SpectralKernel = Literal["rbf", "matern32"]
+SPECTRAL_KERNEL_MODES = frozenset({"rbf", "matern32"})
+# Matérn-ν spectral measure is multivariate Student-t with df = 2ν; ν=3/2 → df=3.
+_MATERN32_DF = 3.0
+
 
 def _validate_rff_sampling(rff_sampling: str) -> RffSampling:
     if rff_sampling not in RFF_SAMPLING_MODES:
         raise ValueError(f"rff_sampling must be one of {sorted(RFF_SAMPLING_MODES)}, got {rff_sampling!r}.")
     return rff_sampling  # type: ignore[return-value]
+
+
+def _validate_spectral_kernel(spectral_kernel: str) -> SpectralKernel:
+    if spectral_kernel not in SPECTRAL_KERNEL_MODES:
+        raise ValueError(
+            f"spectral_kernel must be one of {sorted(SPECTRAL_KERNEL_MODES)}, got {spectral_kernel!r}."
+        )
+    return spectral_kernel  # type: ignore[return-value]
+
+
+def _matern32_scale_mixture(w: Tensor) -> Tensor:
+    """
+    Convert Gaussian frequency columns to Matérn-3/2 (multivariate Student-t, df=3).
+
+    Each column ``ω ∈ R^d`` shares one radial scale ``u ~ Chi²(3)``:
+    ``ω ← ω * sqrt(3 / u)``. Coordinates are not scaled independently.
+    """
+    num_samples = w.shape[-1]
+    # Chi²(df) as sum of df squared standard normals (one draw per column).
+    u = torch.randn(
+        int(_MATERN32_DF),
+        num_samples,
+        device=w.device,
+        dtype=w.dtype,
+    ).pow(2).sum(dim=0)
+    scale = (_MATERN32_DF / u.clamp_min(1e-12)).sqrt()
+    return w * scale.unsqueeze(0)
 
 
 def _next_pow2(n: int) -> int:
@@ -409,14 +453,21 @@ def init_rbf_weights(
     lengthscale: Tensor | None = None,
     rff_sampling: RffSampling = "rff",
     correct_sorf: bool = False,
+    spectral_kernel: SpectralKernel = "rbf",
 ) -> Tensor:
     """
-    Draw RBF random frequencies W with shape (num_dims, num_samples).
+    Draw random frequencies W with shape (num_dims, num_samples).
 
     ``rff_sampling``:
       - ``"rff"``: i.i.d. Gaussian columns.
       - ``"orf"``: full ORF (Yu et al. Eq. 2): QR orthogonal Q plus chi(d) scaling.
       - ``"sorf"``: structured ORF (Yu et al. Eq. 5): Walsh-Hadamard with Rademacher signs.
+
+    ``spectral_kernel``:
+      - ``"rbf"``: leave Gaussian (or ORF/SORF) draws as-is (default).
+      - ``"matern32"``: apply a per-column Chi²(3) scale mixture (Student-t, df=3).
+        Works with ``rff`` / ``orf`` / ``sorf``; ORF/SORF keep their structured Gaussian
+        part and only the radial law is fattened toward Matérn-3/2.
 
     ``correct_sorf`` only affects ``"sorf"``: True = true FWHT; False = legacy aliased FWHT.
 
@@ -424,6 +475,7 @@ def init_rbf_weights(
     draws as omega_d ~ N(0, 1/lengthscale_d^2) after the base draw.
     """
     rff_sampling = _validate_rff_sampling(rff_sampling)
+    spectral_kernel = _validate_spectral_kernel(spectral_kernel)
     dev = device or torch.device("cpu")
     dt = dtype or torch.float32
     if rff_sampling == "orf":
@@ -438,6 +490,8 @@ def init_rbf_weights(
         )
     else:
         w = torch.randn(num_dims, num_samples, device=dev, dtype=dt)
+    if spectral_kernel == "matern32":
+        w = _matern32_scale_mixture(w)
     if lengthscale is not None:
         inv_ls = 1.0 / lengthscale.clamp_min(1e-12)
         w = w * inv_ls.unsqueeze(-1)
@@ -687,6 +741,7 @@ def woodbury_quadratic_form(
     return (y * alpha).sum(dim=-1)
 
 
+@profile
 def woodbury_marginal_log_likelihood(
     noise_var: Tensor,
     z_train: Tensor,
@@ -864,24 +919,42 @@ def woodbury_factor_dual(
     noise : clamped noise (factor dtype)
     z_lin : Φ in the factor dtype (for dual matvecs / solves)
     """
+    from .woodbury_mll_autograd import _CudaSection
+
     lin_dtype = _woodbury_linalg_dtype(z_train.dtype)
     noise = noise_var.clamp_min(1e-12).to(lin_dtype)
-    if promote_features or z_train.dtype == lin_dtype:
-        z_lin = z_train.to(lin_dtype)
-        ztz = torch.matmul(z_lin.transpose(-1, -2), z_lin)
-    else:
-        ztz = torch.matmul(z_train.transpose(-1, -2), z_train).to(lin_dtype)
-        z_lin = z_train.to(lin_dtype)
-    m = z_train.shape[-1]
+
+    with _CudaSection("gram"):
+        if promote_features or z_train.dtype == lin_dtype:
+            z_lin = z_train.to(dtype=lin_dtype, copy=False).contiguous()
+            # Contiguous Φ → one GEMM; result is symmetric up to fp roundoff.
+            if z_lin.dim() == 2:
+                ztz = torch.mm(z_lin.transpose(0, 1), z_lin)
+            else:
+                ztz = torch.matmul(z_lin.transpose(-1, -2), z_lin)
+        else:
+            z_src = z_train.contiguous()
+            if z_src.dim() == 2:
+                ztz = torch.mm(z_src.transpose(0, 1), z_src).to(lin_dtype)
+            else:
+                ztz = torch.matmul(z_src.transpose(-1, -2), z_src).to(lin_dtype)
+            z_lin = z_train.to(dtype=lin_dtype, copy=False).contiguous()
 
     def build_lambda(j: float) -> Tensor:
-        eye = torch.eye(m, device=ztz.device, dtype=lin_dtype)
+        # Diagonal add; ``_woodbury_cholesky_factor`` symmetrizes for recovery.
         noise_b = _expand_noise_for_square(noise, ztz)
-        return _symmetrize_matrix(ztz) + (noise_b + j) * eye
+        middle = ztz.clone()
+        diag = torch.diagonal(middle, dim1=-2, dim2=-1)
+        add = noise_b
+        while add.dim() > diag.dim():
+            add = add.squeeze(-1)
+        diag.add_(add + j)
+        return middle
 
-    chol, _ = _woodbury_cholesky_factor(
-        build_lambda, jitter, max_attempts=12, jitter_scale=10.0
-    )
+    with _CudaSection("cholesky"):
+        chol, _ = _woodbury_cholesky_factor(
+            build_lambda, jitter, max_attempts=12, jitter_scale=10.0
+        )
     return chol, noise, z_lin
 
 
@@ -914,20 +987,16 @@ def woodbury_solve_dual(
     return out.squeeze(-1) if squeeze else out
 
 
-def woodbury_marginal_log_likelihood_dual(
+def woodbury_marginal_log_likelihood_dual_reference(
     noise_var: Tensor,
     z_train: Tensor,
     y_centered: Tensor,
     jitter: float = 1e-6,
 ) -> Tensor:
     """
-    Gaussian MLL via ``Λ = ΦᵀΦ + σ² I_m``.
+    Dual Woodbury MLL with stock PyTorch autodiff through Cholesky.
 
-    ``log|Σ| = (n-m) log σ² + log|Λ|`` and the quadratic form uses
-    ``yᵀ Σ⁻¹ y = ||y||²/σ² - ||Λ⁻¹/² Φᵀ y||²/σ²``.
-
-    Supports batched ``z_train`` ``(B, n, m)``, ``noise_var`` ``(B,)``, and
-    ``y_centered`` ``(B, n)`` returning ``(B,)``.
+    Used for tests and when ``GPPLUS_WOODBURY_AUTOGRAD=reference``.
     """
     n = z_train.shape[-2]
     m = z_train.shape[-1]
@@ -957,6 +1026,37 @@ def woodbury_marginal_log_likelihood_dual(
     return const + noise_log + log_det_term + y_term + lambda_term
 
 
+def woodbury_marginal_log_likelihood_dual(
+    noise_var: Tensor,
+    z_train: Tensor,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> Tensor:
+    """
+    Gaussian MLL via ``Λ = ΦᵀΦ + σ² I_m``.
+
+    ``log|Σ| = (n-m) log σ² + log|Λ|`` and the quadratic form uses
+    ``yᵀ Σ⁻¹ y = ||y||²/σ² - ||Λ⁻¹/² Φᵀ y||²/σ²``.
+
+    Supports batched ``z_train`` ``(B, n, m)``, ``noise_var`` ``(B,)``, and
+    ``y_centered`` ``(B, n)`` returning ``(B,)``.
+
+    By default uses custom analytic autograd (see
+    ``gpplus.utils.woodbury_mll_autograd``). Set
+    ``GPPLUS_WOODBURY_AUTOGRAD=reference`` for stock Cholesky autodiff.
+    """
+    from .woodbury_mll_autograd import (
+        use_reference_woodbury_autograd,
+        woodbury_dual_mll_apply,
+    )
+
+    if use_reference_woodbury_autograd():
+        return woodbury_marginal_log_likelihood_dual_reference(
+            noise_var, z_train, y_centered, jitter=jitter
+        )
+    return woodbury_dual_mll_apply(noise_var, z_train, y_centered, jitter=jitter)
+
+
 def woodbury_predictive_mean_dual(
     noise: Tensor,
     z_train: Tensor,
@@ -983,6 +1083,116 @@ def woodbury_predictive_var_diag_dual(
     solved = torch.cholesky_solve(z_test_c.transpose(-1, -2), chol)
     f_var = noise.to(dtype=chol.dtype) * (z_test_c * solved.transpose(-1, -2)).sum(dim=-1)
     return f_var.clamp_min(0.0).to(dtype=z_test.dtype)
+
+
+# ---------------------------------------------------------------------------
+# Heteroscedastic diagonal noise: Σ = diag(d) + Φ Φᵀ
+# Implemented via D^{-1/2} row scaling → dual Woodbury with unit noise.
+# ---------------------------------------------------------------------------
+
+
+def _diag_noise_row_scale(
+    d: Tensor,
+    z_train: Tensor,
+    y_centered: Tensor,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Scale rows by ``d^{-1/2}`` so ``Σ = diag(d)+ΦΦᵀ`` maps to ``I + Φ̂Φ̂ᵀ``.
+
+    Returns
+    -------
+    z_hat, y_hat, d_clamped
+    """
+    d_clamped = d.clamp_min(1e-12)
+    inv_sqrt = d_clamped.rsqrt()
+    while inv_sqrt.dim() < z_train.dim() - 1:
+        inv_sqrt = inv_sqrt.unsqueeze(0)
+    z_hat = z_train * inv_sqrt.unsqueeze(-1)
+    y_hat = y_centered * inv_sqrt
+    return z_hat, y_hat, d_clamped
+
+
+def woodbury_marginal_log_likelihood_diag_noise(
+    d: Tensor,
+    z_train: Tensor,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> Tensor:
+    """
+    Gaussian MLL for ``y ~ N(0, diag(d) + Φ Φᵀ)`` with ``Φ = z_train``.
+
+    Uses ``Φ̂ = D^{-1/2} Φ``, ``ŷ = D^{-1/2} y`` and dual Woodbury on
+    ``Σ̃ = I + Φ̂ Φ̂ᵀ``, then adds the Jacobian ``-½ ∑ log d_i``.
+
+    ``d`` shape ``(n,)`` or ``(B, n)``; ``z_train`` ``(n, m)`` or ``(B, n, m)``.
+    """
+    z_hat, y_hat, d_clamped = _diag_noise_row_scale(d, z_train, y_centered)
+    ones = z_hat.new_ones(())
+    if z_hat.dim() == 3:
+        ones = z_hat.new_ones(z_hat.shape[0])
+    mll_tilde = woodbury_marginal_log_likelihood_dual(
+        ones, z_hat, y_hat, jitter=jitter
+    )
+    log_d_sum = d_clamped.log().sum(dim=-1)
+    return mll_tilde - 0.5 * log_d_sum
+
+
+def woodbury_posterior_weights_diag_noise(
+    d: Tensor,
+    z_train: Tensor,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Dual weights ``w = Λ̂⁻¹ Φ̂ᵀ ŷ`` for ``Σ = diag(d)+ΦΦᵀ``.
+
+    Returns ``(w, chol, z_hat)`` with ``Λ̂ = Φ̂ᵀ Φ̂ + I``.
+    """
+    z_hat, y_hat, _ = _diag_noise_row_scale(d, z_train, y_centered)
+    ones = z_hat.new_ones(())
+    if z_hat.dim() == 3:
+        ones = z_hat.new_ones(z_hat.shape[0])
+    chol, _noise, z_lin = woodbury_factor_dual(ones, z_hat, jitter=jitter)
+    y = y_hat.to(dtype=chol.dtype)
+    if y.dim() == z_lin.dim() - 1:
+        y_col = y.unsqueeze(-1)
+    else:
+        y_col = y
+    phi_ty = z_lin.transpose(-1, -2) @ y_col
+    w = torch.cholesky_solve(phi_ty, chol).squeeze(-1)
+    return w, chol, z_hat
+
+
+def woodbury_predict_diag_noise(
+    d_train: Tensor,
+    z_train: Tensor,
+    z_test: Tensor,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+    d_test: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Posterior mean, latent var, and observation std for ``Σ_train = diag(d)+ΦΦᵀ``.
+
+    Latent variance uses ``φ*ᵀ Λ̂⁻¹ φ*``. Observation std is
+    ``sqrt(f_var + d_test)`` when ``d_test`` is provided, else ``sqrt(f_var)``
+    (latent only).
+    """
+    w, chol, _z_hat = woodbury_posterior_weights_diag_noise(
+        d_train, z_train, y_centered, jitter=jitter
+    )
+    z_test_c = z_test.to(dtype=chol.dtype)
+    if w.dim() == 1:
+        f_mean = (z_test_c @ w).to(dtype=z_test.dtype)
+    else:
+        f_mean = (z_test_c @ w.unsqueeze(-1)).squeeze(-1).to(dtype=z_test.dtype)
+    ones = z_test.new_ones(())
+    f_var = woodbury_predictive_var_diag_dual(ones, z_test, chol=chol)
+    if d_test is None:
+        obs_std = f_var.clamp_min(0.0).sqrt()
+    else:
+        obs_std = (f_var.clamp_min(0.0) + d_test.clamp_min(0.0)).sqrt()
+    return f_mean, f_var, obs_std
 
 
 # ---------------------------------------------------------------------------
@@ -1639,3 +1849,251 @@ def woodbury_predict_mt(
         unflatten_multitask_targets(mean_flat, num_tasks),
         unflatten_multitask_targets(var_flat, num_tasks),
     )
+
+
+# ---------------------------------------------------------------------------
+# Multitask Woodbury with general per-(i,t) diagonal noise (NIGP)
+# Σ = diag(d) + Ω Ωᵀ, Ω = Φ ⊗ R_B.  Middle assembled without materializing Ω.
+# ---------------------------------------------------------------------------
+
+
+def _coerce_mt_diag_noise(d: Tensor, n: int, num_tasks: int) -> Tensor:
+    """Return ``d`` as ``(n, T)``."""
+    if d.dim() == 1:
+        if d.numel() != n * num_tasks:
+            raise ValueError(
+                f"flat d length {d.numel()} != n*T={n * num_tasks}"
+            )
+        return d.reshape(n, num_tasks)
+    if d.shape[-2:] != (n, num_tasks) and d.shape != (n, num_tasks):
+        raise ValueError(f"d must be (n, T) or (n*T,), got {tuple(d.shape)}")
+    return d.reshape(n, num_tasks)
+
+
+def _task_factor_is_diagonal(r_b: Tensor, *, atol: float = 1e-5) -> bool:
+    off = r_b - torch.diag_embed(torch.diagonal(r_b, dim1=-2, dim2=-1))
+    return bool(off.abs().max().item() <= atol)
+
+
+def woodbury_middle_matrix_mt_diag_noise(
+    d: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    jitter: float = 0.0,
+) -> Tensor:
+    """
+    ``M = I + Ωᵀ Λ⁻¹ Ω`` for ``Λ = diag(d)``, ``Ω = Φ ⊗ R_B``.
+
+    Uses ``M = I + Σ_t kron(G^{(t)}, r_t r_tᵀ)`` with
+    ``G^{(t)} = Φᵀ diag(1/d_{:,t}) Φ``.
+    """
+    n, m = phi.shape[-2], phi.shape[-1]
+    t = r_b.shape[-2]
+    r = r_b.shape[-1]
+    d_nt = _coerce_mt_diag_noise(d, n, t).clamp_min(1e-12)
+    m_r = m * r
+    eye = torch.eye(m_r, device=phi.device, dtype=phi.dtype)
+    middle = eye.clone()
+    inv = d_nt.reciprocal()
+    for task in range(t):
+        g_t = phi.transpose(-1, -2) @ (phi * inv[:, task].unsqueeze(-1))
+        r_t = r_b[task]
+        outer = torch.outer(r_t, r_t)
+        middle = middle + torch.kron(g_t.contiguous(), outer.contiguous())
+    if jitter > 0:
+        middle = middle + jitter * eye
+    return middle
+
+
+def woodbury_factor_mt_diag_noise(
+    d: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    jitter: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """
+    Cholesky of ``M = I + Ωᵀ Λ⁻¹ Ω`` for general per-(i,t) diag noise.
+
+    Returns ``(chol, d_nt)`` with ``d_nt`` clamped ``(n, T)`` in ``phi`` / factor dtype.
+    """
+    n = phi.shape[-2]
+    t = r_b.shape[-2]
+    d_nt = _coerce_mt_diag_noise(d, n, t)
+    lin_dtype = _woodbury_linalg_dtype(phi.dtype)
+    phi_c = phi.to(dtype=lin_dtype)
+    r_c = r_b.to(dtype=lin_dtype)
+    d_c = d_nt.to(dtype=lin_dtype)
+
+    def build_middle(j: float) -> Tensor:
+        return woodbury_middle_matrix_mt_diag_noise(d_c, phi_c, r_c, jitter=j)
+
+    chol, _ = _woodbury_cholesky_factor(build_middle, jitter, max_attempts=12, jitter_scale=10.0)
+    return chol, d_c
+
+
+def _apply_general_lambda_inv_rows(d_nt: Tensor, x: Tensor) -> Tensor:
+    """``Λ⁻¹ x`` for ``Λ = diag(d)`` with ``d`` shaped ``(n, T)`` (task fastest)."""
+    n, t = d_nt.shape[-2], d_nt.shape[-1]
+    inv = d_nt.clamp_min(1e-12).reciprocal()
+    squeeze = x.dim() == 1
+    if squeeze:
+        x = x.unsqueeze(-1)
+    out = (x.reshape(n, t, -1) * inv.unsqueeze(-1)).reshape(n * t, -1)
+    return out.squeeze(-1) if squeeze else out
+
+
+def woodbury_solve_mt_diag_noise_from_chol(
+    d_nt: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    chol: Tensor,
+    b: Tensor,
+) -> Tensor:
+    """``Σ⁻¹ b`` for ``Σ = diag(d) + ΩΩᵀ`` given Chol(``M``)."""
+    n = phi.shape[-2]
+    squeeze = b.dim() == 1
+    if squeeze:
+        b = b.unsqueeze(-1)
+    factor_dtype = chol.dtype
+    phi_f = phi.to(dtype=factor_dtype)
+    r_f = r_b.to(dtype=factor_dtype)
+    d_f = d_nt.to(dtype=factor_dtype)
+    b_f = b.to(dtype=factor_dtype)
+
+    lam_inv_b = _apply_general_lambda_inv_rows(d_f, b_f)
+    middle_rhs = icm_omega_rmatvec(phi_f, r_f, lam_inv_b)
+    inner = torch.cholesky_solve(middle_rhs, chol)
+    omega_inner = icm_omega_matvec(phi_f, r_f, inner)
+    correction = _apply_general_lambda_inv_rows(d_f, omega_inner)
+    out = lam_inv_b - correction
+    return out.squeeze(-1) if squeeze else out
+
+
+def _mll_mt_diag_noise_independent(
+    d_nt: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    y_nt: Tensor,
+    jitter: float,
+) -> Tensor:
+    """Independent-task path when ``R_B`` is diagonal: sum of ST diag-noise MLLs."""
+    scales = torch.diagonal(r_b)
+    total = y_nt.new_zeros(())
+    t = d_nt.shape[-1]
+    for task in range(t):
+        phi_t = phi * scales[task]
+        total = total + woodbury_marginal_log_likelihood_diag_noise(
+            d_nt[:, task], phi_t, y_nt[:, task], jitter=jitter
+        )
+    return total
+
+
+def woodbury_marginal_log_likelihood_mt_diag_noise(
+    d: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    n: int,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> Tensor:
+    """
+    Gaussian MLL for ``vec(y) ~ N(0, diag(d) + ΩΩᵀ)``, ``Ω = Φ ⊗ R_B``.
+
+    ``d`` is ``(n, T)`` or flat ``(n*T,)``. When ``R_B`` is diagonal, uses an
+    exact independent-task fast path (sum of ST diag-noise MLLs).
+    """
+    t = r_b.shape[-2]
+    d_nt = _coerce_mt_diag_noise(d, n, t)
+    y_nt = unflatten_multitask_targets(y_centered, t)
+    if y_nt.shape[-2] != n:
+        raise ValueError(f"y length mismatch: expected n={n}, got {y_nt.shape[-2]}")
+
+    if _task_factor_is_diagonal(r_b):
+        return _mll_mt_diag_noise_independent(d_nt, phi, r_b, y_nt, jitter)
+
+    chol, d_c = woodbury_factor_mt_diag_noise(d_nt, phi, r_b, jitter=jitter)
+    y_flat = flatten_multitask_targets(y_nt).to(dtype=chol.dtype)
+    alpha = woodbury_solve_mt_diag_noise_from_chol(d_c, phi, r_b, chol, y_flat)
+    quad = (y_flat * alpha).sum()
+    log_det_lam = d_c.log().sum()
+    log_det_m = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum()
+    n_t = y_flat.shape[-1]
+    const = -0.5 * n_t * math.log(2.0 * math.pi)
+    return const - 0.5 * quad - 0.5 * (log_det_lam + log_det_m)
+
+
+def woodbury_predict_mt_diag_noise(
+    d_train: Tensor,
+    phi_train: Tensor,
+    phi_test: Tensor,
+    r_b: Tensor,
+    n_train: int,
+    num_tasks: int,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+    d_test: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Posterior mean ``(n*, T)``, latent var ``(n*, T)``, obs std ``(n*, T)``.
+
+    Observation std uses ``d_test`` when provided (NIGP), else train task-averaged
+    is not used — caller should pass ``d_test`` or use latent-only intervals.
+    """
+    d_nt = _coerce_mt_diag_noise(d_train, n_train, num_tasks)
+    y_flat = flatten_multitask_targets(y_centered)
+
+    if _task_factor_is_diagonal(r_b):
+        scales = torch.diagonal(r_b)
+        means = []
+        vars_ = []
+        stds = []
+        y_nt = unflatten_multitask_targets(y_flat, num_tasks)
+        d_te = (
+            None
+            if d_test is None
+            else _coerce_mt_diag_noise(d_test, phi_test.shape[-2], num_tasks)
+        )
+        for task in range(num_tasks):
+            phi_tr = phi_train * scales[task]
+            phi_te = phi_test * scales[task]
+            d_te_t = None if d_te is None else d_te[:, task]
+            f_mean, f_var, obs_std = woodbury_predict_diag_noise(
+                d_nt[:, task],
+                phi_tr,
+                phi_te,
+                y_nt[:, task],
+                jitter=jitter,
+                d_test=d_te_t,
+            )
+            means.append(f_mean)
+            vars_.append(f_var)
+            stds.append(obs_std)
+        f_mean = torch.stack(means, dim=-1)
+        f_var = torch.stack(vars_, dim=-1)
+        obs_std = torch.stack(stds, dim=-1)
+        return f_mean, f_var, obs_std
+
+    chol, d_c = woodbury_factor_mt_diag_noise(d_nt, phi_train, r_b, jitter=jitter)
+    alpha = woodbury_solve_mt_diag_noise_from_chol(
+        d_c, phi_train, r_b, chol, y_flat.to(dtype=chol.dtype)
+    )
+    # μ_* = Ω_* Ωᵀ α
+    r_f = r_b.to(dtype=phi_train.dtype)
+    phi_tr_f = phi_train.to(dtype=phi_train.dtype)
+    phi_te_f = phi_test.to(dtype=phi_train.dtype)
+    v = icm_omega_rmatvec(phi_tr_f, r_f, alpha.to(dtype=phi_train.dtype))
+    mean_flat = icm_omega_matvec(phi_te_f, r_f, v)
+    # Latent var via Chol(M) on materialised Ω_* (test chunk sized).
+    omega_star = build_icm_joint_features(
+        phi_test.to(dtype=chol.dtype), r_b.to(dtype=chol.dtype)
+    )
+    solved = torch.cholesky_solve(omega_star.transpose(-1, -2), chol)
+    var_flat = (omega_star * solved.transpose(-1, -2)).sum(dim=-1).clamp_min(0.0)
+    f_mean = unflatten_multitask_targets(mean_flat, num_tasks)
+    f_var = unflatten_multitask_targets(var_flat.to(dtype=phi_test.dtype), num_tasks)
+    if d_test is None:
+        obs_std = f_var.clamp_min(0.0).sqrt()
+    else:
+        d_te = _coerce_mt_diag_noise(d_test, phi_test.shape[-2], num_tasks)
+        obs_std = woodbury_predictive_obs_std(f_var, d_te)
+    return f_mean, f_var, obs_std

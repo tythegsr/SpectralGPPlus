@@ -8,15 +8,28 @@ import torch
 from linear_operator.operators import MatmulLinearOperator
 from torch import Tensor
 
-from ..utils.rff_utils import RFF_SAMPLING_MODES, RffSampling, featurize_rbf, init_rbf_weights
+from ..utils.rff_utils import (
+    RFF_SAMPLING_MODES,
+    SPECTRAL_KERNEL_MODES,
+    RffSampling,
+    SpectralKernel,
+    featurize_rbf,
+    init_rbf_weights,
+)
 from .unconstrained_kernel import UnconstrainedKernel
 
 
 class RFFKernel(UnconstrainedKernel):
     """
-    RBF random Fourier feature kernel (Sutherland–Schneider cos/sin features).
+    Random Fourier feature kernel (Sutherland–Schneider cos/sin features).
 
-    ``rff_sampling`` controls how frequency weights are drawn:
+    ``spectral_kernel`` selects the Bochner spectral measure:
+
+    - ``"rbf"``: Gaussian frequencies (default).
+    - ``"matern32"``: Matérn-3/2 via per-column Student-t (df=3) scale mixture
+      on top of the Gaussian / ORF / SORF draw.
+
+    ``rff_sampling`` controls how the Gaussian base frequencies are drawn:
 
     - ``"rff"``: i.i.d. Gaussian (default).
     - ``"orf"``: full ORF (Yu et al. arXiv:1610.09072 Eq. 2), QR + chi(d) scaling.
@@ -41,14 +54,20 @@ class RFFKernel(UnconstrainedKernel):
         num_dims: Optional[int] = None,
         rff_sampling: RffSampling = "rff",
         correct_sorf: bool = False,
+        spectral_kernel: SpectralKernel = "rbf",
         **kwargs,
     ):
         if rff_sampling not in RFF_SAMPLING_MODES:
             raise ValueError(f"rff_sampling must be one of {sorted(RFF_SAMPLING_MODES)}, got {rff_sampling!r}.")
+        if spectral_kernel not in SPECTRAL_KERNEL_MODES:
+            raise ValueError(
+                f"spectral_kernel must be one of {sorted(SPECTRAL_KERNEL_MODES)}, got {spectral_kernel!r}."
+            )
         super().__init__(ard_num_dims=ard_num_dims, **kwargs)
         self.num_samples = num_samples
         self.rff_sampling = rff_sampling
         self.correct_sorf = bool(correct_sorf)
+        self.spectral_kernel = spectral_kernel
         self._feature_cache_version = 0
         if num_dims is not None:
             self._init_weights(num_dims, num_samples, rff_sampling=rff_sampling)
@@ -61,9 +80,11 @@ class RFFKernel(UnconstrainedKernel):
         *,
         spectral: bool = False,
         rff_sampling: RffSampling | None = None,
+        spectral_kernel: SpectralKernel | None = None,
     ) -> None:
         D = num_samples if num_samples is not None else self.num_samples
         sampling = rff_sampling if rff_sampling is not None else self.rff_sampling
+        sk = spectral_kernel if spectral_kernel is not None else self.spectral_kernel
         if randn_weights is None:
             ls = self.lengthscale if spectral and self.has_lengthscale else None
             randn_weights = init_rbf_weights(
@@ -74,20 +95,28 @@ class RFFKernel(UnconstrainedKernel):
                 lengthscale=ls,
                 rff_sampling=sampling,
                 correct_sorf=self.correct_sorf,
+                spectral_kernel=sk,
             )
         self.register_buffer("randn_weights", randn_weights)
 
-    def resample_weights(self, spectral: bool = True, rff_sampling: RffSampling | None = None) -> None:
+    def resample_weights(
+        self,
+        spectral: bool = True,
+        rff_sampling: RffSampling | None = None,
+        spectral_kernel: SpectralKernel | None = None,
+    ) -> None:
         """Redraw omega (optionally from current lengthscale / sampling mode). Invalidates feature caches."""
         num_dims = self.randn_weights.shape[-2] if hasattr(self, "randn_weights") else self.ard_num_dims
         if num_dims is None:
             raise RuntimeError("Cannot resample RFF weights before kernel dimensions are known.")
         sampling = rff_sampling if rff_sampling is not None else self.rff_sampling
+        sk = spectral_kernel if spectral_kernel is not None else self.spectral_kernel
         self._init_weights(
             num_dims,
             self.num_samples,
             spectral=spectral,
             rff_sampling=sampling,
+            spectral_kernel=sk,
         )
         if hasattr(self, "_feature_cache_version"):
             self._feature_cache_version += 1

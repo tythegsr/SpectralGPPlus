@@ -1,7 +1,51 @@
-# import torch
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+import torch.nn as nn
 from gpytorch.means import Mean
 
 from ..utils import InputTransformNet
+
+################################
+
+_NEURAL_MEAN_ACTIVATIONS: dict[str, type[nn.Module]] = {
+    "relu": nn.ReLU,
+    "tanh": nn.Tanh,
+    "gelu": nn.GELU,
+    "silu": nn.SiLU,
+    "identity": nn.Identity,
+}
+
+
+def resolve_neural_mean_activation(name: str) -> type[nn.Module]:
+    key = str(name).strip().lower()
+    if key not in _NEURAL_MEAN_ACTIVATIONS:
+        allowed = ", ".join(sorted(_NEURAL_MEAN_ACTIVATIONS))
+        raise ValueError(f"Unknown neural mean activation {name!r}. Allowed: {allowed}.")
+    return _NEURAL_MEAN_ACTIVATIONS[key]
+
+
+def layer_config_from_hidden(
+    hidden_dims: Sequence[int],
+    activation: str = "relu",
+) -> dict[int, dict]:
+    """Build InputTransformNet layer_config from hidden widths + activation name.
+
+    Appends a final linear layer with dims=1 and Identity activation.
+    """
+    dims = [int(d) for d in hidden_dims]
+    if not dims:
+        raise ValueError("hidden_dims must be a non-empty sequence of positive ints.")
+    if any(d < 1 for d in dims):
+        raise ValueError(f"hidden_dims entries must be >= 1, got {dims}.")
+    act_cls = resolve_neural_mean_activation(activation)
+    layer_config: dict[int, dict] = {}
+    for i, width in enumerate(dims):
+        layer_config[i] = {"dims": width, "activation": act_cls}
+    layer_config[len(dims)] = {"dims": 1, "activation": nn.Identity}
+    return layer_config
+
 
 ################################
 
@@ -65,6 +109,9 @@ class NeuralMean(Mean):
 
     This ensures the network outputs shape (batch_size, 1), which we
     then squeeze to (batch_size,).
+
+    Prefer ``NeuralMean.from_hidden`` for script-friendly hidden widths +
+    activation name (final dims=1 Identity is appended automatically).
     """
 
     def __init__(self, input_dim, layer_config):
@@ -85,6 +132,17 @@ class NeuralMean(Mean):
             raise ValueError(
                 f"For NeuralMean, the final layer in `layer_config` must have dims=1, but got {last_layer_dims}."
             )
+
+    @classmethod
+    def from_hidden(
+        cls,
+        input_dim: int,
+        hidden_dims: Sequence[int],
+        activation: str = "relu",
+    ) -> NeuralMean:
+        """Build a NeuralMean MLP from hidden widths and an activation name."""
+        layer_config = layer_config_from_hidden(hidden_dims, activation=activation)
+        return cls(input_dim, layer_config)
 
     def forward(self, x):
         """

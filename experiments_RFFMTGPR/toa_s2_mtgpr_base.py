@@ -66,6 +66,8 @@ from gpplus.training import (
     ConvergencePatienceStopCondition,
     GPTrainer,
     MinLossChangeStopCondition,
+    NIGPInputNoiseFreezeCallback,
+    NIGPMTWoodburyMarginalLogLikelihood,
     RFFMTParameterInitializer,
     evaluate_rff_mt_gp_model,
 )
@@ -272,6 +274,8 @@ def run_s2_toa_mtgpr(
     input_variable: str = "toa_reflectance",
     task_names: Sequence[str] | None = None,
     task_band_config: str | None = None,
+    nigp: bool = False,
+    freeze_epoch_nigp: int = 100,
 ) -> dict:
     """Train joint RFFMTGPR on S2 QoIs with shared default-band inputs."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
@@ -424,6 +428,13 @@ def run_s2_toa_mtgpr(
         y_val_scaled = y_scaler.transform(y_val_model) if standardize_y and y_scaler is not None else y_val_model
 
     callbacks = []
+    if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1:
+        callbacks.append(
+            NIGPInputNoiseFreezeCallback(
+                freeze_epochs=int(freeze_epoch_nigp),
+                verbose=training_verbose,
+            )
+        )
     if num_epochs > 1 and training_verbose:
         callbacks.append(
             make_train_loss_callback(
@@ -496,10 +507,28 @@ def run_s2_toa_mtgpr(
         rank_kernel=rank_kernel,
         rank_likelihood=0,
         likelihood=likelihood,
+        nigp=bool(nigp),
     )
+    if nigp:
+        print(
+            "NIGP: on (independent input noise, sigma_x=10^SoftClamp(raw), "
+            f"freeze_epochs={int(freeze_epoch_nigp)})"
+        )
+        _mt_method = DEFAULT_MT_WOODBURY_METHOD
+
+        class _NIGPMTMLL(NIGPMTWoodburyMarginalLogLikelihood):
+            def __init__(self, likelihood, model, jitter: float = 1e-6):
+                super().__init__(
+                    likelihood, model, jitter=jitter, method=_mt_method
+                )
+
+        _NIGPMTMLL.__name__ = f"NIGPMTWoodburyMarginalLogLikelihood_{_mt_method}"
+        mll_cls = _NIGPMTMLL
+    else:
+        mll_cls = mt_mll_class()
     trainer = GPTrainer(
         model,
-        mll_class=mt_mll_class(),
+        mll_class=mll_cls,
         num_epochs=num_epochs,
         num_inits=num_inits,
         seed=seed,
@@ -515,6 +544,11 @@ def run_s2_toa_mtgpr(
         callbacks=callbacks,
         stop_conditions=stop_conditions,
         parallel_verbose=parallel_verbose,
+        min_epochs=(
+            int(freeze_epoch_nigp)
+            if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
+            else 0
+        ),
     )
     t_train = time.time()
     runs = trainer.train()
@@ -662,6 +696,8 @@ def run_s2_toa_mtgpr(
         "feature_dim": feature_dim,
         "joint_feature_dim": joint_width,
         "rank_kernel": rank_kernel,
+        "nigp": bool(nigp),
+        "freeze_epoch_nigp": int(freeze_epoch_nigp),
         "ard": ard,
         "model_class": "RFFMTGPR",
         "num_epochs": num_epochs,
@@ -747,6 +783,7 @@ def run_s2_toa_mtgpr(
                     "correct_sorf": correct_sorf,
                     "rank_kernel": rank_kernel,
                     "rank_likelihood": 0,
+                    "nigp": bool(nigp),
                     "log_scale": bool(log_scale),
                     "logit_scale": bool(logit_task_names),
                     "log_scale_source": log_scale_source,

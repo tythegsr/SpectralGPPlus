@@ -17,15 +17,17 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-# QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
-QOI: list[str] | None = ["algae"]
-N_TRAIN = 16000
+QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
+# QOI: list[str] | None = ["algae"]
+N_TRAIN = 40000
 N_TEST = 5000
 NUM_RFF = 1600
 NUM_INITS = 1  # total random starts
 INIT_BATCH_SIZE = 1  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
 NUM_EPOCHS = 2000
-LR = 0.04
+LR = 0.1
+# Adam early stop: epochs with no train-loss improvement (not validation).
+STOP_PATIENCE = 40
 SEED = 42
 DEVICE = "cuda" # "cpu" | "cuda"
 DTYPE = "float64"  # "float32" | "float64"
@@ -41,29 +43,36 @@ REL_TOLERANCE = 0.01
 POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None  # e.g. "0,3,7" or None
 CORRECT_SORF = True
+SPECTRAL_KERNEL = "rbf"  # "rbf" | "matern32" (Matérn 3/2 via Student-t scale mixture)
 SAVE_CHECKPOINT = True
-RESPONSE_NOISE_PRIOR = True
-NOISE_VAR_FRACTION = 0.01
-NOISE_PRIOR_LOG_SCALE = 0.5
-# Parameter init overrides for raw_noise / raw_lengthscale / raw_outputscale.
+RESPONSE_NOISE_PRIOR = False
+NOISE_VAR_FRACTION = 5e-5
+NOISE_PRIOR_LOG_SCALE = 1.0
+# Parameter init overrides for raw_noise / raw_lengthscale / raw_outputscale / raw_input_noise.
 # None or {} = library defaults. Example:
 #   {"raw_noise": {"method": "uniform", "lower": -5.0, "upper": -1.0},
 #    "raw_lengthscale": {"method": "normal", "mean": -1.0, "std": 1.0},
-#    "raw_outputscale": {"method": "normal", "mean": -2.0, "std": 1.5}}
-INITIALIZER_PARAMETER_CONFIGS: dict | None = {"raw_lengthscale": {"method": "normal", "mean": -1.0, "std": 1.0}}
+#    "raw_outputscale": {"method": "normal", "mean": -2.0, "std": 1.5},
+#    "raw_input_noise": {"method": "uniform", "lower": -4.0, "upper": -1.0}}  # NIGP default
+# July29 LOOK (adjusted_init_ls) used mean=-4; library default mean=-2 stalls aot.
+INITIALIZER_PARAMETER_CONFIGS: dict | None = None
+    # {
+    # "raw_lengthscale": {"method": "normal", "mean": -4.0, "std": 1.0}
+    # "raw_lengthscale": {"method": "normal", "mean": -2.64, "std": 1.2}
+    # }
 USE_ABLATION_INIT_OVERRIDES = False  # if True and INITIALIZER_PARAMETER_CONFIGS empty, use ablation winners
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20262707.nc"  # None = snow_toa_simulations_20262107.nc
-INPUT_VARIABLE = "toa_radiance"
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20260308.nc"  # None = snow_toa_simulations_20262107.nc
+INPUT_VARIABLE = "toa_reflectance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
 # LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size"]
-LOG_SCALE_QOI: list[str] | None = None
-LOGIT_SCALE_QOI: list[str] | None = None
+LOG_SCALE_QOI: list[str] | None = []
+LOGIT_SCALE_QOI: list[str] | None = []
 # Soft probabilistic bounds: same length/order as QOI. None = no bound on that side.
 # Do not set bounds on log/logit-warped QoIs.
 BOUND_MIN: list[float | None] | None = None
@@ -75,13 +84,30 @@ BOUND_PENALTY_LAM_MIN = 0.0
 BOUND_PENALTY_ALPHA = 10.0
 BOUND_PENALTY_MAX_POINTS: int | None = 4096
 # Catoni PAC-Bayes KL on learnable parameters (wraps base / bound-penalized MLL).
-PAC_BAYES = True
-PAC_BAYES_TEMPERATURE = 4.0
-PAC_BAYES_PRIOR_STD = 0.5
-PAC_BAYES_POSTERIOR_STD = 0.1
+PAC_BAYES = False
+PAC_BAYES_TEMPERATURE = 2.55
+PAC_BAYES_PRIOR_STD = 0.75
+PAC_BAYES_POSTERIOR_STD = 0.5
+# Classic NIGP: learnable independent per-dimension input noise (σ_x=10^SoftClamp(raw)).
+# Init via INITIALIZER_PARAMETER_CONFIGS["raw_input_noise"] (library default Uniform(-4, -1)).
+NIGP = True
+# Freeze raw_input_noise for this many Adam epochs (0 = learn from start).
+FREEZE_EPOCH_NIGP = 100
+# Paper-style outer-loop slope refreshes after NIGP unlock (None = every epoch).
+# E.g. 20 with FREEZE=100 and NUM_EPOCHS=2000 → ~20 ∇μ recomputes over the NIGP phase.
+NIGP_SLOPE_REFRESHES: int | None = None
+# Freeze likelihood noise for this many Adam epochs (0 = off). Skips Woodbury tr(Λ⁻¹).
+FREEZE_EPOCH_NOISE = 0
+# Mean: "constant" | "neural". NeuralMean + TRAIN_MODE="batched" is unsupported.
+# Final MLP output is always dims=1 (Identity); NEURAL_MEAN_HIDDEN are hidden widths only.
+MEAN_TYPE = "constant"  # "constant" | "neural"
+NEURAL_MEAN_HIDDEN = [64, 16]
+NEURAL_MEAN_ACTIVATION = "tanh"  # relu|tanh|gelu|silu|identity
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
+    "experiments_toa/configs/s2_task_bands_all.json"
+    # "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
+
 # ---------------------------------------------------------------------------
 
 if str(_ROOT) not in sys.path:
@@ -122,12 +148,27 @@ if __name__ == "__main__":
         task_band_str = ""
 
     x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
+    sk_str = f"_{SPECTRAL_KERNEL}" if SPECTRAL_KERNEL else ""
+    nigp_str = f"_nigp" if NIGP else ""
+    pac_bayes_str = f"_pacbayes" if PAC_BAYES else ""
+    freeze_epoch_nigp_str = f"_freezeepochnigp{FREEZE_EPOCH_NIGP}" if FREEZE_EPOCH_NIGP > 0 and NIGP else ""
+    slope_refreshes_str = (
+        f"_sloperefreshes{NIGP_SLOPE_REFRESHES}"
+        if NIGP and NIGP_SLOPE_REFRESHES is not None
+        else ""
+    )
+    nnmean_str = (
+        f"_nnmean{'x'.join(str(int(d)) for d in NEURAL_MEAN_HIDDEN)}"
+        if MEAN_TYPE == "neural"
+        else ""
+    )
 
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/July29/adjusted_init_ls_pacbayes/s2_toa_sorf_{NUM_INITS}inits"
+        f"experiments_SORF/results/Aug11/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
-        f"lr{LR}{noise_str}{task_band_str}{x_tf_str}_"
+        f"lr{LR}{noise_str}{task_band_str}{x_tf_str}{sk_str}{nigp_str}{pac_bayes_str}"
+        f"{freeze_epoch_nigp_str}{slope_refreshes_str}{nnmean_str}_"
         f"dtype{DTYPE}"
     )
     log_file = LOG_FILE
@@ -149,7 +190,13 @@ if __name__ == "__main__":
         f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  "
         f"bound_min={BOUND_MIN} bound_max={BOUND_MAX}  "
         f"bound_lambda_learnable={BOUND_PENALTY_LAMBDA_LEARNABLE}  x_transform={X_TRANSFORM}  "
-        f"pac_bayes={PAC_BAYES}  init_overrides={init_pcs or {}}  qoi={QOI}"
+        f"pac_bayes={PAC_BAYES}  nigp={NIGP}  freeze_epoch_nigp={FREEZE_EPOCH_NIGP}  "
+        f"nigp_slope_refreshes={NIGP_SLOPE_REFRESHES}  "
+        f"stop_patience={STOP_PATIENCE}  "
+        f"mean_type={MEAN_TYPE}  neural_mean_hidden={NEURAL_MEAN_HIDDEN}  "
+        f"neural_mean_activation={NEURAL_MEAN_ACTIVATION}  "
+        f"init_overrides={init_pcs or {}}  qoi={QOI}  "
+        f"spectral_kernel={SPECTRAL_KERNEL}"
     )
 
     run_s2_toa_sorf(
@@ -183,6 +230,7 @@ if __name__ == "__main__":
         noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
         initializer_parameter_configs=init_pcs,
         correct_sorf=CORRECT_SORF,
+        spectral_kernel=SPECTRAL_KERNEL,
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
@@ -201,5 +249,13 @@ if __name__ == "__main__":
         pac_bayes_temperature=PAC_BAYES_TEMPERATURE,
         pac_bayes_prior_std=PAC_BAYES_PRIOR_STD,
         pac_bayes_posterior_std=PAC_BAYES_POSTERIOR_STD,
+        nigp=NIGP,
+        freeze_epoch_nigp=FREEZE_EPOCH_NIGP,
+        nigp_slope_refreshes=NIGP_SLOPE_REFRESHES,
+        freeze_epoch_noise=FREEZE_EPOCH_NOISE,
+        adam_stop_patience=STOP_PATIENCE,
         train_mode=TRAIN_MODE,
+        mean_type=MEAN_TYPE,
+        neural_mean_hidden=NEURAL_MEAN_HIDDEN,
+        neural_mean_activation=NEURAL_MEAN_ACTIVATION,
     )

@@ -17,12 +17,13 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = None  # None = all 11; e.g. ["algae", "fsnow"]
+# QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"]  # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = ["algae"]  # None = all 11; e.g. ["algae", "fsnow"]
 N_TRAIN = 16000
 N_TEST = 5000
 # int (shared p) or path to per-QoI JSON from s2_pca_svd_analysis.py
 N_COMPONENTS: int | str = (
-    "experiments_toa/configs/s2_task_pca_components_var99_subset.json"
+    "experiments_toa/configs/s2_task_pca_components_ridge_full.json"
 )
 PARTITION_SIZE = 2000
 NUM_INITS = 4
@@ -50,15 +51,21 @@ NOISE_VAR_FRACTION = 0.25
 NOISE_PRIOR_LOG_SCALE = 0.5
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
-DATA_PATH: str | None = None  # None = snow_toa_simulations_20262107.nc
-INPUT_VARIABLE = "toa_radiance"
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20260308.nc"  # None = snow_toa_simulations_20262107.nc
+INPUT_VARIABLE = "toa_reflectance"
 X_TRANSFORM = "none"  # "none" | "log1p"
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
-LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
-LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
+LOG_SCALE_QOI: list[str] | None = []
+LOGIT_SCALE_QOI: list[str] | None = []
+# Classic NIGP: learnable independent per-PCA-dim input noise (σ_x=10^SoftClamp(raw)).
+# Init via initializer (library default Uniform(-4, -1) on raw_input_noise).
+NIGP = True
+# Freeze raw_input_noise for this many Adam epochs (0 = learn from start).
+FREEZE_EPOCH_NIGP = 100
 # Pair full-band PCA configs with s2_task_bands_all.json
 TASK_BAND_CONFIG: str | None = (
-    "experiments_toa/configs/s2_task_bands_from_corr.json"
+    "experiments_toa/configs/s2_task_bands_all.json"
+    # "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
 # ---------------------------------------------------------------------------
 
@@ -80,7 +87,26 @@ def run_s2_toa_pca_gpr_entry(**kwargs) -> dict:
 
 
 if __name__ == "__main__":
-    save_path = SAVE_PATH or "experiments_PCA/results/July21/s2_toa_pca_gpr"
+    if RESPONSE_NOISE_PRIOR:
+        noise_str = f"_noisevarfrac{NOISE_VAR_FRACTION}_noisepriorlogscale{NOISE_PRIOR_LOG_SCALE}"
+    else:
+        noise_str = ""
+
+    if TASK_BAND_CONFIG is not None:
+        task_band_str = "_taskbandconfig"
+    else:
+        task_band_str = ""
+
+    x_tf_str = f"_x{X_TRANSFORM}" if X_TRANSFORM and X_TRANSFORM != "none" else ""
+    nigp_str = "_nigp" if NIGP else ""
+    p_tag = N_COMPONENTS if isinstance(N_COMPONENTS, int) else "perQoI"
+
+    save_path = SAVE_PATH or (
+        f"experiments_PCA/results/Aug05/NIGP_check/s2_toa_pca_gpr_{NUM_INITS}inits"
+        f"_p{p_tag}_part{PARTITION_SIZE}_"
+        f"lr{LR}{noise_str}{task_band_str}{x_tf_str}{nigp_str}_"
+        f"dtype{DTYPE}"
+    )
     gpplus.config.configure_logger(level=getattr(logging, LOG_LEVEL), log_to_file=LOG_FILE)
     dtype = torch.float32 if DTYPE == "float32" else torch.float64
     optimizer_kwargs = None
@@ -89,7 +115,9 @@ if __name__ == "__main__":
 
     print(
         f"PCA-GPR IDE config  prior={RESPONSE_NOISE_PRIOR}  "
-        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  "
+        f"x_transform={X_TRANSFORM}  nigp={NIGP}  freeze_epoch_nigp={FREEZE_EPOCH_NIGP}  "
+        f"qoi={QOI}"
     )
 
     run_s2_toa_pca_gpr(
@@ -127,4 +155,6 @@ if __name__ == "__main__":
         x_transform=X_TRANSFORM,
         log_scale_qoi=LOG_SCALE_QOI,
         logit_scale_qoi=LOGIT_SCALE_QOI,
+        nigp=NIGP,
+        freeze_epoch_nigp=FREEZE_EPOCH_NIGP,
     )

@@ -17,18 +17,13 @@ if str(_MTGPR_DIR) not in sys.path:
 
 from gpplus.models import RFFGPR
 from gpplus.utils import StandardScaler, UniformScaler
+from gpplus.utils.fs_path import ensure_parent, fs_path
 from toa_mtgpr_checkpoint import CHECKPOINT_VERSION, scaler_from_dict, scaler_to_dict
 
 
 def _fs_path(path: Path) -> str:
     """Absolute path string safe for Win32 paths longer than MAX_PATH (260)."""
-    resolved = path.expanduser().resolve()
-    text = str(resolved)
-    if os.name == "nt" and not text.startswith("\\\\?\\"):
-        # Extended-length path; required when repo + long run-dir names exceed 260.
-        return "\\\\?\\" + text
-    return text
-
+    return fs_path(path)
 
 @dataclass
 class ToaStgpBundle:
@@ -87,7 +82,7 @@ def save_toa_stgp_checkpoint(
     input_column_indices: torch.Tensor | None = None,
 ) -> Path:
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(path)
     if input_column_indices is None:
         input_column_indices = torch.arange(train_x.shape[-1], dtype=torch.int64)
     payload = {

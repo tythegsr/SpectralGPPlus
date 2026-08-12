@@ -8,6 +8,8 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
+from gpplus.utils.fs_path import ensure_parent, fs_path
+
 SCALAR_HYPERPARAM_KEYS = (
     "outputscale",
     "noise",
@@ -223,7 +225,7 @@ def plot_hyperparameter_curves(
 
     fig.suptitle(f"{title}\nBest init {best_init + 1}: hyperparameters during training", y=1.02)
     fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight")
+    ensure_parent(save_path)
+    fig.savefig(fs_path(save_path), bbox_inches="tight")
     plt.close(fig)
     return save_path

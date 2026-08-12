@@ -59,6 +59,11 @@ X_TRANSFORM = "none"  # "none" | "log1p"
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
 LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
 LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
+# Classic NIGP: learnable independent per-PCA-dim input noise (σ_x=10^SoftClamp(raw)).
+# Init via initializer (library default Uniform(-4, -1) on raw_input_noise).
+NIGP = False
+# Freeze raw_input_noise for this many Adam epochs (0 = learn from start).
+FREEZE_EPOCH_NIGP = 100
 # Pair full-band PCA configs with s2_task_bands_all.json
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
@@ -84,8 +89,9 @@ def run_s2_toa_pca_rff_entry(**kwargs) -> dict:
 
 if __name__ == "__main__":
     p_tag = N_COMPONENTS if isinstance(N_COMPONENTS, int) else "perQoI"
+    nigp_str = "_nigp" if NIGP else ""
     save_path = SAVE_PATH or (
-        f"experiments_PCA/results/s2_toa_pca_{RFF_SAMPLING}_{NUM_INITS}inits_p{p_tag}"
+        f"experiments_PCA/results/s2_toa_pca_{RFF_SAMPLING}_{NUM_INITS}inits_p{p_tag}{nigp_str}"
     )
     log_file = LOG_FILE
     if log_file is None and DEVICE.startswith("cuda"):
@@ -98,7 +104,9 @@ if __name__ == "__main__":
 
     print(
         f"PCA-RFF IDE config  sampling={RFF_SAMPLING}  prior={RESPONSE_NOISE_PRIOR}  "
-        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  "
+        f"x_transform={X_TRANSFORM}  nigp={NIGP}  freeze_epoch_nigp={FREEZE_EPOCH_NIGP}  "
+        f"qoi={QOI}"
     )
 
     run_s2_toa_pca_stgp(
@@ -139,4 +147,6 @@ if __name__ == "__main__":
         x_transform=X_TRANSFORM,
         log_scale_qoi=LOG_SCALE_QOI,
         logit_scale_qoi=LOGIT_SCALE_QOI,
+        nigp=NIGP,
+        freeze_epoch_nigp=FREEZE_EPOCH_NIGP,
     )

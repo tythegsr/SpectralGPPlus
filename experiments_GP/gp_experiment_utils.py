@@ -154,6 +154,7 @@ def build_gpr_model(
     y_train: torch.Tensor,
     *,
     ard: bool = True,
+    nigp: bool = False,
 ) -> GPR:
     """Build GPR with default mean/likelihood; kernel uses ARD when ard=True."""
     input_dim = x_train.shape[-1]
@@ -161,7 +162,12 @@ def build_gpr_model(
         kernel_module = kernels.LogScaleKernel(kernels.GaussianKernel(ard_num_dims=input_dim))
     else:
         kernel_module = kernels.LogScaleKernel(kernels.GaussianKernel())
-    return GPR(x_train, y_train, kernel_module=kernel_module)
+    return GPR(
+        x_train,
+        y_train,
+        kernel_module=kernel_module,
+        nigp=nigp,
+    )
 
 
 DEFAULT_ADAM_KWARGS = {

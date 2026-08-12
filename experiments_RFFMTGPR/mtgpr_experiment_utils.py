@@ -26,13 +26,15 @@ def json_default(obj: Any) -> float:
 
 
 def save_metrics_json(metrics: dict, save_path: str, title: str) -> str:
-    import os
+    from pathlib import Path
 
-    os.makedirs(save_path, exist_ok=True)
-    out_json = os.path.join(save_path, f"gp_{title}.json")
-    with open(out_json, "w", encoding="utf-8") as f:
+    from gpplus.utils.fs_path import ensure_dir, fs_path
+
+    ensure_dir(save_path)
+    out_json = Path(save_path) / f"gp_{title}.json"
+    with open(fs_path(out_json), "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2, default=json_default)
-    return out_json
+    return str(out_json)
 
 
 def compute_point_estimate_metrics(

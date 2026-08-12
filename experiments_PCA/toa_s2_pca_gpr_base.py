@@ -48,10 +48,13 @@ from experiments_toa.s2_reporting import (
 )
 from experiments_toa.s2_utils import (
     apply_x_transform,
+    compute_nigp_grad_diagnostics,
     compute_per_task_metrics,
     extract_ard_lengthscales,
+    extract_nigp_input_noise,
     macro_metric,
     map_ard_to_bands,
+    map_input_noise_to_bands,
     select_bands,
 )
 from experiments_toa.s2_y_transform import (
@@ -113,8 +116,14 @@ def _train_partition_gpr(
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.25,
     noise_prior_log_scale: float = 0.5,
+    nigp: bool = False,
+    freeze_epoch_nigp: int = 100,
 ) -> tuple[Any, dict, float]:
-    from gpplus.training import GPTrainer
+    from gpplus.training import (
+        GPTrainer,
+        NIGPExactMarginalLogLikelihood,
+        NIGPInputNoiseFreezeCallback,
+    )
 
     if num_epochs <= 1:
         optimizer_class = LBFGSScipy
@@ -154,9 +163,20 @@ def _train_partition_gpr(
             "noise_prior_loc": float(noise_prior.loc.detach().cpu()),
         }
 
-    model = build_gpr_model(z_part, y_part_fit, ard=ard)
+    model = build_gpr_model(
+        z_part,
+        y_part_fit,
+        ard=ard,
+        nigp=bool(nigp),
+    )
     if likelihood is not None:
         model.likelihood = likelihood
+
+    callbacks = []
+    if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1:
+        callbacks.append(
+            NIGPInputNoiseFreezeCallback(freeze_epochs=int(freeze_epoch_nigp))
+        )
 
     trainer = GPTrainer(
         model,
@@ -168,10 +188,16 @@ def _train_partition_gpr(
         optimizer_class=optimizer_class,
         optimizer_kwargs=optimizer_kwargs,
         initializer_kwargs=initializer_kwargs,
+        mll_class=NIGPExactMarginalLogLikelihood if nigp else None,
         n_jobs=n_jobs,
         inner_max_num_threads=1,
         cholesky_jitter=1e-6,
-        callbacks=[],
+        callbacks=callbacks,
+        min_epochs=(
+            int(freeze_epoch_nigp)
+            if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
+            else 0
+        ),
     )
     t0 = time.time()
     runs = trainer.train()
@@ -193,6 +219,11 @@ def _train_partition_gpr(
     }
     if noise_prior_meta:
         run_meta.update(noise_prior_meta)
+    nigp_info = extract_nigp_input_noise(model)
+    if nigp_info is not None:
+        run_meta["input_noise"] = list(nigp_info["input_noise"])
+        run_meta["input_noise_var"] = list(nigp_info["input_noise_var"])
+        run_meta["raw_input_noise"] = list(nigp_info["raw_input_noise"])
     return model, run_meta, train_time
 
 
@@ -251,6 +282,8 @@ def run_s2_toa_pca_gpr(
     top_m_partitions: int = 5,
     single_partition_index: int = 0,
     x_transform: str | None = None,
+    nigp: bool = False,
+    freeze_epoch_nigp: int = 100,
     **_unused_kwargs,
 ) -> dict:
     """
@@ -296,6 +329,13 @@ def run_s2_toa_pca_gpr(
         f"partition_size={partition_size}, "
         f"ARD={ard}, dtype={dtype}, inits={num_inits}, tasks={names}, input={input_variable}"
     )
+    if nigp:
+        print(
+            f"NIGP: on (independent input noise, "
+            f"sigma_x=10^SoftClamp(raw), freeze_epochs={int(freeze_epoch_nigp)})"
+        )
+    else:
+        print("NIGP: off")
     print(f"Band config: {band_cfg_path}")
     if pca_components_meta.get("config_path"):
         print(f"PCA components config: {pca_components_meta['config_path']}")
@@ -484,6 +524,8 @@ def run_s2_toa_pca_gpr(
                 response_noise_prior=response_noise_prior,
                 noise_var_fraction=noise_var_fraction,
                 noise_prior_log_scale=noise_prior_log_scale,
+                nigp=nigp,
+                freeze_epoch_nigp=freeze_epoch_nigp,
             )
             total_train_time += train_time
 
@@ -499,6 +541,49 @@ def run_s2_toa_pca_gpr(
             last_ard_mapped["raw_lengthscale"] = ard_info["raw_lengthscale"]
             last_ard_mapped["model_input_dim"] = int(z_part.shape[-1])
             last_ard_mapped["pca"] = pca_meta
+            nigp_info = extract_nigp_input_noise(model)
+            if nigp_info is not None:
+                nigp_mapped = map_input_noise_to_bands(
+                    nigp_info["input_noise"],
+                    band_indices,
+                    input_noise_var=nigp_info["input_noise_var"],
+                    wavelengths_nm=wavelengths_np,
+                    noise_space="pca_components",
+                )
+                nigp_mapped["raw_input_noise"] = nigp_info["raw_input_noise"]
+                try:
+                    nigp_grad = compute_nigp_grad_diagnostics(
+                        model,
+                        z_part,
+                        band_indices=band_indices,
+                        wavelengths_nm=wavelengths_np,
+                        noise_space="pca_components",
+                    )
+                except Exception as exc:
+                    print(
+                        f"{task_name} partition {k} NIGP grad diagnostics failed: {exc}"
+                    )
+                    nigp_grad = None
+                if nigp_grad is not None:
+                    for key in (
+                        "grad_mu_abs_mean",
+                        "grad_mu_abs_median",
+                        "grad_mu_sq_mean",
+                        "input_noise_contrib_mean",
+                        "input_noise_contrib_frac",
+                        "effective_input_term_mean",
+                        "n_points_total",
+                        "n_points_used",
+                        "max_points",
+                        "jitter",
+                    ):
+                        if key in nigp_grad:
+                            nigp_mapped[key] = nigp_grad[key]
+                    nigp_mapped["entries"] = nigp_grad["entries"]
+                last_ard_mapped["nigp"] = nigp_mapped
+                last_ard_mapped["input_noise"] = nigp_mapped["input_noise"]
+                last_ard_mapped["input_noise_var"] = nigp_mapped["input_noise_var"]
+                run_meta["nigp_mapping"] = nigp_mapped
 
             model.eval()
             t_pred = time.time()
@@ -621,6 +706,22 @@ def run_s2_toa_pca_gpr(
 
         # Primary-mode extras: for warped QoIs, recover warped-space arrays from physical medians.
         primary_tm = dict(mode_metrics["full"][task_name])
+        nigp_last = last_ard_mapped.get("nigp")
+        if isinstance(nigp_last, dict):
+            primary_tm["nigp_band_mapping"] = nigp_last
+            for key in (
+                "input_noise",
+                "input_noise_var",
+                "raw_input_noise",
+                "grad_mu_abs_mean",
+                "grad_mu_abs_median",
+                "grad_mu_sq_mean",
+                "input_noise_contrib_mean",
+                "input_noise_contrib_frac",
+                "effective_input_term_mean",
+            ):
+                if key in nigp_last:
+                    primary_tm[key] = nigp_last[key]
         if task_uses_log_scale(task_name, warps=warps):
             log_mu_t = torch.as_tensor(np.log(np.clip(mu_full, 1e-300, None)))
             # Invert physical std ≈ median * sqrt(expm1(σ²)) for a rough σ.
@@ -772,6 +873,8 @@ def run_s2_toa_pca_gpr(
         "primary_ensemble_mode": "full",
         "pca_partition_mode": "independent_gpr_per_task_partition",
         "ard": ard,
+        "nigp": bool(nigp),
+        "freeze_epoch_nigp": int(freeze_epoch_nigp),
         "num_epochs": num_epochs,
         "num_inits": num_inits,
         "optimizer": opt_name,

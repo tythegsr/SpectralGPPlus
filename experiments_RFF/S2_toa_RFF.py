@@ -29,6 +29,7 @@ DTYPE = "float32"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 ARD = True
+SPECTRAL_KERNEL = "rbf"  # "rbf" | "matern32"
 SAVE_PATH: str | None = None
 MONITOR_VALIDATION = True
 PLOT = True
@@ -51,6 +52,14 @@ X_TRANSFORM = "none"  # "none" | "log1p"
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
 LOG_SCALE_QOI: list[str] | None = ["algae", "dust", "grain_size", "liquid_water"]
 LOGIT_SCALE_QOI: list[str] | None = ["cos_i", "aot"]
+# Classic NIGP: learnable independent per-dimension input noise (σ_x=10^SoftClamp(raw)).
+# Init via initializer_parameter_configs["raw_input_noise"] (library default Uniform(-4, -1)).
+NIGP = False
+# Mean: "constant" | "neural". NeuralMean does not support batched multi-init.
+# Final MLP output is always dims=1; NEURAL_MEAN_HIDDEN are hidden widths only.
+MEAN_TYPE = "constant"  # "constant" | "neural"
+NEURAL_MEAN_HIDDEN = [64, 32]
+NEURAL_MEAN_ACTIVATION = "relu"  # relu|tanh|gelu|silu|identity
 TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_from_corr.json"
 )  # None = s2_task_bands_default.json
@@ -74,9 +83,16 @@ def run_s2_toa_rff_entry(**kwargs) -> dict:
 
 
 if __name__ == "__main__":
+    nnmean_str = (
+        f"_nnmean{'x'.join(str(int(d)) for d in NEURAL_MEAN_HIDDEN)}"
+        if MEAN_TYPE == "neural"
+        else ""
+    )
     save_path = SAVE_PATH or (
         f"experiments_RFF/results/s2_toa_rff_{NUM_INITS}inits_numrff{NUM_RFF}_"
         f"lr{LR}_noisevarfrac{NOISE_VAR_FRACTION}_noisepriorlogscale{NOISE_PRIOR_LOG_SCALE}"
+        + (f"_{SPECTRAL_KERNEL}" if SPECTRAL_KERNEL != "rbf" else "")
+        + nnmean_str
     )
     log_file = LOG_FILE
     if log_file is None and DEVICE.startswith("cuda"):
@@ -89,7 +105,9 @@ if __name__ == "__main__":
 
     print(
         f"RFF IDE config  prior={RESPONSE_NOISE_PRIOR}  "
-        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  qoi={QOI}"
+        f"log_qoi={LOG_SCALE_QOI} logit_qoi={LOGIT_SCALE_QOI}  x_transform={X_TRANSFORM}  "
+        f"nigp={NIGP}  mean_type={MEAN_TYPE}  neural_mean_hidden={NEURAL_MEAN_HIDDEN}  "
+        f"qoi={QOI}  spectral_kernel={SPECTRAL_KERNEL}"
     )
 
     run_s2_toa_rff(
@@ -120,10 +138,15 @@ if __name__ == "__main__":
         response_noise_prior=RESPONSE_NOISE_PRIOR,
         noise_var_fraction=NOISE_VAR_FRACTION,
         noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
+        spectral_kernel=SPECTRAL_KERNEL,
         input_variable=INPUT_VARIABLE,
         task_names=parse_task_names(QOI),
         task_band_config=TASK_BAND_CONFIG,
         x_transform=X_TRANSFORM,
         log_scale_qoi=LOG_SCALE_QOI,
         logit_scale_qoi=LOGIT_SCALE_QOI,
+        nigp=NIGP,
+        mean_type=MEAN_TYPE,
+        neural_mean_hidden=NEURAL_MEAN_HIDDEN,
+        neural_mean_activation=NEURAL_MEAN_ACTIVATION,
     )

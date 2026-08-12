@@ -16,6 +16,8 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
+from gpplus.utils.fs_path import ensure_parent, fs_path
+
 RESULTS_ROOT = Path("experiments_RFFMTGPR/results")
 
 
@@ -212,8 +214,8 @@ def _plot_all_inits(
         if best_handles:
             ax.legend(best_handles, best_labels, loc="best", fontsize=9)
     fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight")
+    ensure_parent(save_path)
+    fig.savefig(fs_path(save_path), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -257,8 +259,8 @@ def _plot_best_init(
     ax.set_title(f"{title}\nBest init {best_init + 1} (final train loss={train_str})")
     ax.legend(loc="best", fontsize=9)
     fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight")
+    ensure_parent(save_path)
+    fig.savefig(fs_path(save_path), bbox_inches="tight")
     plt.close(fig)
 
 

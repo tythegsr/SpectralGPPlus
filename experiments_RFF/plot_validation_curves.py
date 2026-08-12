@@ -16,6 +16,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
+from gpplus.utils.fs_path import ensure_dir, ensure_parent, fs_path
 from plot_multid_slice_predictions import sanitize_plot_subdir
 
 RESULTS_ROOT = Path("experiments_RFF/results/rff_batch")
@@ -226,8 +227,8 @@ def _plot_all_inits(
         if best_handles:
             ax.legend(best_handles, best_labels, loc="best", fontsize=9)
     fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight")
+    ensure_parent(save_path)
+    fig.savefig(fs_path(save_path), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -275,8 +276,8 @@ def _plot_best_init(
     ax.set_title(f"{title}\nBest init {best_init + 1} (final train loss={train_str})")
     ax.legend(loc="best", fontsize=9)
     fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, bbox_inches="tight")
+    ensure_parent(save_path)
+    fig.savefig(fs_path(save_path), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -351,7 +352,7 @@ def plot_all(
     if not results_root.is_dir():
         raise FileNotFoundError(f"RESULTS_ROOT does not exist: {results_root}")
 
-    plot_output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(plot_output_dir)
     total = 0
 
     if subdirs is not None:

@@ -77,6 +77,10 @@ class SingleRunResult(TypedDict):
     state_dict: dict[str, Any]
     callback_data: NotRequired[dict[str, Any]]
     final_lr: NotRequired[float]
+    # Set when training aborted mid-run but the best earlier epoch was salvaged.
+    error: NotRequired[str]
+    aborted: NotRequired[bool]
+    aborted_epoch: NotRequired[int]
 
 
 class RunResult(TypedDict, total=False):
@@ -84,6 +88,8 @@ class RunResult(TypedDict, total=False):
     loss: Optional[float]
     state_dict: Optional[dict[str, Any]]
     error: str
+    aborted: bool
+    aborted_epoch: int
 
 
 def build_run_error(run_index: int, exc: Exception) -> RunResult:
@@ -122,7 +128,11 @@ def get_effective_optimizer_kwargs(optimizer_class, user_kwargs: Optional[dict])
 
 
 def select_best_run(results: list[RunResult]) -> Optional[RunResult]:
-    """Return the best successful run by minimum loss."""
+    """Return the best run by minimum loss.
+
+    Includes runs that aborted mid-training but still returned a salvaged
+    ``state_dict`` / ``loss`` from an earlier best epoch.
+    """
     valid_runs = [
         run_result
         for run_result in results
@@ -154,7 +164,17 @@ def _collect_parallel_results(
         run_index = result.get("run_index")
         error = result.get("error")
         loss = result.get("loss")
-        if error:
+        if error and result.get("state_dict") is not None and loss is not None:
+            logger.warning(
+                "Run %s/%s finished (#%s) with mid-train abort; salvaged best "
+                "loss=%.6f (epoch crash: %s)",
+                done,
+                num_inits,
+                run_index,
+                float(loss),
+                error,
+            )
+        elif error:
             logger.warning(
                 "Run %s/%s finished (#%s) with error: %s",
                 done,

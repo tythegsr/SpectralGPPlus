@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments_toa.s2_constants import S2_LOG_SCALE_TASK_NAMES
+from gpplus.utils.fs_path import ensure_dir, ensure_parent, fs_path
 
 _TASK_LABELS: dict[str, str] = {
     "algae": "algae",
@@ -87,7 +88,7 @@ def save_s2_predictions_npz(
     logit_scale_tasks: Sequence[str] | None = None,
 ) -> Path:
     save_path = Path(save_path)
-    save_path.mkdir(parents=True, exist_ok=True)
+    ensure_dir(save_path)
     out = save_path / f"predictions_{title}.npz"
     payload = {
         "task_names": np.asarray(list(task_names)),
@@ -120,7 +121,7 @@ def save_s2_predictions_npz(
         payload["logit_scale_tasks"] = np.asarray(list(logit_scale_tasks))
     for name, bands in bands_by_task.items():
         payload[f"bands_{name}"] = np.asarray(list(bands), dtype=np.int64)
-    np.savez_compressed(out, **payload)
+    np.savez_compressed(fs_path(out), **payload)
     return out
 
 
@@ -135,7 +136,7 @@ def plot_s2_task_scatter(
     title: str | None = None,
 ) -> Path:
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(out_path)
     fig, ax = plt.subplots(figsize=(5.5, 5.0))
     ax.scatter(y_true, y_pred, s=8, alpha=0.35, edgecolors="none")
     lo = float(min(np.min(y_true), np.min(y_pred)))
@@ -158,7 +159,7 @@ def plot_s2_task_scatter(
     ax.set_title(title or f"{task_name}: predicted vs true")
     ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=160, bbox_inches="tight")
+    fig.savefig(fs_path(out_path), dpi=160, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
@@ -209,7 +210,7 @@ def plot_s2_posterior_examples(
     post = _ensure_plot_toa_posterior()
 
     save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(save_dir)
     paths: list[str] = []
 
     names = list(task_names)
@@ -309,7 +310,7 @@ def plot_s2_posterior_examples(
 
         fig.suptitle(f"TOA test example {ex}", fontsize=11)
         out = save_dir / f"example_{ex:04d}.png"
-        fig.savefig(out, bbox_inches="tight")
+        fig.savefig(fs_path(out), bbox_inches="tight")
         plt.close(fig)
         paths.append(str(out))
     return paths
