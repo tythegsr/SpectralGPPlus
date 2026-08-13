@@ -8,6 +8,7 @@ from experiments_toa.data import (
     get_maximin_pools,
     load_toa_data,
     normalize_design_coords,
+    resolve_toa_pool_sizes,
     select_maximin_indices,
 )
 from experiments_toa.s2_constants import S2_INPUT_DIM, S2_TASK_NAMES
@@ -24,5 +25,6 @@ __all__ = [
     "load_toa_data",
     "load_s2_toa_data",
     "normalize_design_coords",
+    "resolve_toa_pool_sizes",
     "select_maximin_indices",
 ]

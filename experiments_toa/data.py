@@ -9,12 +9,64 @@ from typing import Literal
 import numpy as np
 import torch
 
-# Fixed restricted pools for TOA splits.
+# Default restricted pools for TOA splits (legacy ~59k S1/S2 files).
 # Smaller n_train / n_val / n_test take prefixes of these pools so val/test
-# stay identical when training size is reduced.
+# stay identical when training size is reduced. Larger NetCDFs grow the
+# reserved pools via :func:`resolve_toa_pool_sizes`.
 TOA_TRAIN_POOL_SIZE = 49000
 TOA_VAL_POOL_SIZE = 4900
 TOA_TEST_POOL_SIZE = 5000
+
+
+def resolve_toa_pool_sizes(
+    n_total: int,
+    n_train: int,
+    n_val: int = 0,
+    n_test: int = TOA_TEST_POOL_SIZE,
+    *,
+    train_pool_size: int = TOA_TRAIN_POOL_SIZE,
+    val_pool_size: int = TOA_VAL_POOL_SIZE,
+    test_pool_size: int = TOA_TEST_POOL_SIZE,
+) -> tuple[int, int, int]:
+    """
+    Resolve reserved train/val/test pool sizes for a dataset of ``n_total`` rows.
+
+    Val/test pools grow if the requested split exceeds the legacy defaults.
+    The train pool is ``min(leftover, max(train_pool_size, n_train))`` so a
+    120k NetCDF can train past 49k without changing prefixes on smaller
+    ``n_train`` when val/test pool sizes stay the same.
+
+    Returns
+    -------
+    train_pool_size, val_pool_size, test_pool_size
+    """
+    if n_total < 0:
+        raise ValueError(f"n_total must be >= 0, got {n_total}")
+    if n_train < 0 or n_val < 0 or n_test < 0:
+        raise ValueError(
+            f"n_train, n_val, n_test must be >= 0, got "
+            f"n_train={n_train}, n_val={n_val}, n_test={n_test}"
+        )
+
+    test_pool = max(int(test_pool_size), int(n_test))
+    val_pool = max(int(val_pool_size), int(n_val))
+    leftover = int(n_total) - test_pool - val_pool
+    if leftover < 0:
+        raise ValueError(
+            f"Reserved val={val_pool} + test={test_pool} = {val_pool + test_pool} "
+            f"exceed dataset size {n_total}"
+        )
+    train_pool = min(leftover, max(int(train_pool_size), int(n_train)))
+    if n_train > train_pool:
+        raise ValueError(
+            f"n_train={n_train} exceeds available train pool {train_pool} "
+            f"(n_total={n_total} - val_pool={val_pool} - test_pool={test_pool})"
+        )
+    if n_val > val_pool:
+        raise ValueError(f"n_val={n_val} exceeds val_pool_size={val_pool}")
+    if n_test > test_pool:
+        raise ValueError(f"n_test={n_test} exceeds test_pool_size={test_pool}")
+    return train_pool, val_pool, test_pool
 
 # Full-factorial design ranges for (cos, grain) normalization to [0, 1]^2.
 TOA_COS_MIN = 0.06
@@ -283,16 +335,19 @@ def load_toa_data(
       pools; val/test are fixed across methods and training sizes.
 
     Args:
-        n_train: Number of training samples (must be <= train_pool_size).
-        n_test: Number of test samples (must be <= test_pool_size).
-        n_val: Number of validation samples (must be <= val_pool_size;
-            0 returns empty val tensors/indices).
+        n_train: Number of training samples (must fit in leftover after val/test).
+        n_test: Number of test samples (grows the reserved test pool if larger
+            than ``test_pool_size``).
+        n_val: Number of validation samples (grows the reserved val pool if
+            larger than ``val_pool_size``; 0 still reserves the val pool but
+            returns empty val tensors/indices).
         seed: Random seed for shuffled split (random mode); also used in the
             maximin cache key (construction itself is deterministic from ``y``).
         data_path: Path to toa_data_flattened.npz (defaults to repo root).
-        train_pool_size: Fixed training pool size (default 49000).
-        val_pool_size: Fixed validation pool size (default 4900).
-        test_pool_size: Fixed test pool size (default 5000).
+        train_pool_size: Default training pool size (grows to ``n_train`` when
+            the dataset has leftover rows).
+        val_pool_size: Default validation pool size (default 4900).
+        test_pool_size: Default test pool size (default 5000).
         train_subset: ``"random"`` or ``"maximin"``.
         cache_dir: Directory for maximin pool cache (default ``experiments_toa/cache``).
 
@@ -317,23 +372,15 @@ def load_toa_data(
     y = torch.stack([y_cos, y_grain], dim=1)
 
     n_total = X.shape[0]
-    pool_total = train_pool_size + val_pool_size + test_pool_size
-    if pool_total > n_total:
-        raise ValueError(
-            f"Restricted pools train={train_pool_size} + val={val_pool_size} + "
-            f"test={test_pool_size} = {pool_total} exceed dataset size {n_total}"
-        )
-    if n_train < 0 or n_val < 0 or n_test < 0:
-        raise ValueError(
-            f"n_train, n_val, n_test must be >= 0, got "
-            f"n_train={n_train}, n_val={n_val}, n_test={n_test}"
-        )
-    if n_train > train_pool_size:
-        raise ValueError(f"n_train={n_train} exceeds train_pool_size={train_pool_size}")
-    if n_val > val_pool_size:
-        raise ValueError(f"n_val={n_val} exceeds val_pool_size={val_pool_size}")
-    if n_test > test_pool_size:
-        raise ValueError(f"n_test={n_test} exceeds test_pool_size={test_pool_size}")
+    train_pool_size, val_pool_size, test_pool_size = resolve_toa_pool_sizes(
+        n_total,
+        n_train,
+        n_val,
+        n_test,
+        train_pool_size=train_pool_size,
+        val_pool_size=val_pool_size,
+        test_pool_size=test_pool_size,
+    )
 
     if train_subset == "maximin":
         test_pool, val_pool, train_pool = get_maximin_pools(

@@ -17,11 +17,11 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
-# QOI: list[str] | None = ["algae"]
-N_TRAIN = 40000
-N_TEST = 5000
-NUM_RFF = 1600
+# QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
+QOI: list[str] | None = None
+N_TRAIN = 100000
+N_TEST = 10000
+NUM_RFF = 800
 NUM_INITS = 1  # total random starts
 INIT_BATCH_SIZE = 1  # concurrent GPU wave size (VRAM knob only; must divide NUM_INITS)
 NUM_EPOCHS = 2000
@@ -66,7 +66,7 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
-DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_only_20260308.nc"  # None = snow_toa_simulations_20262107.nc
+DATA_PATH: str | None = "experiments_toa/data 11 QoI/snow_toa_fsnow_70to100_20261208.nc"  # None = snow_toa_simulations_20262107.nc
 INPUT_VARIABLE = "toa_reflectance"
 X_TRANSFORM = "none"  # "none" | "log1p" (before UniformScaler / StandardScaler)
 # None = auto from NetCDF attrs for log; [] disables. Logit has no NetCDF auto.
@@ -95,7 +95,7 @@ NIGP = True
 FREEZE_EPOCH_NIGP = 100
 # Paper-style outer-loop slope refreshes after NIGP unlock (None = every epoch).
 # E.g. 20 with FREEZE=100 and NUM_EPOCHS=2000 → ~20 ∇μ recomputes over the NIGP phase.
-NIGP_SLOPE_REFRESHES: int | None = None
+NIGP_SLOPE_REFRESHES: int | None = 20
 # Freeze likelihood noise for this many Adam epochs (0 = off). Skips Woodbury tr(Λ⁻¹).
 FREEZE_EPOCH_NOISE = 0
 # Mean: "constant" | "neural". NeuralMean + TRAIN_MODE="batched" is unsupported.
@@ -165,7 +165,7 @@ if __name__ == "__main__":
 
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
-        f"experiments_SORF/results/Aug11/s2_toa_sorf_{NUM_INITS}inits"
+        f"experiments_SORF/results/Aug12/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}{sk_str}{nigp_str}{pac_bayes_str}"
         f"{freeze_epoch_nigp_str}{slope_refreshes_str}{nnmean_str}_"

@@ -14,6 +14,7 @@ from experiments_toa.data import (
     TOA_TEST_POOL_SIZE,
     TOA_TRAIN_POOL_SIZE,
     TOA_VAL_POOL_SIZE,
+    resolve_toa_pool_sizes,
 )
 from experiments_toa.s2_constants import (
     S2_DEFAULT_DATA_PATH,
@@ -149,7 +150,9 @@ def load_s2_toa_data(
     """
     Load S2 TOA data and return train/val/test splits.
 
-    Uses deterministic random pools (same sizes/prefix semantics as S1).
+    Uses deterministic random pools (same prefix semantics as S1).
+    Pool sizes start at the legacy 49k / 4.9k / 5k defaults and grow when
+    ``n_train`` / ``n_test`` / ``n_val`` (or leftover rows) require it.
     Maximin is intentionally not used for the 11-D QoI design.
 
     Returns
@@ -168,23 +171,15 @@ def load_s2_toa_data(
     wavelengths = torch.tensor(wl, dtype=torch.float64)
 
     n_total = X.shape[0]
-    pool_total = train_pool_size + val_pool_size + test_pool_size
-    if pool_total > n_total:
-        raise ValueError(
-            f"Restricted pools train={train_pool_size} + val={val_pool_size} + "
-            f"test={test_pool_size} = {pool_total} exceed dataset size {n_total}"
-        )
-    if n_train < 0 or n_val < 0 or n_test < 0:
-        raise ValueError(
-            f"n_train, n_val, n_test must be >= 0, got "
-            f"n_train={n_train}, n_val={n_val}, n_test={n_test}"
-        )
-    if n_train > train_pool_size:
-        raise ValueError(f"n_train={n_train} exceeds train_pool_size={train_pool_size}")
-    if n_val > val_pool_size:
-        raise ValueError(f"n_val={n_val} exceeds val_pool_size={val_pool_size}")
-    if n_test > test_pool_size:
-        raise ValueError(f"n_test={n_test} exceeds test_pool_size={test_pool_size}")
+    train_pool_size, val_pool_size, test_pool_size = resolve_toa_pool_sizes(
+        n_total,
+        n_train,
+        n_val,
+        n_test,
+        train_pool_size=train_pool_size,
+        val_pool_size=val_pool_size,
+        test_pool_size=test_pool_size,
+    )
 
     g = torch.Generator()
     g.manual_seed(seed)
