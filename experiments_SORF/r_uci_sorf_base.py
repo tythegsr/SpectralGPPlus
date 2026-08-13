@@ -25,6 +25,7 @@ from gpplus.training import (
     RFFWoodburyMarginalLogLikelihood,
     evaluate_rff_gp_model,
     nigp_woodbury_mll_class,
+    pac_bayes_mll_class,
 )
 from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
@@ -180,6 +181,10 @@ def run_uci_sorf(
     nigp: bool = False,
     freeze_epoch_nigp: int = 100,
     nigp_slope_refreshes: int | None = None,
+    pac_bayes: bool = False,
+    pac_bayes_temperature: float = 2.55,
+    pac_bayes_prior_std: float = 0.75,
+    pac_bayes_posterior_std: float = 0.5,
 ) -> dict:
     """
     Train SORF-GP on a UCI/Kaggle regression dataset and evaluate on held-out test points.
@@ -242,8 +247,9 @@ def run_uci_sorf(
         else ""
     )
     sk_tag = f"_{sk}" if sk != "rbf" else ""
+    pac_tag = "_pacbayes" if pac_bayes else ""
     title = (
-        f"{slug}_trainFrac{train_frac:.4f}_sorfD{num_sorf}{sk_tag}{nigp_tag}{freeze_tag}{slope_tag}_"
+        f"{slug}_trainFrac{train_frac:.4f}_sorfD{num_sorf}{sk_tag}{nigp_tag}{freeze_tag}{slope_tag}{pac_tag}_"
         f"seed{seed}_nTrain{n_train}_nTest{n_test}"
     )
     print("=" * 60)
@@ -262,6 +268,13 @@ def run_uci_sorf(
         )
     else:
         print("NIGP: off")
+    if pac_bayes:
+        print(
+            f"PAC-Bayes MLL: on (temperature={pac_bayes_temperature}, "
+            f"prior_std={pac_bayes_prior_std}, posterior_std={pac_bayes_posterior_std})"
+        )
+    else:
+        print("PAC-Bayes MLL: off")
     opt_name = getattr(optimizer_class, "__name__", str(optimizer_class))
     print(f"Optimizer: {opt_name}, kwargs={optimizer_kwargs}")
     print(f"Woodbury: n_train={n_train}, m/n={feature_dim / max(n_train, 1):.4f}")
@@ -359,6 +372,14 @@ def run_uci_sorf(
     else:
         mll_class = RFFWoodburyMarginalLogLikelihood
 
+    if pac_bayes:
+        mll_class = pac_bayes_mll_class(
+            mll_class,
+            temperature=pac_bayes_temperature,
+            prior_std=pac_bayes_prior_std,
+            posterior_std=pac_bayes_posterior_std,
+        )
+
     trainer = GPTrainer(
         model,
         mll_class=mll_class,
@@ -444,6 +465,10 @@ def run_uci_sorf(
         "nigp_slope_refreshes": (
             None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
         ),
+        "pac_bayes": bool(pac_bayes),
+        "pac_bayes_temperature": float(pac_bayes_temperature),
+        "pac_bayes_prior_std": float(pac_bayes_prior_std),
+        "pac_bayes_posterior_std": float(pac_bayes_posterior_std),
         "feature_dim": 2 * num_sorf,
         "ard": ard,
         "num_epochs": num_epochs,

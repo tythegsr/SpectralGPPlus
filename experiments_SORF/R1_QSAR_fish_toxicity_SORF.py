@@ -45,6 +45,11 @@ NIGP = True
 FREEZE_EPOCH_NIGP = 100
 # Paper-style outer-loop slope refreshes after NIGP unlock (None = every epoch).
 NIGP_SLOPE_REFRESHES: int | None = None
+# Catoni PAC-Bayes KL on learnable parameters (wraps Woodbury / NIGP MLL).
+PAC_BAYES = False
+PAC_BAYES_TEMPERATURE = 2.55
+PAC_BAYES_PRIOR_STD = 0.75
+PAC_BAYES_POSTERIOR_STD = 0.5
 # ---------------------------------------------------------------------------
 
 
@@ -72,6 +77,10 @@ def main(
     nigp: bool = NIGP,
     freeze_epoch_nigp: int = FREEZE_EPOCH_NIGP,
     nigp_slope_refreshes: int | None = NIGP_SLOPE_REFRESHES,
+    pac_bayes: bool = PAC_BAYES,
+    pac_bayes_temperature: float = PAC_BAYES_TEMPERATURE,
+    pac_bayes_prior_std: float = PAC_BAYES_PRIOR_STD,
+    pac_bayes_posterior_std: float = PAC_BAYES_POSTERIOR_STD,
 ) -> dict:
     gpplus.config.configure_logger()
     dtype = torch.float32 if dtype_name == "float32" else torch.float64
@@ -104,6 +113,10 @@ def main(
         nigp=nigp,
         freeze_epoch_nigp=freeze_epoch_nigp,
         nigp_slope_refreshes=nigp_slope_refreshes,
+        pac_bayes=pac_bayes,
+        pac_bayes_temperature=pac_bayes_temperature,
+        pac_bayes_prior_std=pac_bayes_prior_std,
+        pac_bayes_posterior_std=pac_bayes_posterior_std,
     )
 
 
@@ -154,6 +167,10 @@ if __name__ == "__main__":
         type=int,
         default=NIGP_SLOPE_REFRESHES,
     )
+    parser.add_argument("--pac-bayes", action=argparse.BooleanOptionalAction, default=PAC_BAYES)
+    parser.add_argument("--pac-bayes-temperature", type=float, default=PAC_BAYES_TEMPERATURE)
+    parser.add_argument("--pac-bayes-prior-std", type=float, default=PAC_BAYES_PRIOR_STD)
+    parser.add_argument("--pac-bayes-posterior-std", type=float, default=PAC_BAYES_POSTERIOR_STD)
     args = parser.parse_args()
     main(
         train_frac=args.train_frac,
@@ -178,4 +195,8 @@ if __name__ == "__main__":
         nigp=args.nigp,
         freeze_epoch_nigp=args.freeze_epoch_nigp,
         nigp_slope_refreshes=args.nigp_slope_refreshes,
+        pac_bayes=args.pac_bayes,
+        pac_bayes_temperature=args.pac_bayes_temperature,
+        pac_bayes_prior_std=args.pac_bayes_prior_std,
+        pac_bayes_posterior_std=args.pac_bayes_posterior_std,
     )

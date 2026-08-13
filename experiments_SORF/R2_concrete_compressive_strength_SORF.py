@@ -21,30 +21,35 @@ from sorf_experiment_utils import DEFAULT_ADAM_KWARGS
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
 TRAIN_FRAC = 2.0 / 3.0
-NUM_RFF: int | None = 3200  # D frequencies; None = min(512, max(64, n_train // 3))
-NUM_INITS = 8
-NUM_EPOCHS = 1000  # 1 -> LBFGSScipy; >1 -> Adam
-LR = 0.1
+NUM_RFF: int | None = 200  # D frequencies; None = min(512, max(64, n_train // 3))
+NUM_INITS = 64
+NUM_EPOCHS = 1  # 1 -> LBFGSScipy; >1 -> Adam
+LR = 0.01
 SEED = 42
-DEVICE = "cuda"  # "cpu" | "cuda"
-DTYPE = "float32"  # "float32" | "float64"
+DEVICE = "cpu"  # "cpu" | "cuda"
+DTYPE = "float64"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = -1  # -1 = all cores
 ARD = True
 CORRECT_SORF = True
 SPECTRAL_KERNEL = "matern32"  # "rbf" | "matern32" (Matérn 3/2 via Student-t scale mixture)
 SAVE_PATH: str | None = "experiments_SORF/results/concrete_compressive_strength_sorf"
-MONITOR_VALIDATION = False
-VAL_FRACTION = 0.01
-LOG_EVERY_N_EPOCHS = 50  # validation metrics every N epochs
-PLOT_VALIDATION = False
+MONITOR_VALIDATION = True
+VAL_FRACTION = 0.1
+LOG_EVERY_N_EPOCHS = 100  # validation metrics every N epochs
+PLOT_VALIDATION = True
 PLOT_TRUE_VS_PRED = True
 # Classic NIGP: learnable independent per-dimension input noise (σ_x=10^SoftClamp(raw)).
-NIGP = True
+NIGP = False
 # Freeze raw_input_noise for this many Adam epochs (0 = learn from start).
 FREEZE_EPOCH_NIGP = 100
 # Paper-style outer-loop slope refreshes after NIGP unlock (None = every epoch).
 NIGP_SLOPE_REFRESHES: int | None = None
+# Catoni PAC-Bayes KL on learnable parameters (wraps Woodbury / NIGP MLL).
+PAC_BAYES = True
+PAC_BAYES_TEMPERATURE = 1.5
+PAC_BAYES_PRIOR_STD = 0.5
+PAC_BAYES_POSTERIOR_STD = 0.25
 # ---------------------------------------------------------------------------
 
 _DATASET = "concrete"
@@ -74,6 +79,10 @@ def main(
     nigp: bool = NIGP,
     freeze_epoch_nigp: int = FREEZE_EPOCH_NIGP,
     nigp_slope_refreshes: int | None = NIGP_SLOPE_REFRESHES,
+    pac_bayes: bool = PAC_BAYES,
+    pac_bayes_temperature: float = PAC_BAYES_TEMPERATURE,
+    pac_bayes_prior_std: float = PAC_BAYES_PRIOR_STD,
+    pac_bayes_posterior_std: float = PAC_BAYES_POSTERIOR_STD,
 ) -> dict:
     gpplus.config.configure_logger()
     dtype = torch.float32 if dtype_name == "float32" else torch.float64
@@ -106,6 +115,10 @@ def main(
         nigp=nigp,
         freeze_epoch_nigp=freeze_epoch_nigp,
         nigp_slope_refreshes=nigp_slope_refreshes,
+        pac_bayes=pac_bayes,
+        pac_bayes_temperature=pac_bayes_temperature,
+        pac_bayes_prior_std=pac_bayes_prior_std,
+        pac_bayes_posterior_std=pac_bayes_posterior_std,
     )
 
 
@@ -156,6 +169,10 @@ if __name__ == "__main__":
         type=int,
         default=NIGP_SLOPE_REFRESHES,
     )
+    parser.add_argument("--pac-bayes", action=argparse.BooleanOptionalAction, default=PAC_BAYES)
+    parser.add_argument("--pac-bayes-temperature", type=float, default=PAC_BAYES_TEMPERATURE)
+    parser.add_argument("--pac-bayes-prior-std", type=float, default=PAC_BAYES_PRIOR_STD)
+    parser.add_argument("--pac-bayes-posterior-std", type=float, default=PAC_BAYES_POSTERIOR_STD)
     args = parser.parse_args()
     main(
         train_frac=args.train_frac,
@@ -180,4 +197,8 @@ if __name__ == "__main__":
         nigp=args.nigp,
         freeze_epoch_nigp=args.freeze_epoch_nigp,
         nigp_slope_refreshes=args.nigp_slope_refreshes,
+        pac_bayes=args.pac_bayes,
+        pac_bayes_temperature=args.pac_bayes_temperature,
+        pac_bayes_prior_std=args.pac_bayes_prior_std,
+        pac_bayes_posterior_std=args.pac_bayes_posterior_std,
     )
