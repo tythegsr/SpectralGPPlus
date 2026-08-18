@@ -12,6 +12,7 @@ import csv
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -111,13 +112,14 @@ def run_diagnostics(
     n_subsample: int = 12000,
     n_dcor: int = 2000,
     seed: int = 0,
+    task_names: Sequence[str] | None = None,
 ) -> dict:
     if out_dir is None:
         out_dir = data_path.parent
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    task_names = list(S2_TASK_NAMES)
+    task_names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
     X_all, Y_all, wl, names, meta = load_s2_arrays(
         data_path,
         input_variable="toa_reflectance",
@@ -441,7 +443,16 @@ def main() -> None:
     parser.add_argument("--n-subsample", type=int, default=12000)
     parser.add_argument("--n-dcor", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--qoi",
+        type=str,
+        default=None,
+        help="Comma-separated QoI names (default: all 11)",
+    )
     args = parser.parse_args()
+    names = None
+    if args.qoi:
+        names = [s.strip() for s in args.qoi.split(",") if s.strip()]
     run_diagnostics(
         data_path=Path(args.data_path),
         band_config=Path(args.band_config),
@@ -449,6 +460,7 @@ def main() -> None:
         n_subsample=args.n_subsample,
         n_dcor=args.n_dcor,
         seed=args.seed,
+        task_names=names,
     )
 
 

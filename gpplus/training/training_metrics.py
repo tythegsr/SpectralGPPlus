@@ -997,6 +997,55 @@ def _collect_rff_mt_hyperparams(model) -> Dict[str, object]:
     return out
 
 
+def _collect_svgp_hyperparams(model) -> Dict[str, object]:
+    """Scalars from SVGPR safe for JSON logging."""
+    out: Dict[str, object] = {}
+    noise = model.likelihood.noise.detach().cpu()
+    out["noise"] = float(noise.reshape(-1)[0].item()) if noise.numel() else float("nan")
+
+    raw_noise = getattr(model.likelihood, "raw_noise", None)
+    if raw_noise is not None:
+        out["raw_noise"] = float(raw_noise.detach().cpu().reshape(-1)[0].item())
+
+    out["outputscale"] = float(model.covar_module.outputscale.detach().cpu().item())
+    out["lengthscales"] = _collect_lengthscales_list(
+        model.covar_module.base_kernel.lengthscale
+    )
+    out["num_inducing"] = int(getattr(model, "num_inducing", 0))
+
+    mean_module = getattr(model, "mean_module", None)
+    if mean_module is not None and hasattr(mean_module, "constant"):
+        out["mean_constant"] = float(mean_module.constant.detach().cpu().reshape(-1)[0].item())
+
+    return out
+
+
+def _svgp_validation_diagnostics(
+    model,
+    val_y: torch.Tensor,
+    pred_mean: torch.Tensor,
+    pred_std: torch.Tensor,
+    f_var: torch.Tensor,
+    *,
+    eps: float = 1e-12,
+    nll_spike_threshold: float = 10.0,
+) -> Dict[str, object]:
+    """Same shape of diagnostics as the RFF path, with SVGP hyperparameters."""
+    pred_std_2d = pred_std.unsqueeze(-1) if pred_std.dim() == 1 else pred_std
+    f_var_2d = f_var.unsqueeze(-1) if f_var.dim() == 1 else f_var
+    point_nll = _gaussian_predictive_nll_per_point(val_y, pred_mean, pred_std, eps=eps)
+
+    return {
+        "pred_std_min": float(pred_std.min().item()),
+        "f_var_zero_frac": float((f_var.reshape(-1) <= eps).float().mean().item()),
+        "pred_std_stats": _tensor_summary_stats(pred_std_2d, dim=0, eps=eps),
+        "f_var_stats": _tensor_summary_stats(f_var_2d.clamp_min(0.0), dim=0, eps=eps),
+        "max_point_nll": float(point_nll.max().item()) if point_nll.numel() else float("nan"),
+        "frac_nll_above_10": float((point_nll > nll_spike_threshold).float().mean().item()),
+        **_collect_svgp_hyperparams(model),
+    }
+
+
 def _rff_validation_diagnostics(
     model,
     val_y: torch.Tensor,
@@ -1101,11 +1150,19 @@ def compute_validation_metrics(
         from ..models.rff_gpr import RFFGPR
         from ..models.rff_mtgpr import RFFMTGPR
         from ..models.lrnn_gpr import LRNNGPR
+        from ..models.vi_rff_gpr import VIRFFGPR
+        from ..models.svgp_gpr import SVGPR
 
-        is_rff = isinstance(model, RFFGPR)
+        # VIRFFGPR subclasses RFFGPR, so it must be tested first: its predictions
+        # come from q(w), not from a Woodbury solve over the training set.
+        is_vi_rff = isinstance(model, VIRFFGPR)
+        is_svgp = isinstance(model, SVGPR)
+        is_rff = isinstance(model, RFFGPR) and not is_vi_rff
         is_rff_mt = isinstance(model, RFFMTGPR)
         is_lrnn = isinstance(model, LRNNGPR)
     except ImportError:
+        is_vi_rff = False
+        is_svgp = False
         is_rff = False
         is_rff_mt = False
         is_lrnn = False
@@ -1135,6 +1192,25 @@ def compute_validation_metrics(
                     model, val_x, jitter=jitter, chunk_size=chunk_size, return_latent_var=True
                 )
                 val_diag = _lrnn_validation_diagnostics(
+                    model, val_y, pred_mean, pred_std, f_var
+                )
+            elif is_svgp:
+                from .eval import evaluate_svgp_gp_model
+
+                pred_mean, _, _, pred_std, f_var = evaluate_svgp_gp_model(
+                    model, val_x, chunk_size=chunk_size, return_latent_var=True
+                )
+                val_diag = _svgp_validation_diagnostics(
+                    model, val_y, pred_mean, pred_std, f_var
+                )
+            elif is_vi_rff:
+                from .eval import evaluate_vi_rff_gp_model
+
+                model.invalidate_feature_cache()
+                pred_mean, _, _, pred_std, f_var = evaluate_vi_rff_gp_model(
+                    model, val_x, chunk_size=chunk_size, return_latent_var=True
+                )
+                val_diag = _rff_validation_diagnostics(
                     model, val_y, pred_mean, pred_std, f_var
                 )
             elif is_rff:
@@ -1170,6 +1246,6 @@ def compute_validation_metrics(
             model.eval()
 
     out: Dict[str, object] = {"val_NLL": val_nll, "val_RRMSE": val_rrmse}
-    if is_rff_mt or is_rff or is_lrnn:
+    if is_rff_mt or is_rff or is_lrnn or is_vi_rff or is_svgp:
         out["val_diag"] = val_diag
     return out

@@ -3,6 +3,8 @@ from .eval import (
     evaluate_lrnn_gp_model,
     evaluate_rff_gp_model,
     evaluate_rff_mt_gp_model,
+    evaluate_svgp_gp_model,
+    evaluate_vi_rff_gp_model,
 )
 from .callbacks import NIGPInputNoiseFreezeCallback, LikelihoodNoiseFreezeCallback, ValidationMetricsCallback
 from .parameter_initializer import (
@@ -38,6 +40,14 @@ from .stop_conditions import (
 )
 from .trainer import GPTrainer
 from .training_batched import BatchedGPTrainer
+from .svgp_elbo import SVGPELBO
+from .vi_rff_elbo import VIRFFELBO
+from .minibatch_trainer import (
+    MinibatchGPTrainer,
+    MinibatchGPTrainerSingleProcess,
+    resolve_elbo_class,
+    variational_param_groups,
+)
 from .training_metrics import compute_validation_metrics
 from .batch_utils import (
     resolve_batch_shape,

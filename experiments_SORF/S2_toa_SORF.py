@@ -18,7 +18,7 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
 # QOI: list[str] | None = ["algae", "aot", "cos_i", "cwv", "dust", "grain_size", "liquid_water"] # None = all 11; e.g. ["algae", "fsnow"]
-QOI: list[str] | None = None
+QOI: list[str] | None = ["algae"]
 N_TRAIN = 100000
 N_TEST = 10000
 NUM_RFF = 800
@@ -30,7 +30,7 @@ LR = 0.1
 STOP_PATIENCE = 40
 SEED = 42
 DEVICE = "cuda" # "cpu" | "cuda"
-DTYPE = "float64"  # "float32" | "float64"
+DTYPE = "float32"  # "float32" | "float64"
 PREDICT_CHUNK_SIZE = 512
 N_JOBS = 1
 TRAIN_MODE = "independent"  # "independent" | "batched"
@@ -107,6 +107,14 @@ TASK_BAND_CONFIG: str | None = (
     "experiments_toa/configs/s2_task_bands_all.json"
     # "experiments_toa/configs/s2_task_bands_from_corr_fsnow_only.json"
 )  # None = s2_task_bands_default.json
+# PCA on the selected bands, fit once on the full training X before training.
+# None = no PCA; an int applies to every QoI; a dict/JSON path gives per-QoI counts.
+N_PCA_COMPONENTS: int | dict | str | None = None
+PCA_SVD_SOLVER = "randomized"
+
+# Minibatch SGD is not available here. This path trains the full-batch Woodbury
+# marginal likelihood, which does not decompose over data points. For stochastic
+# training use experiments_GP/S2_toa_SVGP.py (inducing-point SVGP, RBF kernel).
 
 # ---------------------------------------------------------------------------
 
@@ -163,12 +171,14 @@ if __name__ == "__main__":
         else ""
     )
 
+    pca_str = f"_pca{N_PCA_COMPONENTS}" if N_PCA_COMPONENTS is not None else ""
+
     ibs_str = f"_ibs{INIT_BATCH_SIZE}" if INIT_BATCH_SIZE < NUM_INITS else ""
     save_path = SAVE_PATH or (
         f"experiments_SORF/results/Aug12/s2_toa_sorf_{NUM_INITS}inits"
         f"{ibs_str}_numrff{NUM_RFF}_"
         f"lr{LR}{noise_str}{task_band_str}{x_tf_str}{sk_str}{nigp_str}{pac_bayes_str}"
-        f"{freeze_epoch_nigp_str}{slope_refreshes_str}{nnmean_str}_"
+        f"{freeze_epoch_nigp_str}{slope_refreshes_str}{nnmean_str}{pca_str}_"
         f"dtype{DTYPE}"
     )
     log_file = LOG_FILE
@@ -196,7 +206,7 @@ if __name__ == "__main__":
         f"mean_type={MEAN_TYPE}  neural_mean_hidden={NEURAL_MEAN_HIDDEN}  "
         f"neural_mean_activation={NEURAL_MEAN_ACTIVATION}  "
         f"init_overrides={init_pcs or {}}  qoi={QOI}  "
-        f"spectral_kernel={SPECTRAL_KERNEL}"
+        f"spectral_kernel={SPECTRAL_KERNEL}  n_pca_components={N_PCA_COMPONENTS}"
     )
 
     run_s2_toa_sorf(
@@ -258,4 +268,6 @@ if __name__ == "__main__":
         mean_type=MEAN_TYPE,
         neural_mean_hidden=NEURAL_MEAN_HIDDEN,
         neural_mean_activation=NEURAL_MEAN_ACTIVATION,
+        n_pca_components=N_PCA_COMPONENTS,
+        pca_svd_solver=PCA_SVD_SOLVER,
     )

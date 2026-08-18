@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import h5py
 import matplotlib.pyplot as plt
@@ -27,12 +28,29 @@ BANDS_PER_PAGE = 24  # 4 x 6
 NCOLS = 4
 
 
-def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _qoi_names_in_file(f) -> list[str]:
+    names = [n for n in QOI_NAMES if n in f]
+    if not names:
+        raise KeyError(f"No S2 QoI datasets found among {QOI_NAMES}")
+    return names
+
+
+def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], str]:
     with h5py.File(path, "r") as f:
+        if "wl" not in f:
+            raise KeyError(f"Missing wavelength variable 'wl' in {path}")
         wl = np.asarray(f["wl"][:], dtype=np.float64)
-        rad = np.asarray(f["toa_radiance"][:], dtype=np.float64)
-        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in QOI_NAMES])
-    return wl, rad, Y
+        if "toa_reflectance" in f:
+            spec = np.asarray(f["toa_reflectance"][:], dtype=np.float64)
+            spec_name = "toa_reflectance"
+        elif "toa_radiance" in f:
+            spec = np.asarray(f["toa_radiance"][:], dtype=np.float64)
+            spec_name = "toa_radiance"
+        else:
+            raise KeyError(f"Missing toa_radiance/toa_reflectance in {path}")
+        names = _qoi_names_in_file(f)
+        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
+    return wl, spec, Y, names, spec_name
 
 
 def _finite(x: np.ndarray) -> np.ndarray:
@@ -59,9 +77,16 @@ def radiance_log1p(rad: np.ndarray) -> np.ndarray:
     return np.log1p(np.clip(rad, 0.0, None))
 
 
-def _plot_qoi_histograms(Y: np.ndarray, out: Path, *, log_space: bool) -> None:
+def _plot_qoi_histograms(
+    Y: np.ndarray,
+    out: Path,
+    *,
+    log_space: bool,
+    names: Sequence[str] | None = None,
+) -> None:
     """Grid of QoI histograms: raw physical, or log10 for log-scale QoIs only."""
-    n = len(QOI_NAMES)
+    names = list(names) if names is not None else QOI_NAMES
+    n = len(names)
     ncols = 4
     nrows = int(np.ceil(n / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(14, 3.2 * nrows))
@@ -71,7 +96,7 @@ def _plot_qoi_histograms(Y: np.ndarray, out: Path, *, log_space: bool) -> None:
         if log_space
         else "QoI histograms (raw / physical)"
     )
-    for j, name in enumerate(QOI_NAMES):
+    for j, name in enumerate(names):
         ax = axes[j]
         col = Y[:, j]
         if log_space:
@@ -189,68 +214,82 @@ def _plot_wavelength_value_density(
 def run_histograms(data_path: Path, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, rad, Y = _load(data_path)
-    print(f"  rad={rad.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+    wl, spec, Y, names, spec_name = _load(data_path)
+    is_radiance = spec_name == "toa_radiance"
+    spec_label = "radiance" if is_radiance else "reflectance"
+    print(
+        f"  {spec_name}={spec.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm"
+    )
+    print(f"  qoi={names}")
 
     print("QoI raw histograms...")
-    _plot_qoi_histograms(Y, out_dir / "qoi_histograms_raw.png", log_space=False)
+    _plot_qoi_histograms(
+        Y, out_dir / "qoi_histograms_raw.png", log_space=False, names=names
+    )
     print("QoI log10 histograms (algae/dust/grain_size/liquid_water)...")
-    _plot_qoi_histograms(Y, out_dir / "qoi_histograms_log10.png", log_space=True)
+    _plot_qoi_histograms(
+        Y, out_dir / "qoi_histograms_log10.png", log_space=True, names=names
+    )
 
-    rad_log = radiance_log1p(rad)
-    n_bands = rad.shape[1]
+    spec_log = radiance_log1p(spec)
+    n_bands = spec.shape[1]
+    prefix = spec_name
 
-    print("Full-band radiance histograms (raw) -> PDF...")
+    print(f"Full-band {spec_label} histograms (raw) -> PDF...")
     _plot_all_band_histograms_pdf(
-        rad,
+        spec,
         wl,
-        out=out_dir / "toa_radiance_histograms_raw.pdf",
-        title="TOA radiance — raw",
+        out=out_dir / f"{prefix}_histograms_raw.pdf",
+        title=f"TOA {spec_label} — raw",
         color="darkseagreen",
     )
-    print("Full-band radiance histograms (log1p) -> PDF...")
+    print(f"Full-band {spec_label} histograms (log1p) -> PDF...")
     _plot_all_band_histograms_pdf(
-        rad_log,
+        spec_log,
         wl,
-        out=out_dir / "toa_radiance_histograms_log1p.pdf",
-        title="TOA radiance — log1p",
+        out=out_dir / f"{prefix}_histograms_log1p.pdf",
+        title=f"TOA {spec_label} — log1p",
         color="steelblue",
     )
 
     print("Wavelength-value density (raw)...")
     _plot_wavelength_value_density(
-        rad,
+        spec,
         wl,
-        out=out_dir / "toa_radiance_density_raw.png",
-        title="TOA radiance density (raw)",
-        ylabel="Radiance",
+        out=out_dir / f"{prefix}_density_raw.png",
+        title=f"TOA {spec_label} density (raw)",
+        ylabel=spec_label.capitalize(),
     )
     print("Wavelength-value density (log1p)...")
     _plot_wavelength_value_density(
-        rad_log,
+        spec_log,
         wl,
-        out=out_dir / "toa_radiance_density_log1p.png",
-        title="TOA radiance density (log1p)",
-        ylabel="log1p(radiance)",
+        out=out_dir / f"{prefix}_density_log1p.png",
+        title=f"TOA {spec_label} density (log1p)",
+        ylabel=f"log1p({spec_label})",
     )
 
     meta = {
         "data_path": str(data_path.resolve()),
-        "n_samples": int(rad.shape[0]),
+        "n_samples": int(spec.shape[0]),
         "n_bands": int(n_bands),
+        "spectral_variable": spec_name,
+        "qoi_names": names,
         "log_scale_qois": sorted(S2_LOG_SCALE_TASK_NAMES),
-        "qoi_stats_raw": {name: _stats(Y[:, j]) for j, name in enumerate(QOI_NAMES)},
+        "qoi_stats_raw": {name: _stats(Y[:, j]) for j, name in enumerate(names)},
         "qoi_stats_log10": {
             name: _stats(np.log10(np.clip(_finite(Y[:, j]), 1e-30, None)))
-            for j, name in enumerate(QOI_NAMES)
+            for j, name in enumerate(names)
             if name in S2_LOG_SCALE_TASK_NAMES
         },
-        "transform_radiance": "log1p = ln(1 + max(radiance, 0))",
+        "transform_spectral": f"log1p = ln(1 + max({spec_label}, 0))",
         "band_stats_raw": {
-            str(j): {**_stats(rad[:, j]), "wavelength_nm": float(wl[j])} for j in range(n_bands)
+            str(j): {**_stats(spec[:, j]), "wavelength_nm": float(wl[j])}
+            for j in range(n_bands)
         },
         "band_stats_log1p": {
-            str(j): {**_stats(rad_log[:, j]), "wavelength_nm": float(wl[j])} for j in range(n_bands)
+            str(j): {**_stats(spec_log[:, j]), "wavelength_nm": float(wl[j])}
+            for j in range(n_bands)
         },
     }
     summary_path = out_dir / "histogram_summary.json"

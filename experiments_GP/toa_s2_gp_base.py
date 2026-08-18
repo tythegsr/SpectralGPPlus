@@ -1,4 +1,10 @@
-"""S2 independent exact GPR runner with per-QoI original-band subsets."""
+"""S2 independent GPR runner with per-QoI original-band subsets.
+
+Two inference paths share this pipeline: dense exact GPR (default) and
+inducing-point SVGP trained with minibatch SGD (``svgp=True``), which is the
+only one that scales past a few thousand training points. Everything else --
+band selection, PCA, output warps, metrics, plots -- is identical.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ _GP_DIR = Path(__file__).resolve().parent
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 _RFF_DIR = _ROOT / "experiments_RFF"
 _DEFAULT_SAVE_DIR = "experiments_GP/results/s2_toa_gp"
+_DEFAULT_SVGP_SAVE_DIR = "experiments_GP/results/s2_toa_svgp"
 _EXACT_GP_N_TRAIN_WARN = 5000
 
 if str(_ROOT) not in sys.path:
@@ -60,11 +67,15 @@ from experiments_toa.s2_y_transform import (
     task_uses_log_scale,
     task_uses_logit_scale,
 )
+from gpplus.models import SVGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
     GPTrainer,
+    MinibatchGPTrainer,
     MinLossChangeStopCondition,
+    NIGPInputNoiseFreezeCallback,
     evaluate_gp_model,
+    evaluate_svgp_gp_model,
     pac_bayes_mll_class,
 )
 from gpplus.training.optimizers import LBFGSScipy
@@ -130,10 +141,40 @@ def run_s2_toa_gp(
     pac_bayes_temperature: float = 1.0,
     pac_bayes_prior_std: float = 1.0,
     pac_bayes_posterior_std: float = 0.1,
+    svgp: bool = False,
+    num_inducing: int = 512,
+    learn_inducing_locations: bool = True,
+    batch_size: int = 1024,
+    variational_lr: float | None = None,
+    kl_beta: float = 1.0,
+    nigp: bool = False,
+    freeze_epoch_nigp: int = 100,
+    adam_stop_patience: int = 50,
 ) -> dict:
-    """Train independent exact GPR models on the S2 11-QoI dataset."""
+    """
+    Train independent GPR models on the S2 11-QoI dataset.
+
+    With ``svgp=True`` each task is an :class:`~gpplus.models.svgp_gpr.SVGPR`
+    trained by minibatch SGD on the ELBO; otherwise it is a dense exact GPR.
+    """
     if save_path is None:
-        save_path = _DEFAULT_SAVE_DIR
+        save_path = _DEFAULT_SVGP_SAVE_DIR if svgp else _DEFAULT_SAVE_DIR
+
+    if svgp:
+        if nigp and n_pca_components is not None:
+            raise ValueError(
+                "SVGP supports NIGP or PCA, not both: NIGP learns a per-input-"
+                "dimension sigma_x, which has no interpretation in a rotated, "
+                "truncated PCA basis. Set nigp=False or n_pca_components=None."
+            )
+        if num_epochs <= 1:
+            raise ValueError(
+                f"SVGP needs many SGD epochs, got num_epochs={num_epochs}."
+            )
+        if pac_bayes:
+            raise ValueError("pac_bayes is not supported on the SVGP path.")
+    elif nigp:
+        raise ValueError("nigp on the exact-GP path is not wired up here; use svgp=True.")
 
     names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
     band_cfg_path = task_band_config or str(S2_DEFAULT_BAND_CONFIG_PATH)
@@ -159,24 +200,36 @@ def run_s2_toa_gp(
     else:
         optimizer_class = torch.optim.Adam
         default_optimizer_kwargs = dict(DEFAULT_ADAM_KWARGS)
-        stop_conditions = [ConvergencePatienceStopCondition(patience=50)]
+        stop_conditions = [
+            ConvergencePatienceStopCondition(patience=int(adam_stop_patience))
+        ]
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
-    title = f"S2_TOA_nTrain{n_train}_nTest{n_test}_exactGP"
+    model_token = f"svgpM{num_inducing}" if svgp else "exactGP"
+    title = f"S2_TOA_nTrain{n_train}_nTest{n_test}_{model_token}"
     if pca_title_token is not None:
-        title = f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{pca_title_token}_exactGP"
+        title = (
+            f"S2_TOA_nTrain{n_train}_nTest{n_test}_pcaP{pca_title_token}_{model_token}"
+        )
     print("=" * 60)
     print(title)
     print(
-        f"S2 Exact GP, ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, "
-        f"tasks={names}, input={input_variable}"
+        f"S2 {'SVGP' if svgp else 'Exact GP'}, ARD={ard}, dtype={dtype}, "
+        f"inits={num_inits}, epochs={num_epochs}, tasks={names}, input={input_variable}"
         + (f", pca={n_components_by_task}" if n_components_by_task is not None else "")
     )
+    if svgp:
+        print(
+            f"SVGP: M={num_inducing} (learned={learn_inducing_locations})  "
+            f"batch_size={batch_size}  kl_beta={kl_beta}  "
+            f"variational_lr={variational_lr}  nigp={nigp}"
+            + (f"  freeze_epoch_nigp={freeze_epoch_nigp}" if nigp else "")
+        )
     print(f"Band config: {band_cfg_path}")
     if pca_components_meta.get("config_path"):
         print(f"PCA components config: {pca_components_meta['config_path']}")
-    if n_train > _EXACT_GP_N_TRAIN_WARN:
+    if not svgp and n_train > _EXACT_GP_N_TRAIN_WARN:
         print(f"WARNING: exact GP is O(n^3); n_train={n_train} may be slow/OOM.")
     print("=" * 60)
 
@@ -325,6 +378,12 @@ def run_s2_toa_gp(
             )
 
         callbacks = []
+        if svgp and nigp and freeze_epoch_nigp > 0:
+            callbacks.append(
+                NIGPInputNoiseFreezeCallback(
+                    freeze_epochs=freeze_epoch_nigp, verbose=training_verbose
+                )
+            )
         if num_epochs > 1 and training_verbose:
             callbacks.append(
                 make_train_loss_callback(
@@ -375,9 +434,26 @@ def run_s2_toa_gp(
                 "noise_prior_loc": float(noise_prior.loc.detach().cpu()),
             }
 
-        model = build_gpr_model(x_tr, y_tr_fit, ard=ard)
-        if likelihood is not None:
-            model.likelihood = likelihood
+        if svgp:
+            kernel_dims = int(x_tr.shape[-1]) if ard else None
+            from gpplus import kernels as _kernels
+
+            model = SVGPR(
+                x_tr,
+                y_tr_fit,
+                kernel_module=_kernels.LogScaleKernel(
+                    _kernels.GaussianKernel(ard_num_dims=kernel_dims)
+                ),
+                likelihood=likelihood,
+                num_inducing=num_inducing,
+                learn_inducing_locations=learn_inducing_locations,
+                nigp=nigp,
+                seed=seed,
+            )
+        else:
+            model = build_gpr_model(x_tr, y_tr_fit, ard=ard)
+            if likelihood is not None:
+                model.likelihood = likelihood
 
         task_mll_class = None
         if pac_bayes:
@@ -390,9 +466,7 @@ def run_s2_toa_gp(
                 posterior_std=pac_bayes_posterior_std,
             )
 
-        trainer = GPTrainer(
-            model,
-            mll_class=task_mll_class,
+        trainer_kwargs = dict(
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -406,6 +480,16 @@ def run_s2_toa_gp(
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
         )
+        if svgp:
+            trainer = MinibatchGPTrainer(
+                model,
+                batch_size=batch_size,
+                variational_lr=variational_lr,
+                kl_beta=kl_beta,
+                **trainer_kwargs,
+            )
+        else:
+            trainer = GPTrainer(model, mll_class=task_mll_class, **trainer_kwargs)
         t0 = time.time()
         runs = trainer.train()
         train_time = time.time() - t0
@@ -429,6 +513,10 @@ def run_s2_toa_gp(
             ard_mapped["outputscale"] = ard_info["outputscale"]
         ard_mapped["raw_lengthscale"] = ard_info["raw_lengthscale"]
         ard_mapped["model_input_dim"] = int(x_tr.shape[-1])
+        if svgp and nigp:
+            ard_mapped["input_noise"] = [
+                float(v) for v in model.input_noise.detach().cpu().reshape(-1).tolist()
+            ]
         if pca_meta is not None:
             ard_mapped["pca"] = pca_meta
         input_bands_by_task[task_name] = {
@@ -441,7 +529,12 @@ def run_s2_toa_gp(
 
         model.eval()
         t1 = time.time()
-        pred_mean, lower, upper, pred_std = evaluate_gp_model(model, x_te)
+        if svgp:
+            pred_mean, lower, upper, pred_std = evaluate_svgp_gp_model(
+                model, x_te, chunk_size=predict_chunk_size
+            )
+        else:
+            pred_mean, lower, upper, pred_std = evaluate_gp_model(model, x_te)
         prediction_time = time.time() - t1
         total_prediction_time += prediction_time
         inv = inverse_y_s2(
@@ -539,7 +632,7 @@ def run_s2_toa_gp(
         "num_tasks": len(names),
         "task_names": list(names),
         "ard": ard,
-        "model_class": "GPR",
+        "model_class": "SVGPR" if svgp else "GPR",
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
@@ -576,6 +669,19 @@ def run_s2_toa_gp(
         "RMSE": aggregate_rmse,
         **per_task,
     }
+    if svgp:
+        metrics.update(
+            {
+                "svgp": True,
+                "num_inducing": int(num_inducing),
+                "learn_inducing_locations": bool(learn_inducing_locations),
+                "batch_size": int(batch_size),
+                "variational_lr": variational_lr,
+                "kl_beta": float(kl_beta),
+                "nigp": bool(nigp),
+                "freeze_epoch_nigp": int(freeze_epoch_nigp) if nigp else 0,
+            }
+        )
     if n_components_by_task is not None:
         unique_ps = sorted(set(n_components_by_task.values()))
         metrics["n_pca_components"] = (

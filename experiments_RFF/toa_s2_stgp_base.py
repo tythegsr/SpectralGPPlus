@@ -193,8 +193,22 @@ def run_s2_toa_stgp(
     mean_type: Literal["constant", "neural"] = "constant",
     neural_mean_hidden: Sequence[int] | None = (64, 32),
     neural_mean_activation: str = "relu",
+    minibatch: bool = False,
+    batch_size: int = 1024,
+    variational_cov: Literal["chol", "diag"] = "chol",
+    variational_lr: float | None = None,
+    kl_beta: float = 1.0,
+    warm_start_points: int = 0,
 ) -> dict:
-    """Train independent RFFGPR models on the S2 11-QoI TOA dataset."""
+    """
+    Train independent single-task RFF GPs on the S2 11-QoI TOA dataset.
+
+    The ``minibatch`` / variational arguments are retired. Stochastic training
+    now lives on the inducing-point SVGP path
+    (``experiments_GP/S2_toa_SVGP.py``), which uses an ordinary RBF kernel
+    rather than random features; the plumbing below is kept only so old call
+    sites fail loudly instead of silently taking a different route.
+    """
     if init_batch_size is None:
         init_batch_size = num_inits
     if int(init_batch_size) < 1:
@@ -225,6 +239,13 @@ def run_s2_toa_stgp(
         raise ValueError(
             f"bound_penalty_lambda ({bound_penalty_lambda}) must be >= "
             f"bound_penalty_lam_min ({bound_penalty_lam_min}) when learnable."
+        )
+    minibatch = bool(minibatch)
+    if minibatch:
+        raise NotImplementedError(
+            "Minibatch training was moved off the RFF/SORF path: random features "
+            "were replaced by inducing-point SVGP. Run "
+            "experiments_GP/S2_toa_SVGP.py instead."
         )
     correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
 
@@ -589,9 +610,7 @@ def run_s2_toa_stgp(
                 neural_mean_hidden,
                 activation=neural_mean_activation,
             )
-        model = RFFGPR(
-            x_tr,
-            y_tr_fit,
+        model_kwargs = dict(
             likelihood=likelihood,
             mean_module=mean_module,
             num_rff=num_rff,
@@ -599,11 +618,17 @@ def run_s2_toa_stgp(
             rff_sampling=rff_sampling,
             correct_sorf=correct_sorf,
             spectral_kernel=spectral_kernel,
-            batch_shape=lik_batch_shape if len(lik_batch_shape) > 0 else None,
-            init_batch_size=concurrent if train_mode == "batched" else None,
             nigp=bool(nigp),
         )
+        model = RFFGPR(
+            x_tr,
+            y_tr_fit,
+            batch_shape=lik_batch_shape if len(lik_batch_shape) > 0 else None,
+            init_batch_size=concurrent if train_mode == "batched" else None,
+            **model_kwargs,
+        )
         bound_cfg = bound_by_task.get(task_name)
+        task_mll_class = None
         nigp_mll_kwargs: dict = {}
         if nigp:
             slope_r = (
@@ -647,9 +672,8 @@ def run_s2_toa_stgp(
                 prior_std=pac_bayes_prior_std,
                 posterior_std=pac_bayes_posterior_std,
             )
-        trainer = GPTrainer(
-            model,
-            mll_class=task_mll_class,
+
+        shared_trainer_kwargs = dict(
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -657,7 +681,6 @@ def run_s2_toa_stgp(
             dtype=dtype,
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
-            param_groups_fn=param_groups_fn,
             initializer_class=RFFParameterInitializer,
             initializer_kwargs=initializer_kwargs,
             n_jobs=n_jobs,
@@ -666,13 +689,19 @@ def run_s2_toa_stgp(
             callbacks=callbacks,
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
-            train_mode=train_mode,
-            init_batch_size=concurrent if train_mode == "batched" else None,
             min_epochs=(
                 int(freeze_epoch_nigp)
                 if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
                 else 0
             ),
+        )
+        trainer = GPTrainer(
+            model,
+            mll_class=task_mll_class,
+            param_groups_fn=param_groups_fn,
+            train_mode=train_mode,
+            init_batch_size=concurrent if train_mode == "batched" else None,
+            **shared_trainer_kwargs,
         )
         t_train = time.time()
         runs = trainer.train()
@@ -1132,9 +1161,9 @@ def run_s2_toa_stgp(
     if monitor_validation and n_val > 0:
         metrics["monitor_validation"] = True
         metrics["n_val"] = n_val
-        metrics["train_pool_size"] = TOA_TRAIN_POOL_SIZE
-        metrics["val_pool_size"] = TOA_VAL_POOL_SIZE
-        metrics["test_pool_size"] = TOA_TEST_POOL_SIZE
+        metrics["train_pool_size"] = int(data_meta.get("train_pool_size", TOA_TRAIN_POOL_SIZE))
+        metrics["val_pool_size"] = int(data_meta.get("val_pool_size", TOA_VAL_POOL_SIZE))
+        metrics["test_pool_size"] = int(data_meta.get("test_pool_size", TOA_TEST_POOL_SIZE))
         for task_name in names:
             val_summary = summarize_validation_from_runs(
                 task_runs[task_name], task_best_runs[task_name]

@@ -1,4 +1,4 @@
-"""Save/load full TOA RFFGPR (single-task) checkpoints for later inference."""
+"""Save/load full TOA single-task RFF checkpoints (RFFGPR or VIRFFGPR) for inference."""
 
 from __future__ import annotations
 
@@ -15,10 +15,23 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 if str(_MTGPR_DIR) not in sys.path:
     sys.path.insert(0, str(_MTGPR_DIR))
 
-from gpplus.models import RFFGPR
+from gpplus.models import RFFGPR, VIRFFGPR
 from gpplus.utils import StandardScaler, UniformScaler
 from gpplus.utils.fs_path import ensure_parent, fs_path
 from toa_mtgpr_checkpoint import CHECKPOINT_VERSION, scaler_from_dict, scaler_to_dict
+
+# model_config also carries run metadata (band indices, warps, ...); only these
+# keys are constructor arguments.
+_MODEL_INIT_KEYS = (
+    "num_rff",
+    "ard",
+    "rff_sampling",
+    "correct_sorf",
+    "spectral_kernel",
+    "nigp",
+    "variational_cov",
+)
+_MODEL_CLASSES = {"RFFGPR": RFFGPR, "VIRFFGPR": VIRFFGPR}
 
 
 def _fs_path(path: Path) -> str:
@@ -87,7 +100,7 @@ def save_toa_stgp_checkpoint(
         input_column_indices = torch.arange(train_x.shape[-1], dtype=torch.int64)
     payload = {
         "version": CHECKPOINT_VERSION,
-        "model_class": "RFFGPR",
+        "model_class": type(model).__name__,
         "task_name": task_name,
         "title": title,
         "seed": seed,
@@ -142,7 +155,18 @@ def load_toa_stgp_checkpoint(path: str | Path, device: str = "cpu") -> ToaStgpBu
     train_x = payload["train_x"].to(dtype=dtype, device=device)
     train_y = payload["train_y"].to(dtype=dtype, device=device)
 
-    model = RFFGPR(train_x, train_y, **model_config)
+    model_class_name = str(payload.get("model_class", "RFFGPR"))
+    try:
+        model_class = _MODEL_CLASSES[model_class_name]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported checkpoint model_class {model_class_name!r} "
+            f"(expected one of {sorted(_MODEL_CLASSES)})."
+        ) from None
+    init_kwargs = {k: v for k, v in model_config.items() if k in _MODEL_INIT_KEYS}
+    if model_class is RFFGPR:
+        init_kwargs.pop("variational_cov", None)
+    model = model_class(train_x, train_y, **init_kwargs)
     model.load_state_dict(payload["state_dict"])
     model = model.to(device=device, dtype=dtype)
     model.eval()

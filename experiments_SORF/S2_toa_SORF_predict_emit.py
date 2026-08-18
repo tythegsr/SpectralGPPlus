@@ -53,20 +53,43 @@ DEFAULT_CKPT_DIR = (
     _ROOT
     / "experiments_SORF"
     / "results"
-    / "Aug08"
-    / "s2_toa_sorf_1inits_numrff1600_lr0.1_taskbandconfig_rbf_nigp_freezeepochnigp100_dtypefloat64"
+    / "Aug12"
+    / "s2_toa_sorf_1inits_numrff800_lr0.1_taskbandconfig_rbf_nigp_freezeepochnigp100_sloperefreshes20_dtypefloat64"
 )
 DEFAULT_EMIT_PATH = _ROOT / "split_files" / "emit_data.nc"
 
-# QoIs present in Aug08 float64 run / EMIT state mapping.
+# Map S2 QoI names -> EMIT state column index.
+# State vector order (confirmed):
+#   0 sinA, 1 cosA, 2 grain_radius, 3 liquid_water, 4 dust, 5 algae,
+#   6 z_snow, 7 z_pv, 8 z_npv, 9 z_soil, 10 veg_rank, 11 npv_rank, 12 soil_rank,
+#   13 AOT660, 14 H20STR
+# cos_i is NOT in this vector (sinA/cosA are aspect params, not incidence).
 TASK_TO_STATE_COL = {
-    "cos_i": 0,
-    "grain_size": 2,
+    "grain_size": 2,  # grain_radius
     "liquid_water": 3,
     "dust": 4,
     "algae": 5,
-    "aot": 13,
-    "cwv": 14,
+    "fsnow": 6,  # z_snow (pre-softmax logit)
+    "fPV": 7,  # z_pv
+    "fNPV": 8,  # z_npv
+    "fsoil": 9,  # z_soil
+    "aot": 13,  # AOT660
+    "cwv": 14,  # H20STR
+}
+
+# Match S2 training design ranges / ISOFIT free-param bounds.
+# z_* logits in EMIT are typically in [-5, 5] (not the sim [0, 10] box).
+TASK_VALID_Y_RANGE: dict[str, tuple[float, float]] = {
+    "aot": (0.04, 1.0),
+    "cwv": (0.0, 5.2),  # H20STR in file is often < 1; keep lower floor soft
+    "algae": (1e-2, 6e5),
+    "dust": (1e-2, 4000.0),
+    "grain_size": (30.0, 1500.0),
+    "liquid_water": (1e-2, 25.0),
+    "fsnow": (-5.0, 5.0),
+    "fPV": (-5.0, 5.0),
+    "fNPV": (-5.0, 5.0),
+    "fsoil": (-5.0, 5.0),
 }
 
 
@@ -90,7 +113,7 @@ def _load_emit_xy(
             state_names = list(EMIT_STATE_FEATURE_NAMES)
 
         if nondefault_only:
-            # Default vector dominates (~84%); keep physically active rows.
+            # Default vector dominates; keep physically active rows (grain != 500).
             mask = np.abs(state[:, 2] - 500.0) > 0.1
         else:
             mask = np.ones(n_total, dtype=bool)
@@ -120,10 +143,21 @@ def _load_emit_xy(
         "seed": seed,
         "state_feature_names": state_names,
         "task_to_state_col": {k: TASK_TO_STATE_COL[k] for k in task_names},
+        "task_valid_y_range": {
+            k: list(TASK_VALID_Y_RANGE[k]) for k in task_names if k in TASK_VALID_Y_RANGE
+        },
         "sample_idx_min": int(sample.min()) if sample.size else None,
         "sample_idx_max": int(sample.max()) if sample.size else None,
     }
     return X, Y, idx, meta
+
+
+def _valid_label_mask(y: np.ndarray, task_name: str) -> np.ndarray:
+    bounds = TASK_VALID_Y_RANGE.get(task_name)
+    if bounds is None:
+        return np.ones(y.shape[0], dtype=bool)
+    lo, hi = bounds
+    return (y >= lo) & (y <= hi)
 
 
 def _find_checkpoints(ckpt_dir: Path) -> dict[str, Path]:
@@ -162,6 +196,8 @@ def _load_stgp_checkpoint(ckpt_path: Path, device: str) -> ToaStgpBundle:
     model = model.to(device=device, dtype=dtype)
     model.eval()
     model.invalidate_feature_cache()
+    if getattr(model, "nigp", False):
+        model.nigp_correction_enabled = True
 
     x_scaler = scaler_from_dict(payload.get("x_scaler"))
     y_scaler = scaler_from_dict(payload.get("y_scaler"))
@@ -206,6 +242,8 @@ def evaluate_checkpoints_on_emit(
     max_samples: int | None = 50000,
     seed: int = 42,
     nondefault_only: bool = True,
+    filter_valid_labels: bool = True,
+    tasks: list[str] | None = None,
     save_dir: Path | None = None,
 ) -> dict:
     ckpt_dir = Path(ckpt_dir)
@@ -216,10 +254,25 @@ def evaluate_checkpoints_on_emit(
     ckpts = _find_checkpoints(ckpt_dir)
     if not ckpts:
         raise FileNotFoundError(f"No checkpoints under {ckpt_dir}")
-    task_names = [t for t in TASK_TO_STATE_COL if t in ckpts]
+
+    if tasks is None:
+        task_names = [t for t in TASK_TO_STATE_COL if t in ckpts]
+    else:
+        unknown = [t for t in tasks if t not in TASK_TO_STATE_COL]
+        if unknown:
+            raise ValueError(
+                f"No EMIT state mapping for {unknown}. "
+                f"Mapped: {list(TASK_TO_STATE_COL)}"
+            )
+        missing_ckpt = [t for t in tasks if t not in ckpts]
+        if missing_ckpt:
+            raise FileNotFoundError(f"Missing checkpoints for {missing_ckpt}")
+        task_names = list(tasks)
+
     missing = [t for t in TASK_TO_STATE_COL if t not in ckpts]
-    if missing:
+    if missing and tasks is None:
         print(f"WARNING: missing checkpoints for {missing}")
+    print(f"Evaluating tasks: {task_names}")
 
     print(f"Loading emit subset from {emit_path}")
     X_np, Y_np, eval_idx, data_meta = _load_emit_xy(
@@ -231,8 +284,11 @@ def evaluate_checkpoints_on_emit(
     )
     print(
         f"  eval n={data_meta['n_eval']:,} / total={data_meta['n_total']:,} "
-        f"(nondefault_only={nondefault_only})"
+        f"(nondefault_only={nondefault_only}, "
+        f"filter_valid_labels={filter_valid_labels})"
     )
+    if filter_valid_labels and data_meta.get("task_valid_y_range"):
+        print(f"  per-task valid y ranges: {data_meta['task_valid_y_range']}")
 
     # Training run used no y-warps (explicit empty lists).
     warps = resolve_y_warps(log_scale_qoi=[], logit_scale_qoi=[])
@@ -241,13 +297,14 @@ def evaluate_checkpoints_on_emit(
     y_true_all = []
     y_pred_all = []
     y_std_all = []
+    valid_mask_all = []
 
     for task_name in task_names:
         ckpt_path = ckpts[task_name]
         print(f"\n=== {task_name} <- {ckpt_path.name} ===")
         bundle = _load_stgp_checkpoint(ckpt_path, device=device)
         t_col = task_names.index(task_name)
-        y_true = torch.as_tensor(Y_np[:, t_col], dtype=bundle.dtype)
+        y_true_full = torch.as_tensor(Y_np[:, t_col], dtype=bundle.dtype)
         x = torch.as_tensor(X_np, dtype=bundle.dtype)
 
         if bundle.input_column_indices is not None:
@@ -284,23 +341,44 @@ def evaluate_checkpoints_on_emit(
             extended=True,
         )
         pred_mean_c, pred_std_c, lower_c, upper_c = inv.as_tuple()
+
+        y_np = y_true_full.cpu().numpy()
+        if filter_valid_labels:
+            valid = _valid_label_mask(y_np, task_name)
+        else:
+            valid = np.ones(y_np.shape[0], dtype=bool)
+        n_drop = int((~valid).sum())
+        if n_drop:
+            print(
+                f"  dropping {n_drop}/{len(valid)} rows outside "
+                f"{TASK_VALID_Y_RANGE.get(task_name)} for metrics"
+            )
+
+        y_true = y_true_full.cpu()[valid]
+        pred_mean_m = pred_mean_c[valid]
+        pred_std_m = pred_std_c[valid]
+        lower_m = lower_c[valid]
+        upper_m = upper_c[valid]
+
         computed = compute_metrics(
-            y_true.cpu(),
-            pred_mean_c,
-            output_std=pred_std_c,
-            lower_95=lower_c,
-            upper_95=upper_c,
+            y_true,
+            pred_mean_m,
+            output_std=pred_std_m,
+            lower_95=lower_m,
+            upper_95=upper_m,
             prediction_time=pred_time,
         )
         # Also keep simple scalar metrics under task prefix for aggregation.
         scalar = _scalar_error_metrics(
-            y_true.cpu().numpy(),
-            pred_mean_c.detach().cpu().numpy(),
+            y_true.numpy(),
+            pred_mean_m.detach().cpu().numpy(),
             prefix=f"{task_name}_",
         )
         row = {
             "checkpoint": str(ckpt_path),
             "n_eval": int(y_true.numel()),
+            "n_eval_before_label_filter": int(y_true_full.numel()),
+            "n_dropped_invalid_label": n_drop,
             "prediction_time_s": float(pred_time),
             "best_train_loss": float(bundle.best_train_loss),
             **computed,
@@ -310,12 +388,21 @@ def evaluate_checkpoints_on_emit(
         print(
             f"  RMSE={computed['RMSE']:.6g}  RRMSE={computed['RRMSE']:.6g}  "
             f"MAE={computed['MAE']:.6g}  R2={scalar[f'{task_name}_R2']:.4f}  "
-            f"time={pred_time:.1f}s"
+            f"n={int(y_true.numel())}  time={pred_time:.1f}s"
         )
 
-        y_true_all.append(y_true.cpu().numpy())
-        y_pred_all.append(pred_mean_c.detach().cpu().numpy())
-        y_std_all.append(pred_std_c.detach().cpu().numpy())
+        # Store full-length arrays (NaN where label filtered) for NPZ alignment.
+        y_true_out = y_np.astype(np.float64, copy=True)
+        y_pred_out = pred_mean_c.detach().cpu().numpy().astype(np.float64, copy=True)
+        y_std_out = pred_std_c.detach().cpu().numpy().astype(np.float64, copy=True)
+        if n_drop:
+            y_true_out[~valid] = np.nan
+            y_pred_out[~valid] = np.nan
+            y_std_out[~valid] = np.nan
+        y_true_all.append(y_true_out)
+        y_pred_all.append(y_pred_out)
+        y_std_all.append(y_std_out)
+        valid_mask_all.append(valid.astype(np.uint8))
 
         # Free GPU memory between tasks.
         del bundle, model, x, pred_mean, lower, upper, pred_std
@@ -345,7 +432,7 @@ def evaluate_checkpoints_on_emit(
     aggregate_r2 = macro_metric(flat_metrics, task_names, "R2")
 
     results = {
-        "title": "emit_eval_aug08_sorf_float64",
+        "title": f"emit_eval_{Path(ckpt_dir).name}",
         "ckpt_dir": str(ckpt_dir.resolve()),
         "task_names": task_names,
         "aggregate_RRMSE": aggregate_rrmse,
@@ -368,6 +455,7 @@ def evaluate_checkpoints_on_emit(
         y_true=np.column_stack(y_true_all),
         y_pred=np.column_stack(y_pred_all),
         y_std=np.column_stack(y_std_all),
+        valid_mask=np.column_stack(valid_mask_all),
     )
     print(f"\nAggregate RRMSE={aggregate_rrmse:.6f}  R2={aggregate_r2:.6f}")
     print(f"Saved metrics: {json_path}")
@@ -389,9 +477,26 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--tasks",
+        nargs="+",
+        default=None,
+        help=(
+            "Subset of mapped QoIs to evaluate "
+            f"(default: all with checkpoints). Choices: {list(TASK_TO_STATE_COL)}"
+        ),
+    )
+    parser.add_argument(
         "--all-samples",
         action="store_true",
-        help="Include default-state rows (~84% near prior defaults)",
+        help="Include default-state rows (grain_size near 500)",
+    )
+    parser.add_argument(
+        "--no-filter-valid-labels",
+        action="store_true",
+        help=(
+            "Do not drop out-of-range labels (e.g. EMIT cos_i < 0). "
+            "Default filters cos_i/aot/cwv to training design ranges."
+        ),
     )
     parser.add_argument("--save-dir", type=Path, default=None)
     parser.add_argument(
@@ -406,7 +511,11 @@ def main() -> None:
     device = args.device
     if device.startswith("cuda") and not torch.cuda.is_available():
         print("CUDA unavailable; falling back to CPU")
+        print(f"  torch.cuda.is_available()={torch.cuda.is_available()}")
+        print(f"  torch.version.cuda={torch.version.cuda}")
         device = "cpu"
+    elif device.startswith("cuda"):
+        print(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
 
     max_samples = None if args.max_samples == 0 else int(args.max_samples)
     evaluate_checkpoints_on_emit(
@@ -417,6 +526,8 @@ def main() -> None:
         max_samples=max_samples,
         seed=args.seed,
         nondefault_only=not args.all_samples,
+        filter_valid_labels=not args.no_filter_valid_labels,
+        tasks=args.tasks,
         save_dir=args.save_dir,
     )
 

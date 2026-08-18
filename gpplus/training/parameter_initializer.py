@@ -6,6 +6,22 @@ from torch.quasirandom import SobolEngine
 
 from ..config import logger
 
+# Parameters excluded from Sobol multi-init. Variational posterior parameters
+# (and SVGP inducing locations, which live under variational_strategy) are both
+# far too large for a Sobol basis -- the Cholesky factor alone is m^2 entries,
+# past SobolEngine's dimension limit -- and meaningless to randomize: they start
+# at the prior, a data subset, or a warm-started optimum.
+INITIALIZER_SKIP_SUBSTRINGS = (
+    "raw_bound_penalty_lambda",
+    "raw_variational_",
+    "variational_strategy",
+)
+
+
+def skip_initialization(name: str) -> bool:
+    """True when ``name`` must not consume a Sobol slice or be randomized."""
+    return any(token in name for token in INITIALIZER_SKIP_SUBSTRINGS)
+
 
 class ParameterInitializer(ABC):
     """Abstract base class for parameter initializers."""
@@ -69,7 +85,7 @@ class DefaultParameterInitializer(ParameterInitializer):
         self.num_params = 0
         for name, param in model.named_parameters():
             if param.requires_grad and ".weight" not in name and ".bias" not in name:
-                if "raw_bound_penalty_lambda" in name:
+                if skip_initialization(name):
                     continue
                 if batch_size > 1 and param.dim() >= 1 and param.shape[0] == batch_size:
                     self.num_params += param[0].numel()
@@ -442,8 +458,8 @@ class DefaultParameterInitializer(ParameterInitializer):
                     logger.debug(f"Skipping parameter: {name}")
                     continue
 
-                if "raw_bound_penalty_lambda" in name:
-                    logger.debug(f"Skipping learnable bound penalty lambda: {name}")
+                if skip_initialization(name):
+                    logger.debug(f"Skipping non-Sobol parameter: {name}")
                     continue
 
                 # Get initialization configuration
@@ -529,7 +545,7 @@ class DefaultParameterInitializer(ParameterInitializer):
                 if not param.requires_grad or param.numel() == 0:
                     continue
 
-                if "raw_bound_penalty_lambda" in name:
+                if skip_initialization(name):
                     continue
 
                 config = self.get_initialization_config(name, param, model)

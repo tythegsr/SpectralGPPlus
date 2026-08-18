@@ -286,6 +286,137 @@ def evaluate_rff_gp_model(
     return mean, lower, upper, stddev
 
 
+def evaluate_vi_rff_gp_model(
+    model,
+    test_x: torch.Tensor,
+    chunk_size: int = 512,
+    return_latent_var: bool = False,
+):
+    """
+    Evaluate a :class:`~gpplus.models.vi_rff_gpr.VIRFFGPR` from its variational posterior.
+
+    Unlike :func:`evaluate_rff_gp_model`, no Woodbury solve over the training set
+    is needed: ``q(w) = N(m_w, S)`` already summarizes the data, so prediction is
+    ``μ(x*) = m(x*) + φ(x*)ᵀ m_w`` and ``Var[f(x*)] = φ(x*)ᵀ S φ(x*)``.
+
+    Observation bounds add the per-point noise ``d(x*)``, which includes the NIGP
+    input-noise correction when it is active. Chunked over ``chunk_size`` test
+    points so the ``(chunk, m) x (m, m)`` variance matmul stays bounded.
+    """
+    model.eval()
+    train_inputs = getattr(model, "train_inputs", None)
+    if train_inputs and len(train_inputs) > 0:
+        reference = train_inputs[0]
+        test_x = test_x.to(device=reference.device, dtype=reference.dtype)
+
+    n_test = test_x.shape[0]
+    if n_test == 0:
+        empty = test_x.new_zeros(0)
+        if return_latent_var:
+            return empty, empty, empty, empty, empty
+        return empty, empty, empty, empty
+
+    from ..utils.nigp_utils import nigp_correction_enabled
+
+    use_nigp = nigp_correction_enabled(model)
+    step = n_test if chunk_size <= 0 else chunk_size
+
+    mean_chunks = []
+    lower_chunks = []
+    upper_chunks = []
+    f_var_chunks: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for start in range(0, n_test, step):
+            chunk_x = test_x[start : start + step]
+            phi = model.scaled_features(chunk_x)
+            f_mean = model.mean_module(chunk_x) + phi @ model.variational_mean
+            f_var = model.variational_quad(phi).clamp_min(0.0)
+            obs_std = (f_var + model.observation_noise_var(chunk_x)).clamp_min(0.0).sqrt()
+            mean_chunks.append(f_mean)
+            lower_chunks.append(f_mean - 2 * obs_std)
+            upper_chunks.append(f_mean + 2 * obs_std)
+            if return_latent_var:
+                f_var_chunks.append(f_var)
+
+        mean = torch.cat(mean_chunks, dim=0)
+        lower = torch.cat(lower_chunks, dim=0)
+        upper = torch.cat(upper_chunks, dim=0)
+        stddev = (upper - lower) / 4.0
+
+    logger.info(
+        "Variational RFF evaluation completed%s.",
+        " (NIGP observation noise)" if use_nigp else "",
+    )
+    if return_latent_var:
+        return mean, lower, upper, stddev, torch.cat(f_var_chunks, dim=0)
+    return mean, lower, upper, stddev
+
+
+def evaluate_svgp_gp_model(
+    model,
+    test_x: torch.Tensor,
+    chunk_size: int = 4096,
+    return_latent_var: bool = False,
+):
+    """
+    Evaluate an :class:`~gpplus.models.svgp_gpr.SVGPR` from its variational posterior.
+
+    The training set plays no role at prediction time: ``q(u)`` at the inducing
+    locations already summarizes it, so each chunk costs ``O(chunk * M^2)``
+    regardless of ``N``. Observation bounds add the per-point noise ``d(x*)``,
+    which carries the NIGP input-noise correction when it is active.
+    """
+    model.eval()
+    reference = next(model.parameters())
+    test_x = test_x.to(device=reference.device, dtype=getattr(model, "dtype", reference.dtype))
+
+    n_test = test_x.shape[0]
+    if n_test == 0:
+        empty = test_x.new_zeros(0)
+        if return_latent_var:
+            return empty, empty, empty, empty, empty
+        return empty, empty, empty, empty
+
+    from ..utils.nigp_utils import nigp_correction_enabled
+
+    use_nigp = nigp_correction_enabled(model)
+    step = n_test if chunk_size <= 0 else chunk_size
+
+    mean_chunks = []
+    lower_chunks = []
+    upper_chunks = []
+    f_var_chunks: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for start in range(0, n_test, step):
+            chunk_x = test_x[start : start + step]
+            dist = model(chunk_x)
+            f_mean = dist.mean
+            f_var = dist.variance.clamp_min(0.0)
+            # grad_mu re-enables autograd internally when NIGP is on.
+            obs_std = (f_var + model.observation_noise_var(chunk_x)).clamp_min(0.0).sqrt()
+            mean_chunks.append(f_mean)
+            lower_chunks.append(f_mean - 2 * obs_std)
+            upper_chunks.append(f_mean + 2 * obs_std)
+            if return_latent_var:
+                f_var_chunks.append(f_var)
+
+        mean = torch.cat(mean_chunks, dim=0)
+        lower = torch.cat(lower_chunks, dim=0)
+        upper = torch.cat(upper_chunks, dim=0)
+        stddev = (upper - lower) / 4.0
+
+    logger.info(
+        "SVGP evaluation completed%s (M=%s inducing points).",
+        " (NIGP observation noise)" if use_nigp else "",
+        getattr(model, "num_inducing", "?"),
+    )
+    if return_latent_var:
+        return mean, lower, upper, stddev, torch.cat(f_var_chunks, dim=0)
+    return mean, lower, upper, stddev
+
+
 def evaluate_lrnn_gp_model(
     model,
     test_x: torch.Tensor,

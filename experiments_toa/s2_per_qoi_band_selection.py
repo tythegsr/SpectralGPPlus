@@ -26,6 +26,7 @@ import csv
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import h5py
 import matplotlib.pyplot as plt
@@ -60,14 +61,22 @@ def _indices_to_ranges(indices: list[int]) -> list[list[int]]:
     return ranges
 
 
-def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     with h5py.File(path, "r") as f:
         wl = np.asarray(f["wl"][:], dtype=np.float64)
-        refl = np.asarray(f["toa_reflectance"][:], dtype=np.float64)
-        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in QOI_NAMES])
+        if "toa_reflectance" in f:
+            refl = np.asarray(f["toa_reflectance"][:], dtype=np.float64)
+        elif "reflectance" in f:
+            refl = np.asarray(f["reflectance"][:], dtype=np.float64)
+        else:
+            raise KeyError(f"Missing reflectance in {path}")
+        names = [n for n in QOI_NAMES if n in f]
+        if not names:
+            raise KeyError(f"No S2 QoI datasets found among {QOI_NAMES}")
+        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
     if refl.shape[1] != S2_INPUT_DIM:
         raise ValueError(f"Expected {S2_INPUT_DIM} bands, got {refl.shape[1]}")
-    return wl, refl, Y
+    return wl, refl, Y, names
 
 
 def _band_scores(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -142,7 +151,9 @@ def select_bands_per_qoi(
     step: int = 8,
     subsample: int | None = 20000,
     seed: int = 0,
+    qoi_names: Sequence[str] | None = None,
 ) -> dict:
+    names = list(qoi_names) if qoi_names is not None else QOI_NAMES
     n = X.shape[0]
     if subsample is not None and subsample < n:
         rng = np.random.default_rng(seed)
@@ -157,7 +168,7 @@ def select_bands_per_qoi(
     tasks: dict[str, dict] = {}
     score_rows: list[dict] = []
 
-    for t, name in enumerate(QOI_NAMES):
+    for t, name in enumerate(names):
         pearson, spearman, score = _band_scores(X, Y[:, t])
         y = Y[:, t]
         r2_full = _ridge_r2(X[:, candidates], y, seed=seed)
@@ -289,16 +300,17 @@ def _write_csv(score_rows: list[dict], out_path: Path) -> None:
 
 
 def _plot_spectra(wl: np.ndarray, result: dict, out_path: Path) -> None:
-    n = len(QOI_NAMES)
+    names = list(result["tasks"].keys())
+    n = len(names)
     fig, axes = plt.subplots(n, 1, figsize=(11, 1.35 * n), sharex=True)
     if n == 1:
         axes = [axes]
     global_drop = set(result["global_drop_indices"])
-    by_qoi: dict[str, list[dict]] = {name: [] for name in QOI_NAMES}
+    by_qoi: dict[str, list[dict]] = {name: [] for name in names}
     for row in result["score_rows"]:
         by_qoi[row["qoi"]].append(row)
 
-    for ax, name in zip(axes, QOI_NAMES):
+    for ax, name in zip(axes, names):
         rows = sorted(by_qoi[name], key=lambda r: r["band_index"])
         scores = np.array([r["score"] for r in rows])
         kept = np.array([r["kept"] for r in rows])
@@ -365,11 +377,13 @@ def run(
     step: int = 8,
     subsample: int | None = 49000,
     seed: int = 42,
+    write_train_config: bool = True,
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, X, Y = _load(data_path)
+    wl, X, Y, names = _load(data_path)
     print(f"  X={X.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+    print(f"  qoi={names}")
 
     result = select_bands_per_qoi(
         wl,
@@ -381,18 +395,22 @@ def run(
         step=step,
         subsample=subsample,
         seed=seed,
+        qoi_names=names,
     )
     result["data_path"] = str(data_path.resolve())
+    result["qoi_names"] = names
 
     report = {k: v for k, v in result.items() if k != "score_rows"}
     (out_dir / "per_qoi_band_selection.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
     )
     _write_band_config(result, out_dir / "s2_task_bands_from_corr.json")
-    configs_dir = Path(__file__).resolve().parent / "configs"
-    configs_dir.mkdir(parents=True, exist_ok=True)
-    train_cfg = configs_dir / "s2_task_bands_from_corr.json"
-    _write_band_config(result, train_cfg)
+    train_cfg = None
+    if write_train_config:
+        configs_dir = Path(__file__).resolve().parent / "configs"
+        configs_dir.mkdir(parents=True, exist_ok=True)
+        train_cfg = configs_dir / "s2_task_bands_from_corr.json"
+        _write_band_config(result, train_cfg)
     _write_csv(result["score_rows"], out_dir / "per_qoi_band_scores.csv")
     _plot_spectra(wl, result, out_dir / "per_qoi_corr_spectrum.png")
     _write_drop_summary_txt(result, out_dir / "per_qoi_bands_to_drop.txt")
@@ -409,7 +427,8 @@ def run(
         )
         print(f"  keep_ranges={info['keep_ranges']}")
     print(f"Wrote artifacts under {out_dir}")
-    print(f"Training config: {train_cfg}")
+    if train_cfg is not None:
+        print(f"Training config: {train_cfg}")
     return result
 
 
@@ -432,6 +451,13 @@ def main() -> None:
     parser.add_argument("--step", type=int, default=8)
     parser.add_argument("--subsample", type=int, default=49000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.set_defaults(write_train_config=True)
+    parser.add_argument(
+        "--no-write-train-config",
+        dest="write_train_config",
+        action="store_false",
+        help="Do not overwrite experiments_toa/configs/s2_task_bands_from_corr.json",
+    )
     args = parser.parse_args()
     run(
         data_path=Path(args.data_path),
@@ -442,6 +468,7 @@ def main() -> None:
         step=args.step,
         subsample=None if args.subsample <= 0 else args.subsample,
         seed=args.seed,
+        write_train_config=args.write_train_config,
     )
 
 

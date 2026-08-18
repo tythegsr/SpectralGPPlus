@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import h5py
 import matplotlib.pyplot as plt
@@ -44,13 +45,34 @@ def _safe_max_abs_corr(
     }
 
 
-def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _qoi_names_in_file(f) -> list[str]:
+    names = [n for n in QOI_NAMES if n in f]
+    if not names:
+        raise KeyError(f"No S2 QoI datasets found among {QOI_NAMES}")
+    return names
+
+
+def _load(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, list[str]]:
     with h5py.File(path, "r") as f:
+        if "wl" not in f:
+            raise KeyError(f"Missing wavelength variable 'wl' in {path}")
         wl = np.asarray(f["wl"][:], dtype=np.float64)
-        refl = np.asarray(f["toa_reflectance"][:], dtype=np.float64)
-        rad = np.asarray(f["toa_radiance"][:], dtype=np.float64)
-        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in QOI_NAMES])
-    return wl, refl, rad, Y
+        if "toa_reflectance" in f:
+            refl = np.asarray(f["toa_reflectance"][:], dtype=np.float64)
+        elif "reflectance" in f:
+            refl = np.asarray(f["reflectance"][:], dtype=np.float64)
+        else:
+            raise KeyError(f"Missing reflectance in {path}")
+        rad = (
+            np.asarray(f["toa_radiance"][:], dtype=np.float64)
+            if "toa_radiance" in f
+            else None
+        )
+        names = _qoi_names_in_file(f)
+        Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
+    return wl, refl, rad, Y, names
 
 
 def _suggest_drop_indices(X: np.ndarray) -> list[int]:
@@ -70,16 +92,19 @@ def _suggest_drop_indices(X: np.ndarray) -> list[int]:
     return drop
 
 
-def _plot_qoi_corr(Y: np.ndarray, out: Path) -> np.ndarray:
+def _plot_qoi_corr(
+    Y: np.ndarray, out: Path, names: Sequence[str] | None = None
+) -> np.ndarray:
+    names = list(names) if names is not None else QOI_NAMES
     corr = np.corrcoef(Y, rowvar=False)
     fig, ax = plt.subplots(figsize=(8, 7))
     im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
-    ax.set_xticks(range(len(QOI_NAMES)))
-    ax.set_yticks(range(len(QOI_NAMES)))
-    ax.set_xticklabels(QOI_NAMES, rotation=45, ha="right")
-    ax.set_yticklabels(QOI_NAMES)
-    for i in range(len(QOI_NAMES)):
-        for j in range(len(QOI_NAMES)):
+    ax.set_xticks(range(len(names)))
+    ax.set_yticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_yticklabels(names)
+    for i in range(len(names)):
+        for j in range(len(names)):
             ax.text(j, i, f"{corr[i, j]:.2f}", ha="center", va="center", fontsize=7)
     ax.set_title("QoI–QoI Pearson correlation")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -128,7 +153,9 @@ def _plot_band_vs_qoi(
     out: Path,
     *,
     title: str = "Pearson r: reflectance bands vs QoI",
+    names: Sequence[str] | None = None,
 ) -> None:
+    names = list(names) if names is not None else QOI_NAMES
     fig, ax = plt.subplots(figsize=(10, 8))
     im = ax.imshow(
         band_qoi,
@@ -139,8 +166,8 @@ def _plot_band_vs_qoi(
         origin="lower",
         extent=(-0.5, band_qoi.shape[1] - 0.5, -0.5, band_qoi.shape[0] - 0.5),
     )
-    ax.set_xticks(range(len(QOI_NAMES)))
-    ax.set_xticklabels(QOI_NAMES, rotation=45, ha="right")
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=45, ha="right")
     yticks = np.linspace(0, band_qoi.shape[0] - 1, 10, dtype=int)
     ax.set_yticks(yticks)
     ax.set_yticklabels([f"{i}\n{wl[i]:.0f}nm" for i in yticks], fontsize=7)
@@ -161,9 +188,11 @@ def _plot_joint(
     out: Path,
     *,
     title: str = "Joint reflectance + QoI Pearson correlation",
+    names: Sequence[str] | None = None,
 ) -> None:
+    names = list(names) if names is not None else QOI_NAMES
     n_b = len(wl)
-    n_q = len(QOI_NAMES)
+    n_q = len(names)
     fig = plt.figure(figsize=(12, 11))
     gs = GridSpec(2, 2, width_ratios=[4, 1.2], height_ratios=[4, 1.2], hspace=0.08, wspace=0.08)
     ax_bb = fig.add_subplot(gs[0, 0])
@@ -182,13 +211,13 @@ def _plot_joint(
         ax_bb.axhline(j, color="cyan", lw=0.3, alpha=0.5)
 
     ax_bq.set_xticks(range(n_q))
-    ax_bq.set_xticklabels(QOI_NAMES, rotation=90, fontsize=7)
+    ax_bq.set_xticklabels(names, rotation=90, fontsize=7)
     ax_qb.set_yticks(range(n_q))
-    ax_qb.set_yticklabels(QOI_NAMES, fontsize=7)
+    ax_qb.set_yticklabels(names, fontsize=7)
     ax_qq.set_xticks(range(n_q))
     ax_qq.set_yticks(range(n_q))
-    ax_qq.set_xticklabels(QOI_NAMES, rotation=90, fontsize=7)
-    ax_qq.set_yticklabels(QOI_NAMES, fontsize=7)
+    ax_qq.set_xticklabels(names, rotation=90, fontsize=7)
+    ax_qq.set_yticklabels(names, fontsize=7)
     for i in range(n_q):
         for j in range(n_q):
             ax_qq.text(
@@ -220,15 +249,19 @@ def _plot_joint(
 def run_analysis(data_path: Path, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, refl, rad, Y = _load(data_path)
-    print(f"  refl={refl.shape} rad={rad.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+    wl, refl, rad, Y, names = _load(data_path)
+    rad_shape = None if rad is None else rad.shape
+    print(f"  refl={refl.shape} rad={rad_shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
+    print(f"  qoi={names}")
 
     meta = {
         "data_path": str(data_path.resolve()),
         "n_samples": int(refl.shape[0]),
         "n_bands": int(refl.shape[1]),
         "n_qoi": int(Y.shape[1]),
-        "qoi_names": QOI_NAMES,
+        "qoi_names": names,
+        "missing_qoi": [n for n in QOI_NAMES if n not in names],
+        "has_toa_radiance": rad is not None,
         "wl_min_nm": float(wl.min()),
         "wl_max_nm": float(wl.max()),
         "qoi_ranges": {
@@ -238,31 +271,32 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
                 "mean": float(Y[:, j].mean()),
                 "std": float(Y[:, j].std()),
             }
-            for j, name in enumerate(QOI_NAMES)
+            for j, name in enumerate(names)
         },
     }
 
     print("QoI–QoI correlation...")
-    qoi_corr = _plot_qoi_corr(Y, out_dir / "qoi_correlation_matrix.png")
-    off = qoi_corr[np.triu_indices(len(QOI_NAMES), 1)]
+    qoi_corr = _plot_qoi_corr(Y, out_dir / "qoi_correlation_matrix.png", names=names)
+    off = qoi_corr[np.triu_indices(len(names), 1)]
     meta["qoi_offdiag_abs_pearson_mean"] = float(np.nanmean(np.abs(off)))
     meta["qoi_offdiag_abs_pearson_max"] = float(np.nanmax(np.abs(off)))
 
     print("Band–band correlations...")
     corr_refl = np.corrcoef(refl, rowvar=False)
-    corr_rad = np.corrcoef(rad, rowvar=False)
     _plot_band_corr(
         corr_refl,
         wl,
         "TOA reflectance band correlation",
         out_dir / "toa_reflectance_band_correlation.png",
     )
-    _plot_band_corr(
-        corr_rad,
-        wl,
-        "TOA radiance band correlation",
-        out_dir / "toa_radiance_band_correlation.png",
-    )
+    if rad is not None:
+        corr_rad = np.corrcoef(rad, rowvar=False)
+        _plot_band_corr(
+            corr_rad,
+            wl,
+            "TOA radiance band correlation",
+            out_dir / "toa_radiance_band_correlation.png",
+        )
 
     drop = _suggest_drop_indices(refl)
     meta["bands_to_drop_indices"] = drop
@@ -292,6 +326,7 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
         drop,
         out_dir / "toa_reflectance_vs_qoi_correlation.png",
         title="Pearson r: reflectance bands vs QoI",
+        names=names,
     )
 
     joint_refl = np.concatenate([refl, Y], axis=1)
@@ -302,49 +337,52 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
         drop,
         out_dir / "toa_reflectance_qoi_joint_correlation.png",
         title="Joint reflectance + QoI Pearson correlation",
+        names=names,
     )
 
-    band_qoi_rad = np.zeros((rad.shape[1], Y.shape[1]), dtype=np.float64)
-    for t in range(Y.shape[1]):
-        for j in range(rad.shape[1]):
-            band_qoi_rad[j, t] = np.corrcoef(rad[:, j], Y[:, t])[0, 1]
-    _plot_band_vs_qoi(
-        band_qoi_rad,
-        wl,
-        drop,
-        out_dir / "toa_radiance_vs_qoi_correlation.png",
-        title="Pearson r: radiance bands vs QoI",
-    )
-
-    joint_rad = np.concatenate([rad, Y], axis=1)
-    corr_full_rad = np.corrcoef(joint_rad, rowvar=False)
-    _plot_joint(
-        corr_full_rad,
-        wl,
-        drop,
-        out_dir / "toa_radiance_qoi_joint_correlation.png",
-        title="Joint radiance + QoI Pearson correlation",
-    )
-
-    # Per-QoI max |r| (reflectance and radiance); NaN if QoI is constant.
     meta["band_qoi_max_abs_pearson"] = {
         name: _safe_max_abs_corr(band_qoi_refl[:, t], wl)
-        for t, name in enumerate(QOI_NAMES)
-    }
-    meta["radiance_band_qoi_max_abs_pearson"] = {
-        name: _safe_max_abs_corr(band_qoi_rad[:, t], wl)
-        for t, name in enumerate(QOI_NAMES)
+        for t, name in enumerate(names)
     }
 
-    # Radiance vs reflectance per-band identity check
-    band_rr = np.array(
-        [np.corrcoef(refl[:, j], rad[:, j])[0, 1] for j in range(refl.shape[1])]
-    )
-    meta["rad_vs_refl_per_band_pearson"] = {
-        "mean": float(np.nanmean(band_rr)),
-        "min": float(np.nanmin(band_rr)),
-        "max": float(np.nanmax(band_rr)),
-    }
+    if rad is not None:
+        band_qoi_rad = np.zeros((rad.shape[1], Y.shape[1]), dtype=np.float64)
+        for t in range(Y.shape[1]):
+            for j in range(rad.shape[1]):
+                band_qoi_rad[j, t] = np.corrcoef(rad[:, j], Y[:, t])[0, 1]
+        _plot_band_vs_qoi(
+            band_qoi_rad,
+            wl,
+            drop,
+            out_dir / "toa_radiance_vs_qoi_correlation.png",
+            title="Pearson r: radiance bands vs QoI",
+            names=names,
+        )
+
+        joint_rad = np.concatenate([rad, Y], axis=1)
+        corr_full_rad = np.corrcoef(joint_rad, rowvar=False)
+        _plot_joint(
+            corr_full_rad,
+            wl,
+            drop,
+            out_dir / "toa_radiance_qoi_joint_correlation.png",
+            title="Joint radiance + QoI Pearson correlation",
+            names=names,
+        )
+
+        meta["radiance_band_qoi_max_abs_pearson"] = {
+            name: _safe_max_abs_corr(band_qoi_rad[:, t], wl)
+            for t, name in enumerate(names)
+        }
+
+        band_rr = np.array(
+            [np.corrcoef(refl[:, j], rad[:, j])[0, 1] for j in range(refl.shape[1])]
+        )
+        meta["rad_vs_refl_per_band_pearson"] = {
+            "mean": float(np.nanmean(band_rr)),
+            "min": float(np.nanmin(band_rr)),
+            "max": float(np.nanmax(band_rr)),
+        }
 
     (out_dir / "analysis_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"Wrote artifacts under {out_dir}")
@@ -354,10 +392,11 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
         r = info["max_abs_r"]
         r_s = f"{r:.3f}" if r == r else "nan"
         print(f"  refl {name:14s} max|r|={r_s} @ band {info['band_index']}")
-    for name, info in meta["radiance_band_qoi_max_abs_pearson"].items():
-        r = info["max_abs_r"]
-        r_s = f"{r:.3f}" if r == r else "nan"
-        print(f"  rad  {name:14s} max|r|={r_s} @ band {info['band_index']}")
+    if "radiance_band_qoi_max_abs_pearson" in meta:
+        for name, info in meta["radiance_band_qoi_max_abs_pearson"].items():
+            r = info["max_abs_r"]
+            r_s = f"{r:.3f}" if r == r else "nan"
+            print(f"  rad  {name:14s} max|r|={r_s} @ band {info['band_index']}")
     return meta
 
 
@@ -367,15 +406,18 @@ def main() -> None:
         "--data-path",
         type=str,
         default=str(
+            # Path(__file__).resolve().parent
+            # / "data 11 QoI"
+            # / "snow_toa_simulations_20262107.nc"
             Path(__file__).resolve().parent
             / "data 11 QoI"
-            / "snow_toa_simulations_20262107.nc"
+            / "snow_toa_fsnow_70to100_20261208.nc"
         ),
     )
     parser.add_argument(
         "--out-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "analysis_toa_July21"),
+        default=str(Path(__file__).resolve().parent / "analysis_toa_August17"),
     )
     args = parser.parse_args()
     run_analysis(Path(args.data_path), Path(args.out_dir))
