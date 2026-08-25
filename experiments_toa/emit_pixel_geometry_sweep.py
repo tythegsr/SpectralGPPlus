@@ -39,7 +39,7 @@ DISORT_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/disort_snow_lut_EMIT
 ENDMEMBER_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/endmembers.csv"
 EMIT_WAVE_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/emit-wave.txt"
 NOISE_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/emit_noise.txt"
-DEFAULT_OUT = "C:/Users/tylerj/isofit/disort_data_for_tyler/data/emit_pixel_geometry_sweep"
+DEFAULT_OUT = "C:/Users/tylerj/isofit/disort_data_for_tyler/data/emit_pixel_geometry_sweep_onlyELE"
 
 # ISOFIT snow / multi-surface state vector (15-D); sinA/cosA are aspect params, not cos_i.
 EMIT_STATE_FEATURE_NAMES: tuple[str, ...] = (
@@ -807,7 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", type=Path, default=Path(DEFAULT_OUT))
     p.add_argument("--add-noise", action="store_true")
     p.add_argument("--cos-i-min", type=float, default=0.06)
-    p.add_argument("--cos-i-max", type=float, default=1.0)
+    p.add_argument("--cos-i-max", type=float, default=0.061)
     p.add_argument("--cos-i-n", type=int, default=25)
     p.add_argument("--ele-min", type=float, default=0.5)
     p.add_argument("--ele-max", type=float, default=5.0)
