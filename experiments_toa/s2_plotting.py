@@ -266,7 +266,16 @@ def plot_s2_posterior_examples(
                 c = t % n_cols
                 dens_axes.append(fig.add_subplot(gs[r, c]))
 
-        spectrum = x_test[ex]
+        spectrum = np.asarray(x_test[ex], dtype=np.float64).reshape(-1)
+        if spectrum.size != wl.size:
+            if spectrum.size > wl.size:
+                # Aux inputs (e.g. elevation) are appended after spectral bands.
+                spectrum = spectrum[: wl.size]
+            else:
+                raise ValueError(
+                    f"x_test row has {spectrum.size} features but wavelengths has "
+                    f"{wl.size}; cannot plot spectrum"
+                )
         ax_spec.plot(wl, spectrum, color="C0", linewidth=1.0)
         ax_spec.set_xlabel("Wavelength (nm)")
         ax_spec.set_ylabel(spectrum_ylabel)
@@ -314,3 +323,128 @@ def plot_s2_posterior_examples(
         plt.close(fig)
         paths.append(str(out))
     return paths
+
+
+def _coverage_key(level: float) -> str:
+    return f"coverage_{int(round(float(level) * 100))}"
+
+
+def plot_prediction_coverage(
+    *,
+    task_names: Sequence[str],
+    coverage_by_task: Mapping[str, Mapping[str, float]],
+    save_dir: str | Path,
+    title: str = "",
+    levels: Sequence[float] = (0.50, 0.90, 0.95),
+) -> list[str]:
+    """Save calibration and grouped-bar coverage figures for predictive intervals.
+
+    Expects each ``coverage_by_task[name]`` to contain ``coverage_50`` /
+    ``coverage_90`` / ``coverage_95`` (fractions in ``[0, 1]``).
+    """
+    names = [str(n) for n in task_names]
+    if not names:
+        return []
+    level_list = [float(L) for L in levels]
+    for L in level_list:
+        if not (0.0 < L < 1.0):
+            raise ValueError(f"coverage level must be in (0, 1), got {L}")
+
+    rows: list[tuple[str, list[float]]] = []
+    for name in names:
+        block = coverage_by_task.get(name)
+        if block is None:
+            continue
+        vals: list[float] = []
+        skip = False
+        for L in level_list:
+            key = _coverage_key(L)
+            if key not in block:
+                skip = True
+                break
+            vals.append(float(block[key]))
+        if not skip:
+            rows.append((name, vals))
+    if not rows:
+        return []
+
+    save_dir = Path(save_dir)
+    ensure_dir(save_dir)
+    saved: list[str] = []
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i % 10) for i in range(len(rows))]
+    nom = np.asarray(level_list, dtype=np.float64)
+
+    # --- Calibration: nominal vs empirical ---
+    fig, ax = plt.subplots(figsize=(6.2, 5.4), dpi=160)
+    ax.fill_between([0.0, 1.05], [0.0, 1.05], [1.05, 1.05], color="#d9ead3", alpha=0.35, zorder=0)
+    ax.fill_between([0.0, 1.05], [0.0, 0.0], [0.0, 1.05], color="#f4cccc", alpha=0.25, zorder=0)
+    ax.plot([0.0, 1.05], [0.0, 1.05], "k--", lw=1.2, label="ideal", zorder=2)
+    for (name, vals), color in zip(rows, colors):
+        emp = np.asarray(vals, dtype=np.float64)
+        ax.plot(
+            nom,
+            emp,
+            marker="o",
+            ms=6,
+            lw=1.6,
+            color=color,
+            label=_task_label(name),
+            zorder=3,
+        )
+    ax.set_xlim(0.40, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.set_xticks(nom)
+    ax.set_xticklabels([f"{int(round(L * 100))}%" for L in level_list])
+    ax.set_xlabel("Nominal coverage")
+    ax.set_ylabel("Empirical coverage")
+    ax.set_title(title or "Predictive interval calibration")
+    ax.grid(True, alpha=0.3)
+    if len(rows) <= 12:
+        ax.legend(loc="lower right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    cal_path = save_dir / "coverage_calibration.png"
+    fig.savefig(fs_path(cal_path), dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    saved.append(str(cal_path))
+
+    # --- Grouped bars per task ---
+    n_tasks = len(rows)
+    n_levels = len(level_list)
+    x = np.arange(n_tasks, dtype=np.float64)
+    width = min(0.22, 0.7 / max(n_levels, 1))
+    offsets = (np.arange(n_levels) - 0.5 * (n_levels - 1)) * width
+    level_colors = ["#4c78a8", "#f58518", "#54a24b"]
+    while len(level_colors) < n_levels:
+        level_colors.append(cmap(len(level_colors) % 10))
+
+    fig_w = max(6.5, 0.85 * n_tasks + 2.5)
+    fig, ax = plt.subplots(figsize=(fig_w, 5.0), dpi=160)
+    for j, L in enumerate(level_list):
+        heights = [vals[j] for _, vals in rows]
+        ax.bar(
+            x + offsets[j],
+            heights,
+            width=width * 0.92,
+            color=level_colors[j],
+            edgecolor="white",
+            linewidth=0.6,
+            label=f"{int(round(L * 100))}%",
+            zorder=3,
+        )
+        ax.axhline(L, color=level_colors[j], ls="--", lw=1.0, alpha=0.75, zorder=2)
+    ax.set_xticks(x)
+    ax.set_xticklabels([_task_label(n) for n, _ in rows], rotation=30, ha="right")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_ylabel("Empirical coverage")
+    ax.set_xlabel("QoI")
+    ax.set_title(title or "Empirical coverage by QoI")
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(title="Nominal", loc="upper right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    bars_path = save_dir / "coverage_bars.png"
+    fig.savefig(fs_path(bars_path), dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    saved.append(str(bars_path))
+
+    return saved

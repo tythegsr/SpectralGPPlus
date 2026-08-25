@@ -30,6 +30,12 @@ S2_LOG_SCALE_TASK_NAMES: frozenset[str] = frozenset(
     }
 )
 
+# Additive offsets for log(y + C) warps (zero-inflated / near-zero QoIs).
+# Bare log(y) is used when a task is absent from this map (effective C=0).
+S2_LOG_OFFSETS: dict[str, float] = {
+    "dust": 1.0,
+}
+
 # Default affine boxes for logit warps: map physical y in [a, b] to (0, 1) then logit.
 # Match TOA design ranges from experiments_toa/toa_log_data.py (not raw [0, 1]).
 S2_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
@@ -42,7 +48,25 @@ S2_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
     "fsoil": (0.0, 10.0),
 }
 
+# ISOFIT / EMIT label floors and lower bounds for conditional metrics and
+# off-floor training masks (y > threshold = "off floor / off bound").
+S3_LABEL_FLOOR_THRESHOLDS: dict[str, float] = {
+    "aot": 0.03,
+    "dust": 1e-6,
+    "cwv": 0.06,
+}
+
+# EMIT-appropriate logit boxes (ISOFIT physical ranges), not synthetic Sobol boxes.
+S3_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
+    "aot": (0.017, 0.61),
+    "cwv": (0.05, 0.70),
+}
+
 S2_INPUT_VARIABLES: tuple[str, ...] = ("toa_reflectance", "toa_radiance")
+
+# Optional non-spectral model inputs (always kept; never in band drop lists).
+# Stored as NetCDF variables and appended after the 285 spectral columns.
+S2_AUX_INPUT_NAMES: tuple[str, ...] = ("elevation",)
 
 # Absorption / low-SNR bands identified from the joint correlation analysis.
 S2_DEFAULT_DROP_INDICES: tuple[int, ...] = (

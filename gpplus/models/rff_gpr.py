@@ -14,6 +14,7 @@ from linear_operator.operators import LowRankRootLinearOperator
 from ..config import logger
 from ..kernels import LogScaleKernel, RFFKernel
 from ..likelihoods import LogGaussianLikelihood
+from ..priors.response_noise import align_registered_priors
 from ..utils.line_profile import profile
 from ..utils.rff_utils import (
     RffSampling,
@@ -137,6 +138,7 @@ class RFFGPR(gpytorch.models.ExactGP):
         self.mean_module = mean_module.to(dtype=self.dtype)
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)
+        align_registered_priors(self)
         self._train_z_cache: torch.Tensor | None = None
         self._train_z_cache_key: tuple | None = None
         # When False (freeze warm-start), MLL/predict ignore σ_x (standard GP).
@@ -160,6 +162,11 @@ class RFFGPR(gpytorch.models.ExactGP):
                 "(D=%s, sigma_x=10^SoftClamp(raw) in (1e-6, 1)).",
                 input_dim,
             )
+
+    def to(self, *args, **kwargs):
+        out = super().to(*args, **kwargs)
+        align_registered_priors(self)
+        return out
 
     @property
     def _rff_kernel(self) -> RFFKernel:

@@ -129,10 +129,18 @@ def apply_log_scale_extra_metrics(
     computed["log_scale"] = True
     if inv.log_mu is None:
         raise RuntimeError(f"log_mu missing after inverse for log-scale task {task_name}")
+    c = float(warps.log_offset(task_name)) if warps is not None else 0.0
+    if c == 0.0 and warps is None:
+        from experiments_toa.s2_constants import S2_LOG_OFFSETS
+
+        c = float(S2_LOG_OFFSETS.get(task_name, 0.0))
+    if c > 0.0:
+        computed["log_offset"] = c
     extra = compute_log_scale_extra_metrics(
         y_true.cpu() if isinstance(y_true, torch.Tensor) else y_true,
         log_mu=inv.log_mu,
         point_mean_physical=inv.point_mean,
+        log_offset=c,
     )
     computed.update(extra)
     return computed
@@ -149,13 +157,17 @@ def print_task_test_metrics(
     if task_uses_log_scale(
         task_name, log_scale=log_scale, log_scale_tasks=log_scale_tasks, warps=warps
     ):
+        c = float(warps.log_offset(task_name)) if warps is not None else float(
+            computed.get("log_offset", 0.0)
+        )
+        ln_label = f"ln(y+{c:g})" if c > 0.0 else "ln-space"
         print(
             f"{task_name} Test (physical median) RMSE: {computed['RMSE']:.6f}  "
             f"RRMSE: {computed['RRMSE']:.6f}  MAE: {computed['MAE']:.6f}  "
             f"MedAE: {computed['MedAE']:.6f}"
         )
         print(
-            f"{task_name} Test (ln-space) RMSE_log: {computed['RMSE_log']:.6f}  "
+            f"{task_name} Test ({ln_label}) RMSE_log: {computed['RMSE_log']:.6f}  "
             f"RRMSE_log: {computed['RRMSE_log']:.6f}  MAE_log: {computed['MAE_log']:.6f}  "
             f"MedAE_log: {computed['MedAE_log']:.6f}"
         )

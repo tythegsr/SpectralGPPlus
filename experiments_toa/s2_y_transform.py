@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+import math
 import torch
 
 from experiments_toa.s2_constants import (
+    S2_LOG_OFFSETS,
     S2_LOG_SCALE_TASK_NAMES,
     S2_LOGIT_BOUNDS,
     S2_TASK_NAMES,
@@ -56,6 +58,8 @@ class YWarpConfig:
     logit_bounds: Mapping[str, tuple[float, float]] = field(
         default_factory=lambda: dict(S2_LOGIT_BOUNDS)
     )
+    # Per-task additive C in log(y + C); missing → 0 (bare log).
+    log_offsets: Mapping[str, float] = field(default_factory=dict)
 
     @property
     def log_scale(self) -> bool:
@@ -66,6 +70,32 @@ class YWarpConfig:
 
     def uses_logit(self, task_name: str) -> bool:
         return task_name in self.logit_tasks
+
+    def log_offset(self, task_name: str) -> float:
+        return float(self.log_offsets.get(task_name, 0.0))
+
+    def active_log_offsets(self) -> dict[str, float]:
+        """Offsets C>0 for currently active log tasks."""
+        return {
+            name: self.log_offset(name)
+            for name in sorted(self.log_tasks)
+            if self.log_offset(name) > 0.0
+        }
+
+
+def _merge_log_offsets(
+    overrides: Mapping[str, float] | None,
+) -> dict[str, float]:
+    offsets = {k: float(v) for k, v in S2_LOG_OFFSETS.items()}
+    if overrides:
+        for name, value in overrides.items():
+            c = float(value)
+            if not math.isfinite(c) or c < 0.0:
+                raise ValueError(
+                    f"log offset for {name!r} must be a finite value >= 0, got {value!r}"
+                )
+            offsets[str(name)] = c
+    return offsets
 
 
 def _attr_to_str(value: Any) -> str:
@@ -220,6 +250,7 @@ def resolve_y_warps(
     meta: Mapping[str, Any] | None = None,
     attrs: Mapping[str, Any] | None = None,
     logit_bounds: Mapping[str, tuple[float, float]] | None = None,
+    log_offsets: Mapping[str, float] | None = None,
 ) -> YWarpConfig:
     """
     Resolve per-QoI log / logit warps.
@@ -231,8 +262,12 @@ def resolve_y_warps(
     Precedence for logit tasks:
     1. Explicit ``logit_scale_qoi`` list (including empty → no logit warps)
     2. Otherwise empty (no NetCDF auto for logit)
+
+    Log warps use ``log(y + C)`` with per-task ``C`` from ``S2_LOG_OFFSETS``
+    (overridable via ``log_offsets``). Missing tasks use ``C=0`` (bare ``log(y)``).
     """
     bounds = _merge_logit_bounds(logit_bounds)
+    offsets = _merge_log_offsets(log_offsets)
 
     if log_scale_qoi is not None:
         log_tasks = _normalize_task_list(log_scale_qoi, label="LOG_SCALE_QOI")
@@ -269,6 +304,7 @@ def resolve_y_warps(
         log_source=log_source,
         logit_source=logit_source,
         logit_bounds=bounds,
+        log_offsets=offsets,
     )
 
 
@@ -345,6 +381,12 @@ def _clamp_unit_for_logit(u: torch.Tensor) -> torch.Tensor:
     return u.clamp(_LOGIT_EPS, 1.0 - _LOGIT_EPS)
 
 
+def _log_offset_for_task(task_name: str, warps: YWarpConfig | None) -> float:
+    if warps is not None:
+        return float(warps.log_offset(task_name))
+    return float(S2_LOG_OFFSETS.get(task_name, 0.0))
+
+
 def forward_y_s2(
     y: torch.Tensor,
     task_name: str,
@@ -361,6 +403,13 @@ def forward_y_s2(
         log_scale_tasks=log_scale_tasks,
         warps=warps,
     ):
+        c = _log_offset_for_task(task_name, warps)
+        if c > 0.0:
+            if torch.any(y <= -c):
+                raise ValueError(
+                    f"log(y+{c:g}) scaling for {task_name!r} requires all targets > {-c:g}."
+                )
+            return torch.log(y + c)
         if torch.any(y <= 0):
             raise ValueError(
                 f"log scaling for {task_name!r} requires all targets to be strictly positive."
@@ -412,16 +461,28 @@ def _lognormal_original_scale(
     sigma_log: torch.Tensor,
     *,
     z: float = _NORMAL_Z_95,
+    offset: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Map log-space Normal(μ, σ²) to log-normal summaries on original scale."""
+    """Map log-space Normal(μ, σ²) on ``log(y+C)`` to summaries on original ``y`` scale."""
+    c = float(offset)
     sigma_log = torch.clamp(sigma_log, min=0.0)
-    median = torch.exp(mu_log)
+    median_yc = torch.exp(mu_log)
     sigma_for_mean = torch.clamp(sigma_log, max=_LOG_Y_STD_CAP_FOR_LOGNORMAL_MEAN)
-    mean = median * torch.exp(0.5 * sigma_for_mean**2)
-    mode = torch.exp(mu_log - sigma_log**2)
-    std = median * torch.sqrt(torch.expm1(sigma_log**2))
-    lower = torch.exp(mu_log - z * sigma_log)
-    upper = torch.exp(mu_log + z * sigma_log)
+    mean_yc = median_yc * torch.exp(0.5 * sigma_for_mean**2)
+    mode_yc = torch.exp(mu_log - sigma_log**2)
+    std = median_yc * torch.sqrt(torch.expm1(sigma_log**2))
+    lower_yc = torch.exp(mu_log - z * sigma_log)
+    upper_yc = torch.exp(mu_log + z * sigma_log)
+    if c != 0.0:
+        # y = (y+C) - C; clamp at 0 for non-negative physical QoIs.
+        median = torch.clamp(median_yc - c, min=0.0)
+        mean = torch.clamp(mean_yc - c, min=0.0)
+        mode = torch.clamp(mode_yc - c, min=0.0)
+        lower = torch.clamp(lower_yc - c, min=0.0)
+        upper = torch.clamp(upper_yc - c, min=0.0)
+    else:
+        median, mean, mode = median_yc, mean_yc, mode_yc
+        lower, upper = lower_yc, upper_yc
     return median, mean, mode, std, lower, upper
 
 
@@ -488,7 +549,10 @@ def inverse_y_s2(
     ):
         mu_log = pred_mean
         sigma_log = pred_std
-        median, mean, mode, ln_std, lo, hi = _lognormal_original_scale(mu_log, sigma_log)
+        c = _log_offset_for_task(task_name, warps)
+        median, mean, mode, ln_std, lo, hi = _lognormal_original_scale(
+            mu_log, sigma_log, offset=c
+        )
         pred_mean = median
         pred_std = ln_std
         lower = lo

@@ -98,17 +98,25 @@ def _supervised_p(
     min_components: int,
     step: int,
     seed: int,
+    elevation: np.ndarray | None = None,
 ) -> tuple[int, float, float, list[dict[str, float]]]:
     """Return (p, r2_full, r2_selected, curve)."""
     rank = int(z.shape[1])
-    r2_full = _ridge_r2(z, y, seed=seed)
+
+    def _feat(p: int) -> np.ndarray:
+        zp = z[:, :p]
+        if elevation is None:
+            return zp
+        return np.column_stack([zp, elevation.reshape(-1, 1)])
+
+    r2_full = _ridge_r2(_feat(rank), y, seed=seed)
     goal = r2_full - r2_tol
     curve: list[dict[str, float]] = []
     chosen = rank
     r2_sel = r2_full
     for k in range(step, rank + step, step):
         p = min(k, rank)
-        r2 = _ridge_r2(z[:, :p], y, seed=seed)
+        r2 = _ridge_r2(_feat(p), y, seed=seed)
         curve.append({"p": float(p), "r2": float(r2)})
         if p >= min_components and r2 >= goal:
             chosen = p
@@ -120,7 +128,7 @@ def _supervised_p(
     if chosen > min_components and step > 1:
         lo = max(min_components, chosen - step + 1)
         for p in range(lo, chosen + 1):
-            r2 = _ridge_r2(z[:, :p], y, seed=seed)
+            r2 = _ridge_r2(_feat(p), y, seed=seed)
             if r2 >= goal:
                 chosen = p
                 r2_sel = r2
@@ -288,12 +296,19 @@ def run_pca_svd_analysis(
         data_path=data_path,
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
+        include_elevation=True,
     )
 
-    x_np = np.asarray(x_train.detach().cpu().numpy(), dtype=np.float64)
+    x_full = np.asarray(x_train.detach().cpu().numpy(), dtype=np.float64)
     y_np = np.asarray(y_train.detach().cpu().numpy(), dtype=np.float64)
+    n_spectral = int(_meta.get("n_spectral_bands", S2_INPUT_DIM))
+    has_elev = bool(_meta.get("has_elevation"))
+    elev_np = x_full[:, -1] if has_elev else None
+    x_np = x_full[:, :n_spectral]
     if x_np.shape[1] != S2_INPUT_DIM:
-        raise ValueError(f"Expected input_dim={S2_INPUT_DIM}, got {x_np.shape[1]}")
+        raise ValueError(f"Expected spectral input_dim={S2_INPUT_DIM}, got {x_np.shape[1]}")
+    if has_elev:
+        print("PCA on spectral bands only; elevation appended for supervised ridge probes")
 
     bands_subset = load_task_band_config(
         band_cfg_path, task_names=names, input_dim=S2_INPUT_DIM
@@ -311,6 +326,7 @@ def run_pca_svd_analysis(
         "variance_threshold": float(variance_threshold),
         "r2_tol": float(r2_tol),
         "input_variable": input_variable,
+        "has_elevation_input": has_elev,
         "task_band_config": str(band_cfg_path),
         "n_train": int(n_train),
         "x_transform": x_transform or "none",
@@ -353,6 +369,7 @@ def run_pca_svd_analysis(
                     min_components=min_components,
                     step=step,
                     seed=seed,
+                    elevation=elev_np,
                 )
                 if r2_full < min_ridge_r2:
                     weak = True

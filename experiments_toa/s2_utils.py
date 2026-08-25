@@ -333,6 +333,78 @@ def compute_per_task_metrics(
     return metrics
 
 
+def compute_floor_bound_slice_metrics(
+    y_true: np.ndarray | torch.Tensor,
+    y_pred: np.ndarray | torch.Tensor,
+    task_names: Sequence[str],
+    *,
+    thresholds: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """
+    Conditional physical-scale metrics for floored / bound-piled EMIT labels.
+
+    For each task present in ``thresholds``, reports:
+    - ``frac_at_floor``: fraction with ``y_true <= threshold``
+    - ``*_at_floor`` / ``*_off_floor``: RMSE/MAE/MedAE/RRMSE/R2 on each slice
+    """
+    from experiments_toa.s2_constants import S3_LABEL_FLOOR_THRESHOLDS
+
+    thr_map = dict(S3_LABEL_FLOOR_THRESHOLDS if thresholds is None else thresholds)
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+        y_pred = y_pred.reshape(-1, 1)
+    if y_true.shape[1] != len(task_names):
+        raise ValueError(
+            f"y_true columns {y_true.shape[1]} != len(task_names)={len(task_names)}"
+        )
+
+    out: dict[str, float] = {}
+    for t, name in enumerate(task_names):
+        if name not in thr_map:
+            continue
+        thr = float(thr_map[name])
+        yt = y_true[:, t]
+        yp = y_pred[:, t]
+        at = yt <= thr
+        off = ~at
+        frac_at = float(np.mean(at)) if yt.size else float("nan")
+        out[f"{name}_floor_threshold"] = thr
+        out[f"{name}_frac_at_floor"] = frac_at
+        out[f"{name}_frac_off_floor"] = float(1.0 - frac_at) if yt.size else float("nan")
+        out[f"{name}_n_at_floor"] = float(int(np.count_nonzero(at)))
+        out[f"{name}_n_off_floor"] = float(int(np.count_nonzero(off)))
+        out.update(_scalar_error_metrics(yt[at], yp[at], prefix=f"{name}_at_floor_"))
+        out.update(_scalar_error_metrics(yt[off], yp[off], prefix=f"{name}_off_floor_"))
+    return out
+
+
+def format_floor_bound_summary(
+    task_name: str,
+    slice_metrics: Mapping[str, float],
+) -> str:
+    """One-line summary of floor vs off-floor RRMSE/R² for logging."""
+    frac = slice_metrics.get(f"{task_name}_frac_at_floor")
+    thr = slice_metrics.get(f"{task_name}_floor_threshold")
+    if frac is None or thr is None:
+        return ""
+    r_all = slice_metrics.get(f"{task_name}_RRMSE")
+    r_off = slice_metrics.get(f"{task_name}_off_floor_RRMSE")
+    r2_off = slice_metrics.get(f"{task_name}_off_floor_R2")
+    r_at = slice_metrics.get(f"{task_name}_at_floor_RRMSE")
+    parts = [
+        f"{task_name} floor/bound thr={thr:g}  frac_at={frac:.3f}",
+    ]
+    if r_off is not None:
+        parts.append(f"off_floor RRMSE={r_off:.4f} R2={r2_off:.4f}")
+    if r_at is not None:
+        parts.append(f"at_floor RRMSE={r_at:.4f}")
+    if r_all is not None:
+        parts.append(f"all RRMSE={r_all:.4f}")
+    return "  ".join(parts)
+
+
 def _scalar_error_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
@@ -341,6 +413,15 @@ def _scalar_error_metrics(
 ) -> dict[str, float]:
     yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
     yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if yt.size == 0:
+        nan = float("nan")
+        return {
+            f"{prefix}RMSE": nan,
+            f"{prefix}MAE": nan,
+            f"{prefix}MedAE": nan,
+            f"{prefix}RRMSE": nan,
+            f"{prefix}R2": nan,
+        }
     abs_err = np.abs(yp - yt)
     rmse = float(np.sqrt(np.mean((yp - yt) ** 2)))
     mae = float(np.mean(abs_err))
@@ -364,21 +445,31 @@ def compute_log_scale_extra_metrics(
     *,
     log_mu: np.ndarray | torch.Tensor,
     point_mean_physical: np.ndarray | torch.Tensor | None = None,
+    log_offset: float = 0.0,
 ) -> dict[str, float]:
     """
     Extra test metrics for QoIs trained in ln-space.
 
-    - ``*_log``: errors in ln-space (``ln(y_true)`` vs predictive ``log_mu``).
+    - ``*_log``: errors in ln-space (``ln(y_true + C)`` vs predictive ``log_mu``).
     - ``*_mean``: physical errors using log-normal mean as the point estimate.
     """
     yt = np.asarray(y_true_physical, dtype=np.float64).reshape(-1)
     mu = np.asarray(log_mu, dtype=np.float64).reshape(-1)
     if yt.shape != mu.shape:
         raise ValueError(f"y_true and log_mu shape mismatch: {yt.shape} vs {mu.shape}")
-    if np.any(yt <= 0):
-        raise ValueError("log-scale metrics require strictly positive y_true.")
+    c = float(log_offset)
+    if c > 0.0:
+        if np.any(yt <= -c):
+            raise ValueError(
+                f"log-scale metrics with offset C={c:g} require y_true > {-c:g}."
+            )
+        yt_log = np.log(yt + c)
+    else:
+        if np.any(yt <= 0):
+            raise ValueError("log-scale metrics require strictly positive y_true.")
+        yt_log = np.log(yt)
 
-    out = _scalar_error_metrics(np.log(yt), mu, prefix="")
+    out = _scalar_error_metrics(yt_log, mu, prefix="")
     # Rename to *_log
     log_out = {
         "RMSE_log": out["RMSE"],

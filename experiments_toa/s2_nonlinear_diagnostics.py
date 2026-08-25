@@ -124,23 +124,32 @@ def run_diagnostics(
         data_path,
         input_variable="toa_reflectance",
         task_names=task_names,
+        include_elevation=True,
     )
     assert names == task_names
+    n_spectral = int(meta.get("n_spectral_bands", X_all.shape[1]))
+    has_elev = bool(meta.get("has_elevation"))
+    elev_all = X_all[:, -1] if has_elev else None
+    X_spec = X_all[:, :n_spectral]
 
     # Shared band set for heatmaps: global default keep ranges.
     shared_bands = default_keep_indices()
     bands_by_task = load_task_band_config(band_config, task_names=task_names)
 
     rng = np.random.default_rng(seed)
-    n = X_all.shape[0]
+    n = X_spec.shape[0]
     idx = rng.choice(n, size=min(n_subsample, n), replace=False)
     idx_dcor = rng.choice(n, size=min(n_dcor, n), replace=False)
 
-    X = X_all[idx][:, shared_bands]
+    X = X_spec[idx][:, shared_bands]
     Y = Y_all[idx]
-    X_d = X_all[idx_dcor][:, shared_bands]
+    X_d = X_spec[idx_dcor][:, shared_bands]
     Y_d = Y_all[idx_dcor]
     wl_shared = wl[shared_bands]
+    elev = elev_all[idx] if elev_all is not None else None
+
+    if has_elev:
+        print(f"Elevation input enabled (always appended in multivariate probes)")
 
     # Standardize bands for MI.
     x_std = (X - X.mean(0)) / (X.std(0) + 1e-8)
@@ -214,9 +223,14 @@ def run_diagnostics(
     for t, name in enumerate(task_names):
         print(f"Multivariate models: {name}")
         task_bands = bands_by_task[name]
-        Xt = X_all[idx][:, task_bands]
+        Xt = X_spec[idx][:, task_bands]
+        if elev is not None:
+            Xt = np.column_stack([Xt, elev.reshape(-1, 1)])
         yt = Y_all[idx][:, t]
         y_std = float(np.std(yt))
+        elev_pearson = (
+            float(np.corrcoef(elev, yt)[0, 1]) if elev is not None and y_std > 1e-15 else None
+        )
         if y_std < 1e-15:
             row = {
                 "qoi": name,
@@ -239,6 +253,8 @@ def run_diagnostics(
                 "rf_minus_ridge": 0.0,
                 "nonlinear_flag": False,
                 "constant_qoi": True,
+                "uses_elevation_input": elev is not None,
+                "elevation_pearson": elev_pearson,
                 "top_permutation_importance": [],
             }
             rows.append(row)
@@ -264,19 +280,32 @@ def run_diagnostics(
         perm_scores: list[dict] = []
         y_hat_base = rf.predict(x_te)
         base_r2 = float(r2_score(y_te, y_hat_base))
+        n_band_feats = len(task_bands)
         for loc in top_local:
             x_perm = x_te.copy()
             x_perm[:, loc] = rng.permutation(x_perm[:, loc])
             drop = base_r2 - float(r2_score(y_te, rf.predict(x_perm)))
-            band_idx = int(task_bands[int(loc)])
-            perm_scores.append(
-                {
-                    "band_index": band_idx,
-                    "wavelength_nm": float(wl[band_idx]),
-                    "impurity_importance": float(imp[loc]),
-                    "r2_drop": float(drop),
-                }
-            )
+            if int(loc) < n_band_feats:
+                band_idx = int(task_bands[int(loc)])
+                perm_scores.append(
+                    {
+                        "feature": "band",
+                        "band_index": band_idx,
+                        "wavelength_nm": float(wl[band_idx]),
+                        "impurity_importance": float(imp[loc]),
+                        "r2_drop": float(drop),
+                    }
+                )
+            else:
+                perm_scores.append(
+                    {
+                        "feature": "elevation",
+                        "band_index": None,
+                        "wavelength_nm": None,
+                        "impurity_importance": float(imp[loc]),
+                        "r2_drop": float(drop),
+                    }
+                )
 
         def _safe_argmax(vals: np.ndarray) -> int:
             if not np.any(np.isfinite(vals)):
@@ -320,6 +349,8 @@ def run_diagnostics(
             "rf_minus_ridge": float(rf_r2 - ridge),
             "nonlinear_flag": nonlinear_flag,
             "constant_qoi": False,
+            "uses_elevation_input": elev is not None,
+            "elevation_pearson": elev_pearson,
             "top_permutation_importance": perm_scores,
         }
         rows.append(row)
@@ -390,6 +421,7 @@ def run_diagnostics(
         "data_path": str(data_path),
         "band_config": str(band_config),
         "input_variable": "toa_reflectance",
+        "has_elevation_input": has_elev,
         "n_samples_total": int(meta["n_samples"]),
         "n_subsample": int(len(idx)),
         "n_dcor_subsample": int(len(idx_dcor)),

@@ -150,6 +150,7 @@ def run_s2_toa_gp(
     nigp: bool = False,
     freeze_epoch_nigp: int = 100,
     adam_stop_patience: int = 50,
+    save_checkpoint: bool = False,
 ) -> dict:
     """
     Train independent GPR models on the S2 11-QoI dataset.
@@ -526,6 +527,55 @@ def run_s2_toa_gp(
             "x_scaling_type": x_scaling_type,
             **ard_mapped,
         }
+
+        if save_checkpoint and svgp and save_path:
+            _svgp_dir = _ROOT / "experiments_SVGP"
+            if str(_svgp_dir) not in sys.path:
+                sys.path.insert(0, str(_svgp_dir))
+            from toa_svgp_checkpoint import checkpoint_path_for_run, save_toa_svgp_checkpoint
+
+            ckpt_path = checkpoint_path_for_run(save_path, title, task_name)
+            save_toa_svgp_checkpoint(
+                ckpt_path,
+                model=model,
+                task_name=task_name,
+                train_x=x_tr,
+                train_y=y_tr_fit,
+                x_scaler=x_scaler,
+                y_scaler=y_scaler,
+                standardize_x=standardize_x,
+                standardize_y=standardize_y,
+                x_standardize_method=x_standardize_method,
+                train_idx=train_idx,
+                val_idx=val_idx,
+                test_idx=test_idx,
+                title=title,
+                seed=seed,
+                best_train_loss=best_loss,
+                n_train=n_train,
+                n_test=n_test,
+                n_val=n_val,
+                data_path=data_path,
+                rel_tolerance=rel_tolerance,
+                dtype=dtype,
+                model_config={
+                    "num_inducing": int(num_inducing),
+                    "learn_inducing_locations": bool(learn_inducing_locations),
+                    "nigp": bool(nigp),
+                    "seed": int(seed),
+                    "ard": bool(ard),
+                    "batch_size": int(batch_size),
+                    "kl_beta": float(kl_beta),
+                    "variational_lr": variational_lr,
+                },
+                input_column_indices=torch.as_tensor(band_indices, dtype=torch.int64),
+                pca_meta=pca_meta,
+                x_transform=x_transform or "none",
+                log_scale_qoi=list(log_scale_qoi) if log_scale_qoi is not None else None,
+                logit_scale_qoi=list(logit_scale_qoi) if logit_scale_qoi is not None else None,
+                input_variable=input_variable,
+            )
+            print(f"Saved checkpoint: {ckpt_path}")
 
         model.eval()
         t1 = time.time()

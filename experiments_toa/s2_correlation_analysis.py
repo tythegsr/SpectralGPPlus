@@ -19,6 +19,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.s2_constants import S2_TASK_NAMES
+from experiments_toa.s2_data import read_elevation_array
 
 QOI_NAMES = list(S2_TASK_NAMES)
 
@@ -54,7 +55,7 @@ def _qoi_names_in_file(f) -> list[str]:
 
 def _load(
     path: Path,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, list[str]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, list[str], np.ndarray | None]:
     with h5py.File(path, "r") as f:
         if "wl" not in f:
             raise KeyError(f"Missing wavelength variable 'wl' in {path}")
@@ -72,7 +73,56 @@ def _load(
         )
         names = _qoi_names_in_file(f)
         Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
-    return wl, refl, rad, Y, names
+        elev = read_elevation_array(f)
+    return wl, refl, rad, Y, names, elev
+
+
+def _plot_elevation_vs_qoi(
+    elev: np.ndarray,
+    Y: np.ndarray,
+    names: Sequence[str],
+    out: Path,
+) -> dict[str, float]:
+    corr = {
+        name: float(np.corrcoef(elev, Y[:, j])[0, 1]) for j, name in enumerate(names)
+    }
+    fig, ax = plt.subplots(figsize=(8.0, 4.2))
+    xs = np.arange(len(names))
+    vals = [corr[n] for n in names]
+    colors = ["#1f4e79" if v >= 0 else "#b85c38" for v in vals]
+    ax.bar(xs, vals, color=colors)
+    ax.axhline(0.0, color="0.4", lw=0.8)
+    ax.set_xticks(xs)
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_ylabel("Pearson r")
+    ax.set_title("Elevation input vs QoI correlation")
+    ax.set_ylim(-1.05, 1.05)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return corr
+
+
+def _plot_elevation_vs_bands(
+    elev: np.ndarray,
+    X: np.ndarray,
+    wl: np.ndarray,
+    out: Path,
+    *,
+    title: str,
+) -> np.ndarray:
+    r = np.array([np.corrcoef(elev, X[:, j])[0, 1] for j in range(X.shape[1])])
+    fig, ax = plt.subplots(figsize=(10.5, 3.8))
+    ax.plot(wl, r, color="#0b6e4f", lw=1.1)
+    ax.axhline(0.0, color="0.5", lw=0.8)
+    ax.set_xlabel("wavelength (nm)")
+    ax.set_ylabel("Pearson r with elevation")
+    ax.set_title(title)
+    ax.set_ylim(-1.05, 1.05)
+    fig.tight_layout()
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return r
 
 
 def _suggest_drop_indices(X: np.ndarray) -> list[int]:
@@ -93,20 +143,33 @@ def _suggest_drop_indices(X: np.ndarray) -> list[int]:
 
 
 def _plot_qoi_corr(
-    Y: np.ndarray, out: Path, names: Sequence[str] | None = None
+    Y: np.ndarray,
+    out: Path,
+    names: Sequence[str] | None = None,
+    *,
+    elevation: np.ndarray | None = None,
 ) -> np.ndarray:
     names = list(names) if names is not None else QOI_NAMES
-    corr = np.corrcoef(Y, rowvar=False)
-    fig, ax = plt.subplots(figsize=(8, 7))
+    if elevation is not None:
+        elev = np.asarray(elevation, dtype=np.float64).reshape(-1)
+        mat = np.column_stack([elev, Y])
+        labels = ["elevation", *names]
+        title = "Elevation input + QoI Pearson correlation"
+    else:
+        mat = Y
+        labels = names
+        title = "QoI–QoI Pearson correlation"
+    corr = np.corrcoef(mat, rowvar=False)
+    fig, ax = plt.subplots(figsize=(8.5 if elevation is not None else 8, 7.5 if elevation is not None else 7))
     im = ax.imshow(corr, cmap="RdBu_r", vmin=-1, vmax=1, aspect="equal")
-    ax.set_xticks(range(len(names)))
-    ax.set_yticks(range(len(names)))
-    ax.set_xticklabels(names, rotation=45, ha="right")
-    ax.set_yticklabels(names)
-    for i in range(len(names)):
-        for j in range(len(names)):
+    ax.set_xticks(range(len(labels)))
+    ax.set_yticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticklabels(labels)
+    for i in range(len(labels)):
+        for j in range(len(labels)):
             ax.text(j, i, f"{corr[i, j]:.2f}", ha="center", va="center", fontsize=7)
-    ax.set_title("QoI–QoI Pearson correlation")
+    ax.set_title(title)
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(out, dpi=200, bbox_inches="tight")
@@ -189,12 +252,27 @@ def _plot_joint(
     *,
     title: str = "Joint reflectance + QoI Pearson correlation",
     names: Sequence[str] | None = None,
+    include_elevation: bool = False,
 ) -> None:
+    """Joint matrix layout: [bands | elevation? | QoIs]."""
     names = list(names) if names is not None else QOI_NAMES
     n_b = len(wl)
-    n_q = len(names)
-    fig = plt.figure(figsize=(12, 11))
-    gs = GridSpec(2, 2, width_ratios=[4, 1.2], height_ratios=[4, 1.2], hspace=0.08, wspace=0.08)
+    side_labels = (["elevation", *names] if include_elevation else list(names))
+    n_side = len(side_labels)
+    if corr_full.shape != (n_b + n_side, n_b + n_side):
+        raise ValueError(
+            f"Expected corr shape {(n_b + n_side, n_b + n_side)}, got {corr_full.shape}"
+        )
+
+    fig = plt.figure(figsize=(12.5 if include_elevation else 12, 11.5 if include_elevation else 11))
+    gs = GridSpec(
+        2,
+        2,
+        width_ratios=[4, 1.35 if include_elevation else 1.2],
+        height_ratios=[4, 1.35 if include_elevation else 1.2],
+        hspace=0.08,
+        wspace=0.08,
+    )
     ax_bb = fig.add_subplot(gs[0, 0])
     ax_bq = fig.add_subplot(gs[0, 1], sharey=ax_bb)
     ax_qb = fig.add_subplot(gs[1, 0], sharex=ax_bb)
@@ -210,16 +288,16 @@ def _plot_joint(
         ax_bb.axvline(j, color="cyan", lw=0.3, alpha=0.5)
         ax_bb.axhline(j, color="cyan", lw=0.3, alpha=0.5)
 
-    ax_bq.set_xticks(range(n_q))
-    ax_bq.set_xticklabels(names, rotation=90, fontsize=7)
-    ax_qb.set_yticks(range(n_q))
-    ax_qb.set_yticklabels(names, fontsize=7)
-    ax_qq.set_xticks(range(n_q))
-    ax_qq.set_yticks(range(n_q))
-    ax_qq.set_xticklabels(names, rotation=90, fontsize=7)
-    ax_qq.set_yticklabels(names, fontsize=7)
-    for i in range(n_q):
-        for j in range(n_q):
+    ax_bq.set_xticks(range(n_side))
+    ax_bq.set_xticklabels(side_labels, rotation=90, fontsize=7)
+    ax_qb.set_yticks(range(n_side))
+    ax_qb.set_yticklabels(side_labels, fontsize=7)
+    ax_qq.set_xticks(range(n_side))
+    ax_qq.set_yticks(range(n_side))
+    ax_qq.set_xticklabels(side_labels, rotation=90, fontsize=7)
+    ax_qq.set_yticklabels(side_labels, fontsize=7)
+    for i in range(n_side):
+        for j in range(n_side):
             ax_qq.text(
                 j,
                 i,
@@ -237,9 +315,9 @@ def _plot_joint(
     ax_bb.set_ylabel("Band index")
     ax_qb.set_xlabel("Band index")
     ax_bb.set_title("Band–band")
-    ax_bq.set_title("Band–QoI")
-    ax_qb.set_title("QoI–band")
-    ax_qq.set_title("QoI–QoI")
+    ax_bq.set_title("Band–(elev+QoI)" if include_elevation else "Band–QoI")
+    ax_qb.set_title("(Elev+QoI)–band" if include_elevation else "QoI–band")
+    ax_qq.set_title("Elev+QoI" if include_elevation else "QoI–QoI")
     fig.colorbar(im, ax=[ax_bb, ax_bq, ax_qb, ax_qq], fraction=0.02, pad=0.02)
     fig.suptitle(title, y=0.98)
     fig.savefig(out, dpi=160, bbox_inches="tight")
@@ -249,10 +327,12 @@ def _plot_joint(
 def run_analysis(data_path: Path, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, refl, rad, Y, names = _load(data_path)
+    wl, refl, rad, Y, names, elev = _load(data_path)
     rad_shape = None if rad is None else rad.shape
     print(f"  refl={refl.shape} rad={rad_shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
     print(f"  qoi={names}")
+    if elev is not None:
+        print(f"  elevation input: [{elev.min():.1f}, {elev.max():.1f}] m")
 
     meta = {
         "data_path": str(data_path.resolve()),
@@ -262,6 +342,7 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
         "qoi_names": names,
         "missing_qoi": [n for n in QOI_NAMES if n not in names],
         "has_toa_radiance": rad is not None,
+        "has_elevation_input": elev is not None,
         "wl_min_nm": float(wl.min()),
         "wl_max_nm": float(wl.max()),
         "qoi_ranges": {
@@ -276,8 +357,15 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
     }
 
     print("QoI–QoI correlation...")
-    qoi_corr = _plot_qoi_corr(Y, out_dir / "qoi_correlation_matrix.png", names=names)
-    off = qoi_corr[np.triu_indices(len(names), 1)]
+    qoi_corr = _plot_qoi_corr(
+        Y,
+        out_dir / "qoi_correlation_matrix.png",
+        names=names,
+        elevation=elev,
+    )
+    # Off-diagonal stats over QoI block only (exclude elevation row/col if present).
+    qoi_block = qoi_corr[1:, 1:] if elev is not None else qoi_corr
+    off = qoi_block[np.triu_indices(len(names), 1)]
     meta["qoi_offdiag_abs_pearson_mean"] = float(np.nanmean(np.abs(off)))
     meta["qoi_offdiag_abs_pearson_max"] = float(np.nanmax(np.abs(off)))
 
@@ -316,28 +404,51 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
     )
 
     print("Band vs QoI / joint...")
-    band_qoi_refl = np.zeros((refl.shape[1], Y.shape[1]), dtype=np.float64)
-    for t in range(Y.shape[1]):
+    side_labels = (["elevation", *names] if elev is not None else list(names))
+    if elev is not None:
+        elev_col = elev.reshape(-1, 1)
+        band_side_refl = np.zeros((refl.shape[1], 1 + Y.shape[1]), dtype=np.float64)
         for j in range(refl.shape[1]):
-            band_qoi_refl[j, t] = np.corrcoef(refl[:, j], Y[:, t])[0, 1]
+            band_side_refl[j, 0] = np.corrcoef(refl[:, j], elev)[0, 1]
+        for t in range(Y.shape[1]):
+            for j in range(refl.shape[1]):
+                band_side_refl[j, 1 + t] = np.corrcoef(refl[:, j], Y[:, t])[0, 1]
+        band_qoi_refl = band_side_refl[:, 1:]
+    else:
+        band_qoi_refl = np.zeros((refl.shape[1], Y.shape[1]), dtype=np.float64)
+        for t in range(Y.shape[1]):
+            for j in range(refl.shape[1]):
+                band_qoi_refl[j, t] = np.corrcoef(refl[:, j], Y[:, t])[0, 1]
+        band_side_refl = band_qoi_refl
+
     _plot_band_vs_qoi(
-        band_qoi_refl,
+        band_side_refl,
         wl,
         drop,
         out_dir / "toa_reflectance_vs_qoi_correlation.png",
-        title="Pearson r: reflectance bands vs QoI",
-        names=names,
+        title=(
+            "Pearson r: reflectance bands vs elevation+QoI"
+            if elev is not None
+            else "Pearson r: reflectance bands vs QoI"
+        ),
+        names=side_labels,
     )
 
-    joint_refl = np.concatenate([refl, Y], axis=1)
+    if elev is not None:
+        joint_refl = np.concatenate([refl, elev_col, Y], axis=1)
+        joint_title = "Joint reflectance + elevation + QoI Pearson correlation"
+    else:
+        joint_refl = np.concatenate([refl, Y], axis=1)
+        joint_title = "Joint reflectance + QoI Pearson correlation"
     corr_full_refl = np.corrcoef(joint_refl, rowvar=False)
     _plot_joint(
         corr_full_refl,
         wl,
         drop,
         out_dir / "toa_reflectance_qoi_joint_correlation.png",
-        title="Joint reflectance + QoI Pearson correlation",
+        title=joint_title,
         names=names,
+        include_elevation=elev is not None,
     )
 
     meta["band_qoi_max_abs_pearson"] = {
@@ -346,28 +457,49 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
     }
 
     if rad is not None:
-        band_qoi_rad = np.zeros((rad.shape[1], Y.shape[1]), dtype=np.float64)
-        for t in range(Y.shape[1]):
+        if elev is not None:
+            band_side_rad = np.zeros((rad.shape[1], 1 + Y.shape[1]), dtype=np.float64)
             for j in range(rad.shape[1]):
-                band_qoi_rad[j, t] = np.corrcoef(rad[:, j], Y[:, t])[0, 1]
+                band_side_rad[j, 0] = np.corrcoef(rad[:, j], elev)[0, 1]
+            for t in range(Y.shape[1]):
+                for j in range(rad.shape[1]):
+                    band_side_rad[j, 1 + t] = np.corrcoef(rad[:, j], Y[:, t])[0, 1]
+            band_qoi_rad = band_side_rad[:, 1:]
+        else:
+            band_qoi_rad = np.zeros((rad.shape[1], Y.shape[1]), dtype=np.float64)
+            for t in range(Y.shape[1]):
+                for j in range(rad.shape[1]):
+                    band_qoi_rad[j, t] = np.corrcoef(rad[:, j], Y[:, t])[0, 1]
+            band_side_rad = band_qoi_rad
+
         _plot_band_vs_qoi(
-            band_qoi_rad,
+            band_side_rad,
             wl,
             drop,
             out_dir / "toa_radiance_vs_qoi_correlation.png",
-            title="Pearson r: radiance bands vs QoI",
-            names=names,
+            title=(
+                "Pearson r: radiance bands vs elevation+QoI"
+                if elev is not None
+                else "Pearson r: radiance bands vs QoI"
+            ),
+            names=side_labels,
         )
 
-        joint_rad = np.concatenate([rad, Y], axis=1)
+        if elev is not None:
+            joint_rad = np.concatenate([rad, elev_col, Y], axis=1)
+            rad_joint_title = "Joint radiance + elevation + QoI Pearson correlation"
+        else:
+            joint_rad = np.concatenate([rad, Y], axis=1)
+            rad_joint_title = "Joint radiance + QoI Pearson correlation"
         corr_full_rad = np.corrcoef(joint_rad, rowvar=False)
         _plot_joint(
             corr_full_rad,
             wl,
             drop,
             out_dir / "toa_radiance_qoi_joint_correlation.png",
-            title="Joint radiance + QoI Pearson correlation",
+            title=rad_joint_title,
             names=names,
+            include_elevation=elev is not None,
         )
 
         meta["radiance_band_qoi_max_abs_pearson"] = {
@@ -382,6 +514,45 @@ def run_analysis(data_path: Path, out_dir: Path) -> dict:
             "mean": float(np.nanmean(band_rr)),
             "min": float(np.nanmin(band_rr)),
             "max": float(np.nanmax(band_rr)),
+        }
+
+    if elev is not None:
+        print("Elevation input correlations...")
+        meta["elevation_vs_qoi_pearson"] = _plot_elevation_vs_qoi(
+            elev, Y, names, out_dir / "elevation_vs_qoi_correlation.png"
+        )
+        elev_vs_refl = _plot_elevation_vs_bands(
+            elev,
+            refl,
+            wl,
+            out_dir / "elevation_vs_reflectance_bands.png",
+            title="Pearson r: elevation input vs reflectance bands",
+        )
+        meta["elevation_vs_reflectance_bands"] = {
+            "max_abs_r": float(np.nanmax(np.abs(elev_vs_refl))),
+            "band_index": int(np.nanargmax(np.abs(elev_vs_refl))),
+            "wavelength_nm": float(wl[int(np.nanargmax(np.abs(elev_vs_refl)))]),
+            "mean_abs_r": float(np.nanmean(np.abs(elev_vs_refl))),
+        }
+        if rad is not None:
+            elev_vs_rad = _plot_elevation_vs_bands(
+                elev,
+                rad,
+                wl,
+                out_dir / "elevation_vs_radiance_bands.png",
+                title="Pearson r: elevation input vs radiance bands",
+            )
+            meta["elevation_vs_radiance_bands"] = {
+                "max_abs_r": float(np.nanmax(np.abs(elev_vs_rad))),
+                "band_index": int(np.nanargmax(np.abs(elev_vs_rad))),
+                "wavelength_nm": float(wl[int(np.nanargmax(np.abs(elev_vs_rad)))]),
+                "mean_abs_r": float(np.nanmean(np.abs(elev_vs_rad))),
+            }
+        meta["elevation_stats"] = {
+            "min": float(elev.min()),
+            "max": float(elev.max()),
+            "mean": float(elev.mean()),
+            "std": float(elev.std()),
         }
 
     (out_dir / "analysis_summary.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")

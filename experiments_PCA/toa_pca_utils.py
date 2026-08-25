@@ -41,7 +41,33 @@ class ToaPCAFit:
             "svd_solver": self.svd_solver,
             "mean": self.pca.mean_.tolist(),
             "components": self.pca.components_.tolist(),
+            "explained_variance_": self.pca.explained_variance_.tolist(),
         }
+
+
+def pca_from_dict(meta: dict[str, Any]) -> ToaPCAFit:
+    """Rebuild sklearn PCA from :meth:`ToaPCAFit.to_dict` payload."""
+    n_components = int(meta["n_components"])
+    input_dim = int(meta["input_dim_after_drop"])
+    svd_solver = str(meta.get("svd_solver", "randomized"))
+    pca = PCA(n_components=n_components, svd_solver=svd_solver)
+    pca.mean_ = np.asarray(meta["mean"], dtype=np.float64)
+    pca.components_ = np.asarray(meta["components"], dtype=np.float64)
+    pca.explained_variance_ratio_ = np.asarray(
+        meta["explained_variance_ratio"], dtype=np.float64
+    )
+    if "explained_variance_" in meta:
+        pca.explained_variance_ = np.asarray(meta["explained_variance_"], dtype=np.float64)
+    else:
+        pca.explained_variance_ = pca.explained_variance_ratio_.copy()
+    pca.n_features_in_ = input_dim
+    pca.n_components_ = n_components
+    return ToaPCAFit(
+        pca=pca,
+        n_components=n_components,
+        input_dim=input_dim,
+        svd_solver=svd_solver,
+    )
 
 
 def fit_pca_on_train(

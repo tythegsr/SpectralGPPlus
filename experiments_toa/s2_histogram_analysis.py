@@ -22,6 +22,7 @@ from experiments_toa.s2_constants import (
     S2_LOG_SCALE_TASK_NAMES,
     S2_TASK_NAMES,
 )
+from experiments_toa.s2_data import read_elevation_array
 
 QOI_NAMES = list(S2_TASK_NAMES)
 BANDS_PER_PAGE = 24  # 4 x 6
@@ -35,7 +36,9 @@ def _qoi_names_in_file(f) -> list[str]:
     return names
 
 
-def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], str]:
+def _load(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], str, np.ndarray | None]:
     with h5py.File(path, "r") as f:
         if "wl" not in f:
             raise KeyError(f"Missing wavelength variable 'wl' in {path}")
@@ -50,7 +53,33 @@ def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], st
             raise KeyError(f"Missing toa_radiance/toa_reflectance in {path}")
         names = _qoi_names_in_file(f)
         Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
-    return wl, spec, Y, names, spec_name
+        elev = read_elevation_array(f)
+    return wl, spec, Y, names, spec_name, elev
+
+
+def _plot_elevation_histogram(elev: np.ndarray, out: Path) -> None:
+    col = _finite(elev)
+    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    ax.hist(col, bins=60, color="seagreen", edgecolor="white", linewidth=0.3)
+    ax.set_title("Elevation input (m)")
+    ax.set_xlabel("elevation (m)")
+    ax.set_ylabel("count")
+    st = _stats(col)
+    ax.text(
+        0.98,
+        0.95,
+        f"n={st['n']}\n[{st['min']:.3g}, {st['max']:.3g}]\n"
+        f"μ={st['mean']:.3g}\nσ={st['std']:.3g}",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        family="monospace",
+        bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.75, edgecolor="none"),
+    )
+    fig.tight_layout()
+    fig.savefig(out, dpi=160, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _finite(x: np.ndarray) -> np.ndarray:
@@ -214,13 +243,15 @@ def _plot_wavelength_value_density(
 def run_histograms(data_path: Path, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, spec, Y, names, spec_name = _load(data_path)
+    wl, spec, Y, names, spec_name, elev = _load(data_path)
     is_radiance = spec_name == "toa_radiance"
     spec_label = "radiance" if is_radiance else "reflectance"
     print(
         f"  {spec_name}={spec.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm"
     )
     print(f"  qoi={names}")
+    if elev is not None:
+        print(f"  elevation input present: [{elev.min():.1f}, {elev.max():.1f}] m")
 
     print("QoI raw histograms...")
     _plot_qoi_histograms(
@@ -230,6 +261,9 @@ def run_histograms(data_path: Path, out_dir: Path) -> dict:
     _plot_qoi_histograms(
         Y, out_dir / "qoi_histograms_log10.png", log_space=True, names=names
     )
+    if elev is not None:
+        print("Elevation input histogram...")
+        _plot_elevation_histogram(elev, out_dir / "elevation_histogram.png")
 
     spec_log = radiance_log1p(spec)
     n_bands = spec.shape[1]
@@ -274,6 +308,7 @@ def run_histograms(data_path: Path, out_dir: Path) -> dict:
         "n_samples": int(spec.shape[0]),
         "n_bands": int(n_bands),
         "spectral_variable": spec_name,
+        "has_elevation_input": elev is not None,
         "qoi_names": names,
         "log_scale_qois": sorted(S2_LOG_SCALE_TASK_NAMES),
         "qoi_stats_raw": {name: _stats(Y[:, j]) for j, name in enumerate(names)},
@@ -282,6 +317,7 @@ def run_histograms(data_path: Path, out_dir: Path) -> dict:
             for j, name in enumerate(names)
             if name in S2_LOG_SCALE_TASK_NAMES
         },
+        "elevation_stats": _stats(elev) if elev is not None else None,
         "transform_spectral": f"log1p = ln(1 + max({spec_label}, 0))",
         "band_stats_raw": {
             str(j): {**_stats(spec[:, j]), "wavelength_nm": float(wl[j])}

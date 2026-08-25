@@ -918,8 +918,12 @@ def run_s2_toa_stgp(
                 y_te.cpu(),
                 log_mu=inv.log_mu,
                 point_mean_physical=inv.point_mean,
+                log_offset=warps.log_offset(task_name),
             )
             computed.update(extra)
+            c = warps.log_offset(task_name)
+            if c > 0.0:
+                computed["log_offset"] = float(c)
         elif task_uses_logit_scale(task_name, warps=warps):
             computed["logit_scale"] = True
         tm: dict = {

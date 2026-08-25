@@ -119,6 +119,56 @@ def compute_relative_error_metrics(
     }
 
 
+def _normal_interval_z(level: float) -> float:
+    """Two-sided normal quantile z such that P(|Z| <= z) = level."""
+    from scipy.stats import norm
+
+    if not (0.0 < level < 1.0):
+        raise ValueError(f"coverage level must be in (0, 1), got {level}")
+    return float(norm.ppf(0.5 + 0.5 * level))
+
+
+def compute_prediction_coverage_metrics(
+    y_true: np.ndarray | torch.Tensor,
+    y_pred: np.ndarray | torch.Tensor,
+    y_std: np.ndarray | torch.Tensor,
+    *,
+    levels: tuple[float, ...] = (0.50, 0.90, 0.95),
+) -> dict[str, float | int | list[float]]:
+    """Empirical Gaussian predictive-interval coverage at nominal levels.
+
+    For each level L, builds central intervals ``mean ± z_L * std`` with
+    ``z_L = Φ^{-1}((1+L)/2)`` and returns the fraction of true values inside.
+    """
+    yt = np.asarray(y_true, dtype=np.float64).ravel()
+    yp = np.asarray(y_pred, dtype=np.float64).ravel()
+    ys = np.asarray(y_std, dtype=np.float64).ravel()
+    if yt.shape != yp.shape or yt.shape != ys.shape:
+        raise ValueError(
+            f"Shape mismatch: y_true {yt.shape}, y_pred {yp.shape}, y_std {ys.shape}"
+        )
+    n = int(yt.size)
+    out: dict[str, float | int | list[float]] = {
+        "coverage_levels": [float(L) for L in levels],
+        "n_coverage": n,
+    }
+    if n == 0:
+        for L in levels:
+            key = f"coverage_{int(round(L * 100))}"
+            out[key] = float("nan")
+        return out
+
+    ys = np.maximum(ys, 0.0)
+    for L in levels:
+        z = _normal_interval_z(float(L))
+        lower = yp - z * ys
+        upper = yp + z * ys
+        covered = (yt >= lower) & (yt <= upper)
+        key = f"coverage_{int(round(L * 100))}"
+        out[key] = float(np.mean(covered))
+    return out
+
+
 def format_relative_error_summary(
     task_name: str,
     rel_metrics: dict[str, float | int],
@@ -137,6 +187,20 @@ def format_relative_error_summary(
         f"{task_name}: mean_rel={mean_rel * 100:.2f}%  "
         f"median_rel={median_rel * 100:.2f}%  max_rel={max_rel * 100:.2f}%  "
         f"within_{tol_pct:g}%={pct:.1f}%  ({n_valid}/{n_total} pts)"
+    )
+
+
+def format_coverage_summary(
+    task_name: str,
+    cov_metrics: dict[str, float | int | list[float]],
+) -> str:
+    n = int(cov_metrics.get("n_coverage", 0))
+    c50 = float(cov_metrics.get("coverage_50", float("nan")))
+    c90 = float(cov_metrics.get("coverage_90", float("nan")))
+    c95 = float(cov_metrics.get("coverage_95", float("nan")))
+    return (
+        f"{task_name}: coverage_50={c50:.2f}  coverage_90={c90:.2f}  "
+        f"coverage_95={c95:.2f}  (n={n})"
     )
 
 

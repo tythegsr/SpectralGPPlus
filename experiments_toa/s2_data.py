@@ -17,6 +17,7 @@ from experiments_toa.data import (
     resolve_toa_pool_sizes,
 )
 from experiments_toa.s2_constants import (
+    S2_AUX_INPUT_NAMES,
     S2_DEFAULT_DATA_PATH,
     S2_INPUT_DIM,
     S2_INPUT_VARIABLES,
@@ -32,6 +33,47 @@ InputVariable = Literal["toa_reflectance", "toa_radiance"]
 
 def default_s2_data_path() -> str:
     return str(S2_DEFAULT_DATA_PATH)
+
+
+def read_elevation_array(h5_file) -> np.ndarray | None:
+    """Return 1-D elevation (m) if present, else None."""
+    if "elevation" not in h5_file:
+        return None
+    elev = np.asarray(h5_file["elevation"][:], dtype=np.float64).reshape(-1)
+    if elev.size == 0:
+        return None
+    if not np.isfinite(elev).all():
+        raise ValueError("Non-finite values found in elevation")
+    return elev
+
+
+def append_elevation(X: np.ndarray, elevation: np.ndarray | None) -> tuple[np.ndarray, dict]:
+    """Append elevation as the last feature column when available."""
+    n_spectral = int(X.shape[1])
+    meta = {
+        "has_elevation": False,
+        "n_spectral_bands": n_spectral,
+        "input_dim": n_spectral,
+        "aux_inputs": [],
+        "elevation_index": None,
+    }
+    if elevation is None:
+        return X, meta
+    elev = np.asarray(elevation, dtype=np.float64).reshape(-1)
+    if elev.shape[0] != X.shape[0]:
+        raise ValueError(
+            f"elevation length {elev.shape[0]} does not match n_samples {X.shape[0]}"
+        )
+    X_out = np.column_stack([X, elev])
+    meta.update(
+        {
+            "has_elevation": True,
+            "input_dim": int(X_out.shape[1]),
+            "aux_inputs": list(S2_AUX_INPUT_NAMES),
+            "elevation_index": n_spectral,
+        }
+    )
+    return X_out, meta
 
 
 def _dataset_fingerprint(path: str | Path) -> str:
@@ -54,19 +96,23 @@ def load_s2_arrays(
     *,
     input_variable: InputVariable = "toa_reflectance",
     task_names: Sequence[str] | None = None,
+    include_elevation: bool | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], dict]:
     """
     Load raw S2 arrays from NetCDF via h5py.
 
     Returns
     -------
-    X : (n, 285) float64
+    X : (n, 285) or (n, 286) float64
+        Spectral columns first; if elevation is present and included, it is
+        appended as the last column (never part of band keep/drop ranges).
     Y : (n, T) float64
     wavelengths_nm : (285,) float64
     task_names : list[str]
     meta : dict
         Includes ``log_scale``, ``log_scale_tasks``, ``log_scale_source`` inferred
-        from NetCDF attrs (``output_log_scale`` / ``log_uniform_qois``).
+        from NetCDF attrs (``output_log_scale`` / ``log_uniform_qois``), plus
+        ``has_elevation`` / ``n_spectral_bands`` / ``elevation_index``.
     """
     if input_variable not in S2_INPUT_VARIABLES:
         raise ValueError(
@@ -99,6 +145,7 @@ def load_s2_arrays(
             raise KeyError(f"Missing wavelength variable 'wl' in {data_path}")
         X = np.asarray(f[input_variable][:], dtype=np.float64)
         wl = np.asarray(f["wl"][:], dtype=np.float64)
+        elev = read_elevation_array(f)
         cols = []
         for name in names:
             if name not in f:
@@ -118,12 +165,21 @@ def load_s2_arrays(
     if not np.isfinite(Y).all():
         raise ValueError("Non-finite values found in Y")
 
+    use_elev = elev is not None if include_elevation is None else bool(include_elevation)
+    if use_elev and elev is None:
+        raise KeyError(f"include_elevation=True but 'elevation' missing in {data_path}")
+    X, elev_meta = append_elevation(X, elev if use_elev else None)
+
     log_scale, log_tasks, log_source = infer_log_scale_from_attrs(dataset_attrs)
     meta = {
         "data_path": os.path.abspath(str(data_path)),
         "dataset_fingerprint": _dataset_fingerprint(data_path),
         "input_variable": input_variable,
-        "input_dim": S2_INPUT_DIM,
+        "input_dim": int(elev_meta["input_dim"]),
+        "n_spectral_bands": int(elev_meta["n_spectral_bands"]),
+        "has_elevation": bool(elev_meta["has_elevation"]),
+        "aux_inputs": list(elev_meta["aux_inputs"]),
+        "elevation_index": elev_meta["elevation_index"],
         "n_samples": int(X.shape[0]),
         "task_names": list(names),
         "num_tasks": len(names),
@@ -146,6 +202,7 @@ def load_s2_toa_data(
     test_pool_size: int = TOA_TEST_POOL_SIZE,
     input_variable: InputVariable = "toa_reflectance",
     task_names: Sequence[str] | None = None,
+    include_elevation: bool | None = None,
 ) -> tuple:
     """
     Load S2 TOA data and return train/val/test splits.
@@ -165,6 +222,7 @@ def load_s2_toa_data(
         data_path,
         input_variable=input_variable,
         task_names=task_names,
+        include_elevation=include_elevation,
     )
     X = torch.tensor(X_np, dtype=torch.float64)
     y = torch.tensor(Y_np, dtype=torch.float64)

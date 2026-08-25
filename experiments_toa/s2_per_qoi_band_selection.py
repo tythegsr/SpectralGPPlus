@@ -41,6 +41,7 @@ if str(_ROOT) not in sys.path:
 
 from experiments_toa.s2_constants import S2_INPUT_DIM, S2_TASK_NAMES
 from experiments_toa.s2_correlation_analysis import _suggest_drop_indices
+from experiments_toa.s2_data import read_elevation_array
 
 QOI_NAMES = list(S2_TASK_NAMES)
 
@@ -61,7 +62,7 @@ def _indices_to_ranges(indices: list[int]) -> list[list[int]]:
     return ranges
 
 
-def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str], np.ndarray | None]:
     with h5py.File(path, "r") as f:
         wl = np.asarray(f["wl"][:], dtype=np.float64)
         if "toa_reflectance" in f:
@@ -74,9 +75,16 @@ def _load(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
         if not names:
             raise KeyError(f"No S2 QoI datasets found among {QOI_NAMES}")
         Y = np.column_stack([np.asarray(f[n][:], dtype=np.float64) for n in names])
+        elev = read_elevation_array(f)
     if refl.shape[1] != S2_INPUT_DIM:
         raise ValueError(f"Expected {S2_INPUT_DIM} bands, got {refl.shape[1]}")
-    return wl, refl, Y, names
+    return wl, refl, Y, names, elev
+
+
+def _with_elevation(X_bands: np.ndarray, elev: np.ndarray | None) -> np.ndarray:
+    if elev is None:
+        return X_bands
+    return np.column_stack([X_bands, elev.reshape(-1, 1)])
 
 
 def _band_scores(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -145,6 +153,7 @@ def select_bands_per_qoi(
     X: np.ndarray,
     Y: np.ndarray,
     *,
+    elevation: np.ndarray | None = None,
     r2_tol: float = 0.02,
     min_ridge_r2: float = 0.15,
     min_bands: int = 16,
@@ -155,11 +164,16 @@ def select_bands_per_qoi(
 ) -> dict:
     names = list(qoi_names) if qoi_names is not None else QOI_NAMES
     n = X.shape[0]
+    elev = None if elevation is None else np.asarray(elevation, dtype=np.float64).reshape(-1)
+    if elev is not None and elev.shape[0] != n:
+        raise ValueError(f"elevation length {elev.shape[0]} != n_samples {n}")
     if subsample is not None and subsample < n:
         rng = np.random.default_rng(seed)
         idx = rng.choice(n, size=subsample, replace=False)
         X = X[idx]
         Y = Y[idx]
+        if elev is not None:
+            elev = elev[idx]
 
     global_drop = sorted(_suggest_drop_indices(X))
     global_drop_set = set(global_drop)
@@ -171,7 +185,12 @@ def select_bands_per_qoi(
     for t, name in enumerate(names):
         pearson, spearman, score = _band_scores(X, Y[:, t])
         y = Y[:, t]
-        r2_full = _ridge_r2(X[:, candidates], y, seed=seed)
+        elev_r = (
+            float(np.corrcoef(elev, y)[0, 1])
+            if elev is not None and float(np.std(y)) > 1e-15
+            else None
+        )
+        r2_full = _ridge_r2(_with_elevation(X[:, candidates], elev), y, seed=seed)
         max_score = float(score[candidates].max()) if candidates else 0.0
         order = sorted(candidates, key=lambda i: score[i], reverse=True)
 
@@ -184,23 +203,24 @@ def select_bands_per_qoi(
             r2_sel = r2_full
             weak = True
         else:
-            keep = _forward_select(
-                X,
-                y,
-                candidates,
-                order,
-                target_r2=r2_full,
-                r2_tol=r2_tol,
-                min_bands=min_bands,
-                step=step,
-                seed=seed,
-            )
-            keep = sorted(keep)
-            r2_sel = _ridge_r2(X[:, keep], y, seed=seed)
+            # Forward-select spectral bands; elevation (if present) is always kept.
+            goal = r2_full - r2_tol
+            selected: list[int] = []
+            best_r2 = -np.inf
+            for k in range(step, len(order) + step, step):
+                selected = order[: min(k, len(order))]
+                best_r2 = _ridge_r2(_with_elevation(X[:, selected], elev), y, seed=seed)
+                if len(selected) >= min_bands and best_r2 >= goal:
+                    break
+            if best_r2 < goal:
+                selected = list(candidates)
+            keep = sorted(selected)
+            r2_sel = _ridge_r2(_with_elevation(X[:, keep], elev), y, seed=seed)
             weak = False
             reason = (
                 f"forward-add by score until ridge R2 >= {r2_full:.3f}-{r2_tol} "
-                f"(got {r2_sel:.3f} with {len(keep)} bands)"
+                f"(got {r2_sel:.3f} with {len(keep)} bands"
+                + ("; elevation always included as input)" if elev is not None else ")")
             )
 
         keep_set = set(keep)
@@ -230,6 +250,8 @@ def select_bands_per_qoi(
             "best_wavelength_nm": float(wl[best]),
             "best_pearson": float(pearson[best]),
             "best_spearman": float(spearman[best]),
+            "elevation_pearson": elev_r,
+            "uses_elevation_input": elev is not None,
         }
 
         for i in range(X.shape[1]):
@@ -256,6 +278,7 @@ def select_bands_per_qoi(
             "step": step,
             "subsample": subsample,
             "seed": seed,
+            "has_elevation_input": elev is not None,
         },
         "tasks": tasks,
         "score_rows": score_rows,
@@ -274,10 +297,15 @@ def _write_band_config(result: dict, out_path: Path, *, input_dim: int = S2_INPU
             "Auto-generated by s2_per_qoi_band_selection.py. "
             "Always drops global absorption/low-SNR bands. Per-QoI drops use "
             "forward selection by max(|Pearson|,|Spearman|) until ridge R2 is "
-            "within r2_tol of the full-spectrum ridge R2."
+            "within r2_tol of the full-spectrum ridge R2. "
+            "Elevation (when present) is an always-kept aux input appended after "
+            "spectral bands; it is not listed in keep/drop band indices."
         ),
         "params": result["params"],
         "global_drop_indices": result["global_drop_indices"],
+        "aux_inputs": (
+            ["elevation"] if result.get("params", {}).get("has_elevation_input") else []
+        ),
     }
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -381,14 +409,17 @@ def run(
 ) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Loading {data_path}")
-    wl, X, Y, names = _load(data_path)
+    wl, X, Y, names, elev = _load(data_path)
     print(f"  X={X.shape} Y={Y.shape} wl={wl.min():.1f}-{wl.max():.1f} nm")
     print(f"  qoi={names}")
+    if elev is not None:
+        print(f"  elevation input: [{elev.min():.1f}, {elev.max():.1f}] m (always kept)")
 
     result = select_bands_per_qoi(
         wl,
         X,
         Y,
+        elevation=elev,
         r2_tol=r2_tol,
         min_ridge_r2=min_ridge_r2,
         min_bands=min_bands,

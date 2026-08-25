@@ -5,8 +5,9 @@ EMIT files store ``reflectance`` + 15-D ISOFIT ``state`` (no ``wl``, no
 
 - ``toa_reflectance`` copied from ``reflectance``
 - ``wl`` copied from a synthetic TOA file (same 285-band grid)
-- 10 mappable QoIs (grain_size, liquid_water, dust, algae, aot, cwv, and
-  softmax covers). ``cos_i`` is omitted because it is not in the ISOFIT vector.
+- 12 mappable QoIs (grain_size, liquid_water, dust, algae, aot, cwv,
+  softmax covers, plus ISOFIT aspect params ``sinA``/``cosA``).
+  ``cos_i`` is omitted because it is not in the ISOFIT vector.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ IDX_Z = tuple(EMIT_STATE_INDEX[n] for n in ("z_snow", "z_pv", "z_npv", "z_soil")
 MAPPED_QOI = (
     "algae",
     "aot",
+    "cosA",
     "cwv",
     "dust",
     "fNPV",
@@ -46,6 +48,7 @@ MAPPED_QOI = (
     "fsoil",
     "grain_size",
     "liquid_water",
+    "sinA",
 )
 
 
@@ -70,6 +73,8 @@ def mapped_qois(state: np.ndarray) -> dict[str, np.ndarray]:
         "fPV": frac[:, 1],
         "fNPV": frac[:, 2],
         "fsoil": frac[:, 3],
+        "sinA": state[:, EMIT_STATE_INDEX["sinA"]],
+        "cosA": state[:, EMIT_STATE_INDEX["cosA"]],
     }
 
 
@@ -116,16 +121,28 @@ def export_emit_as_s2(
         qois = mapped_qois(state)
         del state
 
+        has_radiance = "radiance" in src
+        has_elevation = "elevation" in src
+        missing_vars = []
+        if not has_radiance:
+            missing_vars.append("toa_radiance")
+        missing_vars.append("cos_i")
         out.attrs["description"] = np.bytes_(
-            b"EMIT pixels mapped to S2 analysis schema (reflectance + 10 QoIs)"
+            b"EMIT pixels mapped to S2 analysis schema "
+            b"(reflectance [+ radiance] + elevation input + QoIs)"
         )
         out.attrs["source"] = np.bytes_(str(emit_path.resolve()).encode("utf-8"))
         out.attrs["wl_source"] = np.bytes_(str(wl_src.resolve()).encode("utf-8"))
         out.attrs["n_samples"] = np.int64(n)
         out.attrs["missing_qoi"] = np.bytes_(b"cos_i")
-        out.attrs["missing_variables"] = np.bytes_(b"toa_radiance,cos_i")
+        out.attrs["missing_variables"] = np.bytes_(
+            ",".join(missing_vars).encode("utf-8")
+        )
         out.attrs["cover_mapping"] = np.bytes_(
             b"fsnow,fPV,fNPV,fsoil = softmax(z_snow,z_pv,z_npv,z_soil)"
+        )
+        out.attrs["aux_inputs"] = np.bytes_(
+            b"elevation" if has_elevation else b""
         )
         out.attrs["output_log_scale"] = np.bytes_(b"false")
 
@@ -136,15 +153,39 @@ def export_emit_as_s2(
             dtype=src["reflectance"].dtype,
             chunks=(min(CHUNK, n), n_bands),
         )
+        ds_rad = None
+        if has_radiance:
+            if src["radiance"].shape != src["reflectance"].shape:
+                raise ValueError(
+                    f"radiance shape {src['radiance'].shape} != "
+                    f"reflectance shape {src['reflectance'].shape}"
+                )
+            ds_rad = out.create_dataset(
+                "toa_radiance",
+                shape=(n, n_bands),
+                dtype=src["radiance"].dtype,
+                chunks=(min(CHUNK, n), n_bands),
+            )
+        if has_elevation:
+            elev = np.asarray(src["elevation"][:], dtype=np.float64).reshape(n)
+            out.create_dataset("elevation", data=elev.astype(np.float32, copy=False))
         for name in MAPPED_QOI:
             out.create_dataset(name, data=np.asarray(qois[name], dtype=np.float64))
 
         src_ref = src["reflectance"]
+        src_rad = src["radiance"] if has_radiance else None
         for start in range(0, n, CHUNK):
             stop = min(start + CHUNK, n)
             ds_ref[start:stop] = src_ref[start:stop]
+            if ds_rad is not None and src_rad is not None:
+                ds_rad[start:stop] = src_rad[start:stop]
             if start == 0 or stop == n or (start // CHUNK) % 20 == 0:
-                print(f"  copied reflectance {stop}/{n}", flush=True)
+                parts = ["reflectance"]
+                if has_radiance:
+                    parts.append("radiance")
+                if has_elevation:
+                    parts.append("elevation")
+                print(f"  copied {'+'.join(parts)} {stop}/{n}", flush=True)
 
     tmp_path.replace(out_path)
     print(f"Wrote S2-schema NetCDF -> {out_path}  n={n} bands={n_bands}")
