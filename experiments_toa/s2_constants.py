@@ -27,6 +27,7 @@ S2_LOG_SCALE_TASK_NAMES: frozenset[str] = frozenset(
         "dust",
         "grain_size",
         "liquid_water",
+        "lwc",
     }
 )
 
@@ -61,6 +62,32 @@ S3_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
     "aot": (0.017, 0.61),
     "cwv": (0.05, 0.70),
 }
+
+# S4 EMIT: cos_i from obs, cwv from ISOFIT state (90–100% snow subset).
+S4_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
+    "cos_i": (0.06, 1.0),
+    "cwv": (0.05, 0.70),
+}
+
+S4_TASK_NAMES: tuple[str, ...] = (
+    "grain_size",
+    "cos_i",
+    "lwc",
+    "dust",
+    "algae",
+    "fsnow",
+    "fPV",
+    "fNPV",
+    "fsoil",
+    "cwv",
+)
+
+S4_SPECTRAL_DIM = 285
+S4_AUX_INPUT_NAMES: tuple[str, ...] = ("coszen", "ele_km", "RAA_TRUE")
+S4_INPUT_DIM = S4_SPECTRAL_DIM + len(S4_AUX_INPUT_NAMES)
+
+# Band-config JSON keys use liquid_water; S4 task name is lwc.
+S4_BAND_CONFIG_ALIASES: dict[str, str] = {"lwc": "liquid_water"}
 
 S2_INPUT_VARIABLES: tuple[str, ...] = ("toa_reflectance", "toa_radiance")
 

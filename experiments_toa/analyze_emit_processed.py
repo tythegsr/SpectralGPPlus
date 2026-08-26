@@ -23,6 +23,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.merge_emit_chunks import EMIT_STATE_FEATURE_NAMES
+from experiments_toa.emit_geometry import calc_cos_i_from_state_obs
 DEFAULT_SRC = (
     _ROOT / "experiments_toa" / "data 11 QoI" / "emit_test_data_processed_20262008.nc"
 )
@@ -300,6 +301,7 @@ def run(src: Path, wl_src: Path, out_dir: Path) -> dict:
 
         print(f"Loading state / elevation ({n:,} rows)...")
         state = np.asarray(f["state"][:], dtype=np.float32)
+        obs = np.asarray(f["obs"][:], dtype=np.float64) if "obs" in f else None
         elev = np.asarray(f["elevation"][:], dtype=np.float32).reshape(n)
         if state.shape[1] != len(EMIT_STATE_FEATURE_NAMES):
             raise ValueError(
@@ -339,6 +341,8 @@ def run(src: Path, wl_src: Path, out_dir: Path) -> dict:
         ref_pca = np.asarray(f["reflectance"][pca_idx], dtype=np.float64)
 
     qoi = mapped_qois(state)
+    if obs is not None:
+        qoi["cos_i"] = calc_cos_i_from_state_obs(state.astype(np.float64), obs)
     qoi["elevation"] = elev.astype(np.float64, copy=False)
     grain = qoi["grain_size"]
     n_grain0 = int((np.abs(grain) < 1e-12).sum())
@@ -403,7 +407,9 @@ def run(src: Path, wl_src: Path, out_dir: Path) -> dict:
         "Softmax snow fraction",
         "fsnow",
     )
-    for name in ("grain_size", "liquid_water", "dust", "algae", "aot", "cwv"):
+    for name in ("cos_i", "grain_size", "liquid_water", "dust", "algae", "aot", "cwv"):
+        if name not in qoi:
+            continue
         plot_hist(
             fig_dir / f"hist_{name}.png",
             {name: qoi[name]},
@@ -490,6 +496,14 @@ def run(src: Path, wl_src: Path, out_dir: Path) -> dict:
         "Packed-index softmax snow fraction",
         "fsnow",
     )
+
+    if "cos_i" in qoi:
+        save_heatmap(
+            fig_dir / "heatmap_cos_i.png",
+            pack_to_grid(qoi["cos_i"]),
+            "Packed-index calculated cos_i",
+            "cos_i",
+        )
 
     # State grid
     fig, axes = plt.subplots(4, 4, figsize=(14, 11))

@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from experiments_toa.merge_emit_chunks import EMIT_STATE_FEATURE_NAMES
+from experiments_toa.emit_geometry import calc_cos_i_from_state_obs
 from experiments_toa.s2_constants import S2_TASK_NAMES
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,7 @@ FSNOW70_BOX: dict[str, tuple[float, float]] = {
 }
 
 MAPPED_QOI = (
+    "cos_i",
     "grain_size",
     "liquid_water",
     "dust",
@@ -530,7 +532,8 @@ def write_report(path: Path, stats: dict) -> None:
         "- Sim70 stores **physical fractional covers** already (fsnow in [0.70, 1.00]); "
         "the unfiltered file stores **pre-softmax logits in [0, 10]**.",
         "- EMIT `z_snow/z_pv/z_npv/z_soil` are logits in [-5, 5]; comparison uses softmax.",
-        "- EMIT has `sinA/cosA`, not `cos_i`. Synthetic geometry is fixed (VZA=6°, RAA=164°, elev=3 km).",
+        "- EMIT `cos_i` is calculated from sinA/cosA + SZA/SAA/slope when `obs` is present; "
+        "synthetic geometry is fixed (VZA=6°, RAA=164°, elev=3 km).",
         "- EMIT `AOT660` vs synthetic `aot` (AOT550 in the forward model).",
         "- EMIT `H20STR` max is far below the synthetic CWV upper bound 5.2.",
         "",
@@ -602,6 +605,7 @@ def run(emit_path: Path, sim_path: Path, unfiltered_path: Path | None, out_dir: 
 
     with h5py.File(emit_path, "r") as f:
         state = np.asarray(f["state"][:], dtype=np.float64)
+        obs = np.asarray(f["obs"][:], dtype=np.float64) if "obs" in f else None
         sample = np.asarray(f["sample"][:], dtype=np.int64)
         emit_attrs = read_root_attrs(f)
         n_emit = int(f["reflectance"].shape[0])
@@ -624,6 +628,8 @@ def run(emit_path: Path, sim_path: Path, unfiltered_path: Path | None, out_dir: 
         "fNPV": emit_frac[:, 2],
         "fsoil": emit_frac[:, 3],
     }
+    if obs is not None:
+        emit_mapped["cos_i"] = calc_cos_i_from_state_obs(state, obs)
 
     grain0 = np.abs(grain) < 1e-12
     grain_near0 = grain < 1.0

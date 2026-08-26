@@ -1,13 +1,12 @@
 """Map an EMIT pixel NetCDF onto the S2 11-QoI analysis schema.
 
 EMIT files store ``reflectance`` + 15-D ISOFIT ``state`` (no ``wl``, no
-``toa_radiance``, no ``cos_i``). This writes a sidecar with:
+``toa_radiance``). Processed files with ``obs`` also get ``cos_i`` from
+``calc_new_angles_cosi`` (sinA/cosA + SZA/SAA/slope). This writes a sidecar with:
 
 - ``toa_reflectance`` copied from ``reflectance``
 - ``wl`` copied from a synthetic TOA file (same 285-band grid)
-- 12 mappable QoIs (grain_size, liquid_water, dust, algae, aot, cwv,
-  softmax covers, plus ISOFIT aspect params ``sinA``/``cosA``).
-  ``cos_i`` is omitted because it is not in the ISOFIT vector.
+- mapped QoIs from state (+ ``cos_i`` when obs geometry is available)
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from experiments_toa.emit_geometry import calc_cos_i_from_state_obs
 from experiments_toa.merge_emit_chunks import EMIT_STATE_FEATURE_NAMES
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -119,14 +119,22 @@ def export_emit_as_s2(
 
         state = np.asarray(src["state"][:], dtype=np.float64)
         qois = mapped_qois(state)
-        del state
 
         has_radiance = "radiance" in src
         has_elevation = "elevation" in src
+        has_obs = "obs" in src
+        has_cos_i = False
+        if has_obs:
+            obs = np.asarray(src["obs"][:], dtype=np.float64)
+            qois["cos_i"] = calc_cos_i_from_state_obs(state, obs)
+            has_cos_i = True
+        del state
+
         missing_vars = []
         if not has_radiance:
             missing_vars.append("toa_radiance")
-        missing_vars.append("cos_i")
+        if not has_cos_i:
+            missing_vars.append("cos_i")
         out.attrs["description"] = np.bytes_(
             b"EMIT pixels mapped to S2 analysis schema "
             b"(reflectance [+ radiance] + elevation input + QoIs)"
@@ -134,7 +142,12 @@ def export_emit_as_s2(
         out.attrs["source"] = np.bytes_(str(emit_path.resolve()).encode("utf-8"))
         out.attrs["wl_source"] = np.bytes_(str(wl_src.resolve()).encode("utf-8"))
         out.attrs["n_samples"] = np.int64(n)
-        out.attrs["missing_qoi"] = np.bytes_(b"cos_i")
+        if has_cos_i:
+            out.attrs["cos_i_source"] = np.bytes_(
+                b"calc_new_angles_cosi(sinA,cosA,SZA,SAA,slope)"
+            )
+        else:
+            out.attrs["missing_qoi"] = np.bytes_(b"cos_i")
         out.attrs["missing_variables"] = np.bytes_(
             ",".join(missing_vars).encode("utf-8")
         )
@@ -171,6 +184,8 @@ def export_emit_as_s2(
             out.create_dataset("elevation", data=elev.astype(np.float32, copy=False))
         for name in MAPPED_QOI:
             out.create_dataset(name, data=np.asarray(qois[name], dtype=np.float64))
+        if has_cos_i:
+            out.create_dataset("cos_i", data=np.asarray(qois["cos_i"], dtype=np.float64))
 
         src_ref = src["reflectance"]
         src_rad = src["radiance"] if has_radiance else None

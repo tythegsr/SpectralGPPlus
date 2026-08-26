@@ -388,12 +388,14 @@ def _plot_posterior_density_axis(
     log_grain: bool = False,
     logit_cos: bool = False,
     use_lognormal: bool | None = None,
+    use_logit_normal: bool | None = None,
     y_pred_mean: float | None = None,
     y_pred_mode: float | None = None,
     log_mu: float | None = None,
     log_sigma: float | None = None,
     logit_mu: float | None = None,
     logit_sigma: float | None = None,
+    logit_bounds: tuple[float, float] | None = None,
     pdf_mode: Literal["gaussian", "tabpfn_bar"] = "gaussian",
     tabpfn_logits: np.ndarray | None = None,
     tabpfn_borders: np.ndarray | None = None,
@@ -418,6 +420,11 @@ def _plot_posterior_density_axis(
         if use_lognormal is not None
         else bool(log_grain and task_key in (TASK_GRAIN, "grain_size"))
     )
+    is_logit_normal = (
+        bool(use_logit_normal)
+        if use_logit_normal is not None
+        else bool(logit_cos and is_cos)
+    )
     tabpfn_edges: np.ndarray | None = None
     tabpfn_heights: np.ndarray | None = None
     pdf: np.ndarray | None = None
@@ -432,7 +439,14 @@ def _plot_posterior_density_axis(
             train_scale_log=tabpfn_train_scale_log,
         )
         density_label = "TabPFN posterior"
-    elif logit_cos and is_cos:
+    elif is_logit_normal:
+        a_b = logit_bounds
+        if a_b is None and x_min is not None and x_max is not None:
+            a_b = (float(x_min), float(x_max))
+        if a_b is None:
+            a_b = (0.0, 1.0)
+        a, b = float(a_b[0]), float(a_b[1])
+        span = max(b - a, 1e-12)
         if (
             logit_mu is not None
             and logit_sigma is not None
@@ -441,9 +455,17 @@ def _plot_posterior_density_axis(
         ):
             mu_logit, sigma_logit = float(logit_mu), max(float(logit_sigma), _PDF_STD_EPS)
         else:
-            mu_logit = math.log(max(y_pred, 1e-12) / max(1.0 - y_pred, 1e-12))
-            sigma_logit = max((upper - lower) / (4.0 * max(y_pred * (1.0 - y_pred), 1e-12)), _PDF_STD_EPS)
-        pdf = _logit_normal_pdf(grid, mu_logit, sigma_logit, x_min=x_min, x_max=x_max)
+            u = float(np.clip((y_pred - a) / span, 1e-12, 1.0 - 1e-12))
+            mu_logit = math.log(u / (1.0 - u))
+            u_lo = float(np.clip((lower - a) / span, 1e-12, 1.0 - 1e-12))
+            u_hi = float(np.clip((upper - a) / span, 1e-12, 1.0 - 1e-12))
+            sigma_logit = max(
+                abs(math.log(u_hi / (1.0 - u_hi)) - math.log(u_lo / (1.0 - u_lo))) / 4.0,
+                _PDF_STD_EPS,
+            )
+        u_grid = np.clip((grid - a) / span, 1e-12, 1.0 - 1e-12)
+        pdf_u = _logit_normal_pdf(u_grid, mu_logit, sigma_logit, x_min=0.0, x_max=1.0)
+        pdf = pdf_u / span
         density_label = "posterior"
     elif is_lognormal:
         if log_mu is not None and log_sigma is not None and np.isfinite(log_mu) and np.isfinite(log_sigma):
@@ -470,9 +492,7 @@ def _plot_posterior_density_axis(
 
     if use_tabpfn and tabpfn_mean is not None and np.isfinite(tabpfn_mean):
         point_label = f"mean = {fmt(tabpfn_mean)}"
-    elif logit_cos and is_cos:
-        point_label = f"median = {fmt(y_pred)}"
-    elif is_lognormal:
+    elif is_logit_normal or is_lognormal:
         point_label = f"median = {fmt(y_pred)}"
     else:
         point_label = f"mean = {fmt(y_pred)}"
@@ -519,7 +539,7 @@ def _plot_posterior_density_axis(
             )
     else:
         ax.axvline(y_pred, color="C1", linestyle="-", linewidth=1.5, label=point_label)
-    if y_pred_mean is not None and logit_cos and is_cos:
+    if y_pred_mean is not None and (is_logit_normal or is_lognormal):
         ax.axvline(
             y_pred_mean,
             color="C1",
@@ -527,17 +547,9 @@ def _plot_posterior_density_axis(
             linewidth=1.5,
             label=f"mean = {fmt(y_pred_mean)}",
         )
-    if y_pred_mean is not None and is_lognormal:
-        ax.axvline(
-            y_pred_mean,
-            color="C1",
-            linestyle=":",
-            linewidth=1.5,
-            label=f"mean = {fmt(y_pred_mean)}",
-        )
-    if is_lognormal:
+    if is_lognormal or is_logit_normal:
         mode_val = y_pred_mode
-        if mode_val is None and log_mu is not None and log_sigma is not None:
+        if mode_val is None and is_lognormal and log_mu is not None and log_sigma is not None:
             if np.isfinite(log_mu) and np.isfinite(log_sigma):
                 mode_val = float(np.exp(log_mu - log_sigma**2))
         if mode_val is not None and np.isfinite(mode_val):

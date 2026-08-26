@@ -13,10 +13,11 @@ from experiments_toa.s2_constants import (
     S2_LOG_SCALE_TASK_NAMES,
     S2_LOGIT_BOUNDS,
     S2_TASK_NAMES,
+    S4_TASK_NAMES,
 )
 from gpplus.utils import StandardScaler
 
-# Cap σ in log space when computing log-normal mean (matches S1 toa_y_transform).
+_WARP_TASK_NAMES = frozenset(S2_TASK_NAMES) | frozenset(S4_TASK_NAMES)
 _LOG_Y_STD_CAP_FOR_LOGNORMAL_MEAN = 3.0
 _NORMAL_Z_95 = 1.96
 _LOGIT_EPS = 1e-4
@@ -146,7 +147,7 @@ def parse_log_uniform_qois(raw: Any) -> frozenset[str]:
         for part in text.replace(";", ",").split(",")
         if part.strip()
     }
-    return frozenset(n for n in names if n in S2_TASK_NAMES)
+    return frozenset(n for n in names if n in _WARP_TASK_NAMES)
 
 
 def _normalize_task_list(
@@ -157,7 +158,7 @@ def _normalize_task_list(
     if tasks is None:
         return frozenset()
     names = [str(t).strip() for t in tasks if str(t).strip()]
-    unknown = sorted({n for n in names if n not in S2_TASK_NAMES})
+    unknown = sorted({n for n in names if n not in _WARP_TASK_NAMES})
     if unknown:
         raise ValueError(f"Unknown S2 task names in {label}: {unknown}")
     return frozenset(names)
@@ -169,7 +170,7 @@ def _merge_logit_bounds(
     bounds = dict(S2_LOGIT_BOUNDS)
     if overrides:
         for name, pair in overrides.items():
-            if name not in S2_TASK_NAMES:
+            if name not in _WARP_TASK_NAMES:
                 raise ValueError(f"Unknown S2 task name in logit bounds: {name!r}")
             a, b = float(pair[0]), float(pair[1])
             if not (b > a):
@@ -486,13 +487,47 @@ def _lognormal_original_scale(
     return median, mean, mode, std, lower, upper
 
 
+def _logit_normal_mode_unit(
+    mu_logit: torch.Tensor,
+    sigma_logit: torch.Tensor,
+    *,
+    n_grid: int = 2048,
+) -> torch.Tensor:
+    """Mode of logit-normal on (0, 1) via dense grid argmax of log-density."""
+    sigma = torch.clamp(sigma_logit, min=1e-12)
+    # Cover ~±6σ in logit space, then evaluate density on the unit interval.
+    z_lo = mu_logit - 6.0 * sigma
+    z_hi = mu_logit + 6.0 * sigma
+    # Build a shared unit grid and evaluate each sample's log-pdf.
+    u = torch.linspace(
+        _LOGIT_EPS,
+        1.0 - _LOGIT_EPS,
+        n_grid,
+        device=mu_logit.device,
+        dtype=mu_logit.dtype,
+    )
+    logit_u = torch.log(u / (1.0 - u))
+    # log pdf ∝ -0.5*((logit(u)-μ)/σ)^2 - log(u) - log(1-u)
+    # Broadcast: (..., 1) vs (n_grid,)
+    mu = mu_logit.unsqueeze(-1)
+    sig = sigma.unsqueeze(-1)
+    log_pdf = -0.5 * ((logit_u - mu) / sig) ** 2 - torch.log(u) - torch.log(1.0 - u)
+    idx = torch.argmax(log_pdf, dim=-1)
+    return u[idx]
+
+
 def _logit_normal_unit_interval(
     mu_logit: torch.Tensor,
     sigma_logit: torch.Tensor,
     *,
     z: float = _NORMAL_Z_95,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Map logit-space Normal(μ, σ²) to summaries on [0, 1]."""
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
+    """Map logit-space Normal(μ, σ²) to summaries on [0, 1].
+
+    Returns ``median, mean, mode, std, lower, upper``.
+    """
     sigma_logit = torch.clamp(sigma_logit, min=0.0)
     median = torch.sigmoid(mu_logit).clamp(0.0, 1.0)
     lower = torch.sigmoid(mu_logit - z * sigma_logit).clamp(0.0, 1.0)
@@ -506,7 +541,8 @@ def _logit_normal_unit_interval(
     u_samples = torch.sigmoid(z_samples).clamp(0.0, 1.0)
     mean = u_samples.mean(dim=-1)
     std = u_samples.std(dim=-1, unbiased=False)
-    return median, mean, std, lower, upper
+    mode = _logit_normal_mode_unit(mu_logit, sigma_logit)
+    return median, mean, mode, std, lower, upper
 
 
 def inverse_y_s2(
@@ -567,7 +603,7 @@ def inverse_y_s2(
         a, b = logit_bounds_for_task(task_name, warps=warps)
         mu_logit = pred_mean
         sigma_logit = pred_std
-        med_u, mean_u, std_u, lo_u, hi_u = _logit_normal_unit_interval(
+        med_u, mean_u, mode_u, std_u, lo_u, hi_u = _logit_normal_unit_interval(
             mu_logit, sigma_logit
         )
         pred_mean = _from_unit_interval(med_u, a=a, b=b)
@@ -575,6 +611,7 @@ def inverse_y_s2(
         lower = _from_unit_interval(lo_u, a=a, b=b)
         upper = _from_unit_interval(hi_u, a=a, b=b)
         point_mean = _from_unit_interval(mean_u, a=a, b=b)
+        point_mode = _from_unit_interval(mode_u, a=a, b=b)
         logit_mu = mu_logit
         logit_sigma = sigma_logit
 

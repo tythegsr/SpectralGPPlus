@@ -25,6 +25,7 @@ _TASK_LABELS: dict[str, str] = {
     "fsoil": "fsoil",
     "grain_size": "grain size (µm)",
     "liquid_water": "liquid water",
+    "lwc": "liquid water",
 }
 
 
@@ -179,6 +180,53 @@ def _resolve_y_std(
     return np.asarray((upper - lower) / (2.0 * 1.96), dtype=np.float64)
 
 
+def _format_param_value(v: float) -> str:
+    av = abs(float(v))
+    if not np.isfinite(v):
+        return "nan"
+    if av == 0.0:
+        return "0"
+    if av >= 1e4 or (av < 1e-3 and av > 0):
+        return f"{v:.3g}"
+    if av >= 100:
+        return f"{v:.1f}"
+    if av >= 1:
+        return f"{v:.4g}"
+    return f"{v:.4g}"
+
+
+def _emit_state_panel_text(
+    *,
+    state_row: np.ndarray,
+    state_feature_names: Sequence[str],
+    derived: Mapping[str, float] | None = None,
+    pred_summary: Sequence[str] | None = None,
+) -> str:
+    """Multi-line text block: full ISOFIT state + optional derived/pred lines."""
+    names = list(state_feature_names)
+    vals = np.asarray(state_row, dtype=np.float64).reshape(-1)
+    if vals.size != len(names):
+        raise ValueError(
+            f"state_row length {vals.size} != n_names {len(names)}"
+        )
+    # Pack into ~4 columns for readability.
+    cells = [f"{n}={_format_param_value(float(v))}" for n, v in zip(names, vals)]
+    n_cols = 4
+    lines = ["EMIT ISOFIT state"]
+    for i in range(0, len(cells), n_cols):
+        lines.append("  " + "  |  ".join(cells[i : i + n_cols]))
+    if derived:
+        dcells = [f"{k}={_format_param_value(float(v))}" for k, v in derived.items()]
+        lines.append("Derived")
+        for i in range(0, len(dcells), n_cols):
+            lines.append("  " + "  |  ".join(dcells[i : i + n_cols]))
+    if pred_summary:
+        lines.append("Predicted QoIs (true | median | mean | mode)")
+        for row in pred_summary:
+            lines.append("  " + row)
+    return "\n".join(lines)
+
+
 def plot_s2_posterior_examples(
     *,
     x_test: np.ndarray,
@@ -195,17 +243,28 @@ def plot_s2_posterior_examples(
     rel_metrics_by_task: Mapping[str, Mapping[str, float | int]] | None = None,
     rel_tolerance: float = 0.01,
     log_scale_tasks: Sequence[str] | None = None,
+    logit_scale_tasks: Sequence[str] | None = None,
     y_pred_mean: np.ndarray | None = None,
     y_pred_mode: np.ndarray | None = None,
     log_mu: np.ndarray | None = None,
     log_sigma: np.ndarray | None = None,
+    logit_mu: np.ndarray | None = None,
+    logit_sigma: np.ndarray | None = None,
+    logit_bounds: Mapping[str, tuple[float, float]] | None = None,
     spectrum_ylabel: str = "Radiance",
+    state_vectors: np.ndarray | None = None,
+    state_feature_names: Sequence[str] | None = None,
+    derived_params: Mapping[str, np.ndarray] | None = None,
 ) -> list[str]:
     """
     S1-style posterior figures: spectrum + per-task density panels.
 
     With 1–2 tasks the layout matches S1 (one row: spectrum | densities).
     With more tasks, the spectrum spans the top row and densities fill a grid below.
+
+    When ``state_vectors`` is provided (shape ``(n_test, n_state)``), a bottom text
+    panel lists the full EMIT ISOFIT state for that example, plus optional derived
+    params and predicted QoI median/mean/mode summaries.
     """
     post = _ensure_plot_toa_posterior()
 
@@ -230,35 +289,43 @@ def plot_s2_posterior_examples(
         log_set = {n for n in names if n in S2_LOG_SCALE_TASK_NAMES}
     else:
         log_set = set(log_scale_tasks)
+    logit_set = set(logit_scale_tasks or ())
+    bounds_map = dict(logit_bounds or {})
+
+    show_state = state_vectors is not None and state_feature_names is not None
+    if show_state:
+        state_vectors = np.asarray(state_vectors, dtype=np.float64)
+        if state_vectors.ndim != 2 or state_vectors.shape[0] != y_true.shape[0]:
+            raise ValueError(
+                f"state_vectors must be (n_test={y_true.shape[0]}, n_state), "
+                f"got {state_vectors.shape}"
+            )
 
     # Classic S1 row when few tasks; otherwise spectrum on top + density grid.
     use_s1_row = n_tasks <= 2
     if use_s1_row:
         n_cols = 1 + n_tasks
-        n_rows = 1
+        n_rows_main = 1
     else:
         n_cols = min(3, n_tasks)
-        n_rows = 1 + int(math.ceil(n_tasks / n_cols))
+        n_rows_main = 1 + int(math.ceil(n_tasks / n_cols))
+    n_rows = n_rows_main + (1 if show_state else 0)
 
     for ex in example_indices:
+        fig = plt.figure(
+            figsize=(4.5 * max(n_cols, 2), 3.4 * n_rows_main + (2.2 if show_state else 0.0)),
+            dpi=120,
+            constrained_layout=True,
+        )
+        height_ratios = [1.0] * n_rows_main
+        if show_state:
+            height_ratios.append(0.55)
+        gs = fig.add_gridspec(n_rows, n_cols, height_ratios=height_ratios)
+
         if use_s1_row:
-            fig, axes = plt.subplots(
-                1,
-                n_cols,
-                figsize=(4.5 * n_cols, 4.2),
-                dpi=120,
-                constrained_layout=True,
-            )
-            axes = np.atleast_1d(axes)
-            ax_spec = axes[0]
-            dens_axes = list(axes[1:])
+            ax_spec = fig.add_subplot(gs[0, 0])
+            dens_axes = [fig.add_subplot(gs[0, 1 + t]) for t in range(n_tasks)]
         else:
-            fig = plt.figure(
-                figsize=(4.5 * n_cols, 3.6 * n_rows),
-                dpi=120,
-                constrained_layout=True,
-            )
-            gs = fig.add_gridspec(n_rows, n_cols)
             ax_spec = fig.add_subplot(gs[0, :])
             dens_axes = []
             for t in range(n_tasks):
@@ -269,7 +336,6 @@ def plot_s2_posterior_examples(
         spectrum = np.asarray(x_test[ex], dtype=np.float64).reshape(-1)
         if spectrum.size != wl.size:
             if spectrum.size > wl.size:
-                # Aux inputs (e.g. elevation) are appended after spectral bands.
                 spectrum = spectrum[: wl.size]
             else:
                 raise ValueError(
@@ -286,38 +352,86 @@ def plot_s2_posterior_examples(
         ax_spec.set_title(", ".join(true_bits) if true_bits else f"test idx {ex}")
         ax_spec.grid(True, alpha=0.3)
 
+        pred_summary_rows: list[str] = []
         for ax, name in zip(dens_axes, names):
             t = names.index(name)
             rel = None
             if rel_metrics_by_task is not None and name in rel_metrics_by_task:
                 rel = dict(rel_metrics_by_task[name])
+            use_log = name in log_set
+            use_logit = name in logit_set
+            y_med = float(y_pred[ex, t])
+            y_mean_v = (
+                float(y_pred_mean[ex, t])
+                if y_pred_mean is not None and np.isfinite(y_pred_mean[ex, t])
+                else None
+            )
+            y_mode_v = (
+                float(y_pred_mode[ex, t])
+                if y_pred_mode is not None and np.isfinite(y_pred_mode[ex, t])
+                else None
+            )
             post._plot_posterior_density_axis(
                 ax,
                 task_key=name,
                 task_label=_task_label(name),
                 y_true=float(y_true[ex, t]),
-                y_pred=float(y_pred[ex, t]),
+                y_pred=y_med,
                 y_std=float(y_std_arr[ex, t]),
                 lower=float(lower[ex, t]),
                 upper=float(upper[ex, t]),
                 rel_metrics=rel,
                 rel_tolerance=rel_tolerance,
-                use_lognormal=name in log_set,
-                y_pred_mean=(
-                    float(y_pred_mean[ex, t])
-                    if y_pred_mean is not None
-                    else None
-                ),
-                y_pred_mode=(
-                    float(y_pred_mode[ex, t])
-                    if y_pred_mode is not None
-                    else None
-                ),
+                use_lognormal=use_log,
+                use_logit_normal=use_logit,
+                y_pred_mean=y_mean_v,
+                y_pred_mode=y_mode_v,
                 log_mu=float(log_mu[ex, t]) if log_mu is not None else None,
                 log_sigma=float(log_sigma[ex, t]) if log_sigma is not None else None,
+                logit_mu=float(logit_mu[ex, t]) if logit_mu is not None else None,
+                logit_sigma=float(logit_sigma[ex, t]) if logit_sigma is not None else None,
+                logit_bounds=bounds_map.get(name),
+            )
+            if use_log or use_logit:
+                mean_s = _format_param_value(y_mean_v) if y_mean_v is not None else "—"
+                mode_s = _format_param_value(y_mode_v) if y_mode_v is not None else "—"
+                pred_summary_rows.append(
+                    f"{name}: true={_format_param_value(float(y_true[ex, t]))} | "
+                    f"med={_format_param_value(y_med)} | mean={mean_s} | mode={mode_s}"
+                )
+            else:
+                pred_summary_rows.append(
+                    f"{name}: true={_format_param_value(float(y_true[ex, t]))} | "
+                    f"pred={_format_param_value(y_med)}"
+                )
+
+        if show_state:
+            ax_state = fig.add_subplot(gs[-1, :])
+            ax_state.axis("off")
+            derived_row = None
+            if derived_params:
+                derived_row = {
+                    k: float(np.asarray(v)[ex]) for k, v in derived_params.items()
+                }
+            text = _emit_state_panel_text(
+                state_row=state_vectors[ex],
+                state_feature_names=state_feature_names,
+                derived=derived_row,
+                pred_summary=pred_summary_rows,
+            )
+            ax_state.text(
+                0.0,
+                1.0,
+                text,
+                transform=ax_state.transAxes,
+                va="top",
+                ha="left",
+                fontsize=7.5,
+                family="monospace",
+                wrap=False,
             )
 
-        fig.suptitle(f"TOA test example {ex}", fontsize=11)
+        fig.suptitle(f"{title} | test example {ex}", fontsize=11)
         out = save_dir / f"example_{ex:04d}.png"
         fig.savefig(fs_path(out), bbox_inches="tight")
         plt.close(fig)
