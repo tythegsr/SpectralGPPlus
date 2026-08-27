@@ -296,7 +296,7 @@ def run_pca_svd_analysis(
         data_path=data_path,
         input_variable=input_variable,  # type: ignore[arg-type]
         task_names=names,
-        include_elevation=True,
+        include_elevation=None,
     )
 
     x_full = np.asarray(x_train.detach().cpu().numpy(), dtype=np.float64)

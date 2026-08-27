@@ -1,9 +1,10 @@
-"""S4 EMIT snow90 independent SORF+NIGP (Woodbury RFFGPR).
+"""S4 independent SORF+NIGP (Woodbury RFFGPR) on EMIT or snow-TOA NetCDF.
 
-Fourth example in the S1/S2/S3/S4 series: trains on
-``emit_test_data_processed_90to100_20262508.nc`` with radiance + geometry aux
-(coszen, ele_km, RAA_TRUE) predicting 10 S2-style QoIs. One ``RFFGPR`` per QoI
-with ``rff_sampling='sorf'`` and classic NIGP.
+Fourth example in the S1/S2/S3/S4 series: trains with radiance + geometry aux
+(coszen, ele_km, RAA_TRUE) predicting S4 QoIs. ``DATA_PATH`` may be either a
+processed EMIT file (``radiance``/``obs``/``state``) or a snow-TOA simulation
+file (``toa_radiance`` + named QoIs). One ``RFFGPR`` per QoI with
+``rff_sampling='sorf'`` and classic NIGP.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 QOI: list[str] | None = ["grain_size", "cos_i", "dust", "algae", "fsnow", "cwv", "lwc"] # all 10 S4 tasks
 N_TRAIN = 100000
 N_VAL = 5000
-NUM_RFF = 400
+NUM_RFF = 800
 NUM_INITS = 1
 NUM_EPOCHS = 1000
 LR = 1e-1
@@ -45,7 +46,7 @@ POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None
 CORRECT_SORF = True
 SAVE_CHECKPOINT = True
-RESPONSE_NOISE_PRIOR = True
+RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.25
 # LOG_SCALE_QOI: list[str] | None = ["grain_size", "dust", "algae"]
@@ -54,8 +55,8 @@ NOISE_PRIOR_LOG_SCALE = 0.25
 LOG_SCALE_QOI: list[str] | None = []
 LOGIT_SCALE_QOI: list[str] | None = []
 LOG_OFFSETS: dict[str, float] | None = None
-NIGP = False
-FREEZE_EPOCH_NIGP = 50
+NIGP = True
+FREEZE_EPOCH_NIGP = 100
 FILTER_VALID_LABELS = False
 OFF_FLOOR_TRAIN_TASKS: list[str] | None = []
 TASK_BAND_CONFIG: str | None = (
@@ -66,11 +67,16 @@ LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
+# EMIT processed or snow-TOA simulation NetCDF (schema auto-detected).
+# Examples:
+#   emit_test_data_90to100_aotbelow02_20262608.nc
+#   snow_toa_fsnow_90to100_20262608.nc
 DATA_PATH: str | None = str(
     _ROOT
     / "experiments_toa"
     / "data 11 QoI"
-    / "emit_test_data_90to100_aotbelow02_20262608.nc"
+    # / "emit_test_data_90to100_aotbelow02_20262608.nc"
+    / "snow_toa_fsnow_90to100_20262608.nc"
 )
 # ---------------------------------------------------------------------------
 

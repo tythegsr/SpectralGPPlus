@@ -1,8 +1,8 @@
-"""S4 EMIT independent SORF-GP runner (Woodbury RFFGPR, no SVGP/VIRFF).
+"""S4 independent SORF-GP runner (Woodbury RFFGPR, no SVGP/VIRFF).
 
-Uses radiance + geometry aux (coszen, ele_km, RAA_TRUE) and S2-style QoI labels
-from ``emit_s4_mtgpr_base``. Trains one ``RFFGPR`` per QoI with
-``rff_sampling='sorf'`` and classic NIGP on the 90–100% snow processed EMIT file.
+Uses radiance + geometry aux (coszen, ele_km, RAA_TRUE) and S4 QoI labels from
+``emit_s4_mtgpr_base``. Accepts EMIT processed or snow-TOA simulation NetCDF
+(schema auto-detected). Trains one ``RFFGPR`` per QoI with ``rff_sampling='sorf'``.
 """
 
 from __future__ import annotations
@@ -83,6 +83,8 @@ from experiments_RFF.rff_gp_defaults import (
 )
 from emit_s4_mtgpr_base import (
     S4_INPUT_DIM,
+    S4_SCHEMA_EMIT,
+    S4_SCHEMA_SNOW_TOA,
     S4_TASK_NAMES,
     TASK_VALID_Y_RANGE,
     _DEFAULT_EMIT_PATH,
@@ -896,27 +898,47 @@ def run_s4_emit_sorf(
                 import h5py
 
                 test_src = test_idx.cpu().numpy()
+                schema = str(data_meta.get("schema", S4_SCHEMA_EMIT))
+                state_test = None
+                state_feature_names = None
+                derived: dict[str, np.ndarray] = {}
+
                 with h5py.File(emit_path, "r") as f:
-                    # Fancy index must be increasing in h5py; load then index in NumPy.
-                    state_all = np.asarray(f["state"][:], dtype=np.float64)
-                    state_test = state_all[test_src]
-                    if "obs" in f:
-                        obs_all = np.asarray(f["obs"][:], dtype=np.float64)
-                        obs_test = obs_all[test_src]
-                    else:
-                        obs_test = None
-                    del state_all
-                    if obs_test is not None:
-                        del obs_all
-                mapped = mapped_qois(state_test)
-                derived = {
-                    "fsnow": mapped["fsnow"],
-                    "fPV": mapped["fPV"],
-                    "fNPV": mapped["fNPV"],
-                    "fsoil": mapped["fsoil"],
-                }
-                if obs_test is not None:
-                    derived["cos_i"] = calc_cos_i_from_state_obs(state_test, obs_test)
+                    if schema == S4_SCHEMA_EMIT and "state" in f:
+                        # Fancy index must be increasing in h5py; load then index.
+                        state_all = np.asarray(f["state"][:], dtype=np.float64)
+                        state_test = state_all[test_src]
+                        del state_all
+                        state_feature_names = list(EMIT_STATE_FEATURE_NAMES)
+                        mapped = mapped_qois(state_test)
+                        derived = {
+                            "fsnow": mapped["fsnow"],
+                            "fPV": mapped["fPV"],
+                            "fNPV": mapped["fNPV"],
+                            "fsoil": mapped["fsoil"],
+                        }
+                        if "obs" in f:
+                            obs_all = np.asarray(f["obs"][:], dtype=np.float64)
+                            obs_test = obs_all[test_src]
+                            del obs_all
+                            derived["cos_i"] = calc_cos_i_from_state_obs(
+                                state_test, obs_test
+                            )
+                    elif schema == S4_SCHEMA_SNOW_TOA:
+                        for key in (
+                            "fsnow",
+                            "fPV",
+                            "fNPV",
+                            "fsoil",
+                            "cos_i",
+                            "aot",
+                            "cwv",
+                        ):
+                            if key in f:
+                                derived[key] = np.asarray(
+                                    f[key][:], dtype=np.float64
+                                ).reshape(-1)[test_src]
+
                 # Aux inputs from X (after spectral bands).
                 x_te_np = x_test_orig.numpy()
                 if x_te_np.shape[1] > S4_SPECTRAL_DIM:
@@ -960,8 +982,8 @@ def run_s4_emit_sorf(
                     logit_bounds=plot_logit_bounds or None,
                     spectrum_ylabel="Radiance",
                     state_vectors=state_test,
-                    state_feature_names=EMIT_STATE_FEATURE_NAMES,
-                    derived_params=derived,
+                    state_feature_names=state_feature_names,
+                    derived_params=derived or None,
                 )
                 for p in post_paths:
                     print(f"Saved posterior plot to {p}")

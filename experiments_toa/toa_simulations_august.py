@@ -13,7 +13,7 @@ DISORT_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/disort_snow_lut_EMIT
 ENDMEMBER_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/endmembers.csv"
 EMIT_WAVE_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/emit-wave.txt"
 NOISE_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/emit_noise.txt"
-OUTPUT_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/data/snow_toa_fsnow_70to100_20261808.nc"
+OUTPUT_PATH = "C:/Users/tylerj/isofit/disort_data_for_tyler/data/snow_toa_fsnow_90to100_constrained_20262608.nc"
 
 SVF_TRUE = 1.0
 VZA_TRUE = 6.0
@@ -144,10 +144,11 @@ def decode_sobol_tasks(u, mix_log_weight=MIX_LOG_WEIGHT):
 
 
 def apply_grain_dust_and_cwv_filter(tasks):
-    """Force near-zero dust for fine grains; keep CWV under ATM_MIDLAT_WINTER(ele_km)."""
+    """Force near-zero dust and algae for fine grains; keep CWV under ATM_MIDLAT_WINTER(ele_km)."""
     tasks = np.asarray(tasks, dtype=np.float64).copy()
     fine = tasks[:, 1] < GRAIN_DUST_THRESHOLD
     tasks[fine, 3] = DUST_LO
+    tasks[fine, 4] = ALGAE_LO
 
     cwv_max = atm_midlat_winter_cwv_upperbound(tasks[:, COL_ELE])
     keep = tasks[:, 9] <= cwv_max
@@ -193,7 +194,7 @@ tasks, sample_stats = sample_valid_tasks(N_SAMPLES, mix_log_weight=MIX_LOG_WEIGH
 print(
     "Sample filter (before LUT build): "
     f"drawn={sample_stats['n_drawn']}, "
-    f"forced_dust(grain<{GRAIN_DUST_THRESHOLD:g})={sample_stats['n_forced_dust']}, "
+    f"forced_dust/algae(grain<{GRAIN_DUST_THRESHOLD:g})={sample_stats['n_forced_dust']}, "
     f"rejected_cwv={sample_stats['n_rejected_cwv']}, "
     f"kept={sample_stats['n_kept']}"
 )
@@ -417,7 +418,8 @@ ds_out = xr.Dataset(
             f"Sobol({N_SOBOL_DIMS}); mixture decode for liquid_water,dust,algae "
             f"(P(log)={MIX_LOG_WEIGHT:g}, floors {LWC_LO:g},{DUST_LO:g},{ALGAE_LO:g}); "
             "linear-uniform for cos_i,grain_size,cwv,aot,ele_km,RAA_TRUE; "
-            f"dust forced to {DUST_LO:g} when grain_size<{GRAIN_DUST_THRESHOLD:g}; "
+            f"dust forced to {DUST_LO:g}, algae forced to {ALGAE_LO:g} "
+            f"when grain_size<{GRAIN_DUST_THRESHOLD:g}; "
             "cwv kept under ATM_MIDLAT_WINTER(ele_km)"
         ),
         "log_uniform_qois": ",".join(LOG_UNIFORM_QOIS),

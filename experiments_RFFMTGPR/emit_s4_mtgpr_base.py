@@ -1,9 +1,12 @@
-"""EMIT S4 joint loader (radiance + geometry aux → S2-style QoIs).
+"""S4 joint loader (radiance + geometry aux → S2-style QoIs).
 
-Trains on processed EMIT NetCDF with radiance spectra plus coszen, ele_km,
-and RAA_TRUE as model inputs. Labels include cos_i from calc_new_angles (sinA/cosA
-+ SZA/SAA/slope) and lwc from state.
-Also exports the shared loader/split used by independent S4 SORF.
+Accepts either:
+- processed EMIT NetCDF (``radiance`` / ``obs`` / ``state`` / ``elevation``), or
+- snow-TOA simulation NetCDF (``toa_radiance`` + ``coszen`` / ``ele_km`` /
+  ``RAA_TRUE`` + named QoI variables).
+
+X is always spectral (285) plus coszen, ele_km, RAA_TRUE. Also exports the
+shared loader/split used by independent S4 SORF.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ from experiments_toa.export_emit_as_s2 import mapped_qois
 from experiments_toa.merge_emit_chunks import EMIT_STATE_FEATURE_NAMES
 from experiments_toa.s2_constants import (
     S4_AUX_INPUT_NAMES,
+    S4_BAND_CONFIG_ALIASES,
     S4_INPUT_DIM,
     S4_SPECTRAL_DIM,
     S4_TASK_NAMES,
@@ -48,6 +52,10 @@ from experiments_toa.emit_geometry import (
     elevation_to_km,
     relative_azimuth,
 )
+
+# NetCDF schemas accepted by ``load_emit_s4_xy``.
+S4_SCHEMA_EMIT = "emit"
+S4_SCHEMA_SNOW_TOA = "snow_toa"
 
 TASK_VALID_Y_RANGE: dict[str, tuple[float, float]] = {
     "algae": (1e-2, 6e5),
@@ -184,46 +192,49 @@ def _valid_label_mask(y: np.ndarray, task_names: Sequence[str]) -> np.ndarray:
     return mask
 
 
-def load_emit_s4_xy(
-    emit_path: str | Path,
+def detect_s4_nc_schema(h5_file) -> str:
+    """Return ``emit`` or ``snow_toa`` from NetCDF/HDF5 keys."""
+    keys = set(h5_file.keys())
+    if {"radiance", "obs", "state"}.issubset(keys):
+        return S4_SCHEMA_EMIT
+    if "toa_radiance" in keys and set(S4_AUX_INPUT_NAMES).issubset(keys):
+        return S4_SCHEMA_SNOW_TOA
+    raise KeyError(
+        "Unrecognized S4 NetCDF schema. Expected either "
+        "(radiance, obs, state) [EMIT] or "
+        f"(toa_radiance, {', '.join(S4_AUX_INPUT_NAMES)}) [snow TOA]. "
+        f"Found keys: {sorted(keys)}"
+    )
+
+
+def _s4_snow_qoi_key(task_name: str) -> str:
+    """Map S4 task name to snow-TOA NetCDF variable (``lwc`` → ``liquid_water``)."""
+    return S4_BAND_CONFIG_ALIASES.get(task_name, task_name)
+
+
+def _load_emit_s4_xy_emit(
+    f,
     *,
-    task_names: Sequence[str],
-    filter_valid_labels: bool = False,
+    emit_path: Path,
+    names: list[str],
+    filter_valid_labels: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
-    """Load EMIT radiance + geometry aux and S4 QoI labels.
-
-    X columns: radiance (285), coszen, ele_km, RAA_TRUE (288 total).
-    """
-    import h5py
-
-    emit_path = Path(emit_path)
-    if not emit_path.is_file():
-        raise FileNotFoundError(f"EMIT NetCDF not found: {emit_path}")
-    names = list(task_names)
-    unknown = [n for n in names if n not in S4_TASK_NAMES]
-    if unknown:
-        raise ValueError(f"Unknown S4 task names: {unknown}")
-
-    with h5py.File(emit_path, "r") as f:
-        for key in ("radiance", "obs", "state"):
-            if key not in f:
-                raise KeyError(f"Missing {key!r} in {emit_path}")
-        n_total = int(f["radiance"].shape[0])
-        n_bands = int(f["radiance"].shape[1])
-        if n_bands != S4_SPECTRAL_DIM:
-            raise ValueError(f"Expected {S4_SPECTRAL_DIM} bands, got {n_bands}")
-        state = np.asarray(f["state"][:], dtype=np.float64)
-        obs = np.asarray(f["obs"][:], dtype=np.float64)
-        elev_all = read_elevation_array(f)
-        if "state_feature_names" in f.attrs:
-            names_attr = f.attrs["state_feature_names"]
-            if isinstance(names_attr, bytes):
-                names_attr = names_attr.decode("utf-8")
-            state_names = [s.strip() for s in str(names_attr).split(",")]
-        else:
-            state_names = list(EMIT_STATE_FEATURE_NAMES)
-        idx = np.arange(n_total, dtype=np.int64)
-        X_spec = np.asarray(f["radiance"][:], dtype=np.float64)
+    n_total = int(f["radiance"].shape[0])
+    n_bands = int(f["radiance"].shape[1])
+    if n_bands != S4_SPECTRAL_DIM:
+        raise ValueError(f"Expected {S4_SPECTRAL_DIM} bands, got {n_bands}")
+    state = np.asarray(f["state"][:], dtype=np.float64)
+    obs = np.asarray(f["obs"][:], dtype=np.float64)
+    elev_all = read_elevation_array(f)
+    if "state_feature_names" in f.attrs:
+        names_attr = f.attrs["state_feature_names"]
+        if isinstance(names_attr, bytes):
+            names_attr = names_attr.decode("utf-8")
+        state_names = [s.strip() for s in str(names_attr).split(",")]
+    else:
+        state_names = list(EMIT_STATE_FEATURE_NAMES)
+    idx = np.arange(n_total, dtype=np.int64)
+    X_spec = np.asarray(f["radiance"][:], dtype=np.float64)
 
     qoi = mapped_qois_s4(state, obs)
     missing = [n for n in names if n not in qoi]
@@ -254,6 +265,7 @@ def load_emit_s4_xy(
 
     meta = {
         "emit_path": str(emit_path.resolve()),
+        "schema": S4_SCHEMA_EMIT,
         "n_total": n_total,
         "n_filtered": int(idx.size),
         "filter_valid_labels": bool(filter_valid_labels),
@@ -268,6 +280,119 @@ def load_emit_s4_xy(
         "input_dim": int(aux_meta["input_dim"]),
     }
     return X, Y, idx, meta
+
+
+def _load_emit_s4_xy_snow_toa(
+    f,
+    *,
+    emit_path: Path,
+    names: list[str],
+    filter_valid_labels: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    n_total = int(f["toa_radiance"].shape[0])
+    n_bands = int(f["toa_radiance"].shape[1])
+    if n_bands != S4_SPECTRAL_DIM:
+        raise ValueError(f"Expected {S4_SPECTRAL_DIM} bands, got {n_bands}")
+    X_spec = np.asarray(f["toa_radiance"][:], dtype=np.float64)
+    coszen = np.asarray(f["coszen"][:], dtype=np.float64).reshape(-1)
+    ele_km = np.asarray(f["ele_km"][:], dtype=np.float64).reshape(-1)
+    raa_true = np.asarray(f["RAA_TRUE"][:], dtype=np.float64).reshape(-1)
+    for name, arr in (("coszen", coszen), ("ele_km", ele_km), ("RAA_TRUE", raa_true)):
+        if arr.shape[0] != n_total:
+            raise ValueError(f"{name} length {arr.shape[0]} != n_samples {n_total}")
+
+    qoi_keys = {_s4_snow_qoi_key(n): n for n in names}
+    missing_keys = [k for k in qoi_keys if k not in f]
+    if missing_keys:
+        raise KeyError(
+            f"Missing snow-TOA QoI variables {missing_keys} in {emit_path} "
+            f"(S4 tasks: {[qoi_keys[k] for k in missing_keys]})"
+        )
+    Y = np.column_stack(
+        [np.asarray(f[_s4_snow_qoi_key(n)][:], dtype=np.float64).reshape(-1) for n in names]
+    )
+    idx = np.arange(n_total, dtype=np.int64)
+
+    if filter_valid_labels:
+        valid = _valid_label_mask(Y, names)
+        X_spec = X_spec[valid]
+        Y = Y[valid]
+        coszen = coszen[valid]
+        ele_km = ele_km[valid]
+        raa_true = raa_true[valid]
+        idx = idx[valid]
+
+    X, aux_meta = append_s4_aux_inputs(X_spec, coszen, ele_km, raa_true)
+
+    if not np.isfinite(X).all():
+        raise ValueError("Non-finite values found in snow-TOA inputs")
+    if not np.isfinite(Y).all():
+        raise ValueError("Non-finite values found in snow-TOA labels")
+
+    meta = {
+        "emit_path": str(emit_path.resolve()),
+        "schema": S4_SCHEMA_SNOW_TOA,
+        "n_total": n_total,
+        "n_filtered": int(idx.size),
+        "filter_valid_labels": bool(filter_valid_labels),
+        "state_feature_names": None,
+        "task_names": names,
+        "qoi_variable_map": {n: _s4_snow_qoi_key(n) for n in names},
+        "fsnow_label": "fsnow",
+        "task_valid_y_range": {
+            k: list(v) for k, v in TASK_VALID_Y_RANGE.items() if k in names
+        },
+        "input_variable": "toa_radiance",
+        **aux_meta,
+        "input_dim": int(aux_meta["input_dim"]),
+    }
+    return X, Y, idx, meta
+
+
+def load_emit_s4_xy(
+    emit_path: str | Path,
+    *,
+    task_names: Sequence[str],
+    filter_valid_labels: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Load S4 inputs/labels from EMIT processed or snow-TOA simulation NetCDF.
+
+    Supported schemas
+    -----------------
+    emit
+        ``radiance`` + ``obs`` + ``state`` (+ ``elevation``); aux derived from
+        geometry; QoIs from ``mapped_qois_s4``.
+    snow_toa
+        ``toa_radiance`` + ``coszen`` / ``ele_km`` / ``RAA_TRUE``; QoIs as named
+        variables (``lwc`` reads ``liquid_water``).
+
+    X columns: spectral (285), coszen, ele_km, RAA_TRUE (288 total).
+    """
+    import h5py
+
+    emit_path = Path(emit_path)
+    if not emit_path.is_file():
+        raise FileNotFoundError(f"S4 NetCDF not found: {emit_path}")
+    names = list(task_names)
+    unknown = [n for n in names if n not in S4_TASK_NAMES]
+    if unknown:
+        raise ValueError(f"Unknown S4 task names: {unknown}")
+
+    with h5py.File(emit_path, "r") as f:
+        schema = detect_s4_nc_schema(f)
+        if schema == S4_SCHEMA_EMIT:
+            return _load_emit_s4_xy_emit(
+                f,
+                emit_path=emit_path,
+                names=names,
+                filter_valid_labels=filter_valid_labels,
+            )
+        return _load_emit_s4_xy_snow_toa(
+            f,
+            emit_path=emit_path,
+            names=names,
+            filter_valid_labels=filter_valid_labels,
+        )
 
 
 def split_emit_s4(
@@ -313,6 +438,8 @@ def _subsample_scatter(
 __all__ = [
     "S4_AUX_INPUT_NAMES",
     "S4_INPUT_DIM",
+    "S4_SCHEMA_EMIT",
+    "S4_SCHEMA_SNOW_TOA",
     "S4_SPECTRAL_DIM",
     "S4_TASK_NAMES",
     "TASK_VALID_Y_RANGE",
@@ -322,6 +449,7 @@ __all__ = [
     "_subsample_scatter",
     "append_s4_aux_inputs",
     "calc_cos_i_from_state_obs",
+    "detect_s4_nc_schema",
     "extract_s4_aux_inputs",
     "load_emit_s4_xy",
     "mapped_qois_s4",

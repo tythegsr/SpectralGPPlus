@@ -124,7 +124,7 @@ def run_diagnostics(
         data_path,
         input_variable="toa_reflectance",
         task_names=task_names,
-        include_elevation=True,
+        include_elevation=None,
     )
     assert names == task_names
     n_spectral = int(meta.get("n_spectral_bands", X_all.shape[1]))
