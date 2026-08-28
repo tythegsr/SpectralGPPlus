@@ -42,8 +42,10 @@ def resolve_batch_shape(num_inits: int, batch_shape: torch.Size | None = None) -
 def model_init_batch_size(model: nn.Module) -> int:
     """Infer leading init-batch size from model, or 1 if unbatched."""
     bs = getattr(model, "batch_shape", None)
-    if bs is not None and len(bs) > 0:
-        return int(bs[0])
+    if bs is not None:
+        # Trust the model's own batch_shape (including empty = unbatched). Do not
+        # scan submodules: priors/likelihoods may use batch_shape for num_tasks.
+        return int(bs[0]) if len(bs) > 0 else 1
     for module in model.modules():
         bs = getattr(module, "batch_shape", None)
         if bs is not None and len(bs) > 0:
