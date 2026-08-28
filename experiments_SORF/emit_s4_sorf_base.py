@@ -171,6 +171,7 @@ def run_s4_emit_sorf(
     parallel_verbose: int = 10,
     training_verbose: bool = True,
     log_every_n_epochs: int = 50,
+    val_log_every_n_epochs: int = 1,
     save_checkpoint: bool = True,
     log_scale: bool | None = True,
     log_scale_qoi: Sequence[str] | None = None,
@@ -470,14 +471,20 @@ def run_s4_emit_sorf(
                 )
             )
         if num_epochs > 1 and training_verbose:
-            callbacks.append(
-                make_train_loss_callback(
-                    num_inits,
-                    num_epochs,
-                    verbose=training_verbose,
-                    log_every_n_epochs=log_every_n_epochs,
-                )
+            val_logs_train_loss = (
+                monitor_validation
+                and n_val_eff > 0
+                and val_log_every_n_epochs <= log_every_n_epochs
             )
+            if not val_logs_train_loss:
+                callbacks.append(
+                    make_train_loss_callback(
+                        num_inits,
+                        num_epochs,
+                        verbose=training_verbose,
+                        log_every_n_epochs=log_every_n_epochs,
+                    )
+                )
         if monitor_validation and n_val_eff > 0:
             callbacks.append(
                 make_validation_callback(
@@ -487,6 +494,7 @@ def run_s4_emit_sorf(
                     chunk_size=predict_chunk_size,
                     verbose=validation_verbose,
                     log_every_n_epochs=log_every_n_epochs,
+                    val_log_every_n_epochs=val_log_every_n_epochs,
                     woodbury_form=DEFAULT_WOODBURY_FORM,
                 )
             )
@@ -699,6 +707,12 @@ def run_s4_emit_sorf(
         }
         if best_run.get("final_lr") is not None:
             tm["final_lr"] = float(best_run["final_lr"])
+        if best_run.get("best_val_RRMSE") is not None and best_run.get("val_checkpoint_restored"):
+            tm["checkpoint_val_RRMSE"] = float(best_run["best_val_RRMSE"])
+        if best_run.get("best_val_RRMSE_epoch") is not None and best_run.get("val_checkpoint_restored"):
+            tm["checkpoint_val_RRMSE_epoch"] = int(best_run["best_val_RRMSE_epoch"])
+        if best_run.get("val_checkpoint_restore_reason"):
+            tm["val_checkpoint_restore_reason"] = str(best_run["val_checkpoint_restore_reason"])
         task_metrics[task_name] = tm
         task_runs[task_name] = runs
         task_best_runs[task_name] = best_run
@@ -893,6 +907,7 @@ def run_s4_emit_sorf(
                     task_name=name,
                     out_path=scatter_dir / f"{name}_scatter.png",
                     title=f"{title} | {name}",
+                    test_rrmse=float(per_task[f"{name}_RRMSE"]),
                 )
             if example_indices:
                 import h5py

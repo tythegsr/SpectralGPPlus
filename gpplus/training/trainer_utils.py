@@ -264,6 +264,53 @@ def select_epoch_train_fn(
     return standard_epoch_fn
 
 
+def apply_val_rrmse_checkpoint_if_available(
+    callbacks: list,
+    best_state_dict: Any,
+    best_loss: float,
+    *,
+    train_loss_best_epoch: int | None = None,
+    early_stopped: bool = False,
+) -> tuple[Any, float, dict | None]:
+    """Restore val-best weights only when train/val loss curves have diverged."""
+    from .callbacks import ValidationMetricsCallback
+
+    for cb in callbacks:
+        if not isinstance(cb, ValidationMetricsCallback) or not cb.checkpoint_on_val_rrmse:
+            continue
+        use_val, reason = cb.should_restore_val_rrmse_checkpoint(
+            train_loss_best_epoch=train_loss_best_epoch,
+            early_stopped=early_stopped,
+        )
+        if not use_val:
+            logger.info("Keeping train-loss checkpoint (%s).", reason)
+            continue
+        ckpt = cb.get_val_rrmse_checkpoint()
+        if ckpt is None:
+            continue
+        epoch = ckpt.get("epoch")
+        epoch_label = int(epoch) + 1 if epoch is not None else "?"
+        logger.info(
+            "Restoring validation RRMSE checkpoint (%s). val_RRMSE=%.6f at epoch %s; "
+            "train-loss-best had loss=%.6f at epoch %s.",
+            reason,
+            float(ckpt["val_RRMSE"]),
+            epoch_label,
+            best_loss,
+            int(train_loss_best_epoch) + 1 if train_loss_best_epoch is not None else "?",
+        )
+        train_loss = ckpt.get("train_loss")
+        ckpt = dict(ckpt)
+        ckpt["divergence_restore"] = True
+        ckpt["divergence_reason"] = reason
+        return (
+            ckpt["state_dict"],
+            float(train_loss) if train_loss is not None else best_loss,
+            ckpt,
+        )
+    return best_state_dict, best_loss, None
+
+
 def check_early_stop(
     stop_conditions: list,
     stop_context: dict,

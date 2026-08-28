@@ -410,6 +410,7 @@ def save_s2_summary_artifacts(
                 task_name=name,
                 out_path=scatter_dir / f"{name}_scatter.png",
                 title=f"{title} | {name}",
+                test_rrmse=metrics.get(f"{name}_RRMSE"),
             )
         post_dir = Path(save_path) / "plots" / "posterior" / title
         post_paths = plot_s2_posterior_examples(

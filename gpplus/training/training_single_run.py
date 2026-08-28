@@ -28,6 +28,7 @@ _WOODBURY_MLL_TYPES = (
 )
 from .trainer_utils import (
     SingleRunResult,
+    apply_val_rrmse_checkpoint_if_available,
     check_early_stop,
     configure_woodbury_matmul_precision,
     select_epoch_train_fn,
@@ -174,9 +175,11 @@ class GPTrainerSingleProcess:
 
         best_loss = float("inf")
         best_state_dict = None
+        best_loss_epoch: int | None = None
         no_improvement_epochs = 0
         previous_loss = None
         epochs_trained = 0
+        early_stopped = False
         abort_error: str | None = None
         abort_epoch: int | None = None
 
@@ -229,6 +232,7 @@ class GPTrainerSingleProcess:
                 if loss < best_loss:
                     best_loss = loss
                     best_state_dict = copy.deepcopy(self.model.state_dict())
+                    best_loss_epoch = epoch
                     no_improvement_epochs = 0
                 elif epoch + 1 > self.min_epochs:
                     # Do not accumulate patience before min_epochs (e.g. NIGP freeze).
@@ -251,6 +255,7 @@ class GPTrainerSingleProcess:
                     best_loss,
                     min_epochs=self.min_epochs,
                 ):
+                    early_stopped = True
                     break
                 previous_loss = loss
 
@@ -266,9 +271,17 @@ class GPTrainerSingleProcess:
         logger.info("Total epochs trained: %s", epochs_trained)
         if final_lr is not None:
             logger.info("Final learning rate: %g", final_lr)
+        val_ckpt = None
         if best_state_dict is None:
             logger.warning("No model state was captured during training; verify epoch count and optimizer behavior.")
         else:
+            best_state_dict, best_loss, val_ckpt = apply_val_rrmse_checkpoint_if_available(
+                self.callbacks,
+                best_state_dict,
+                best_loss,
+                train_loss_best_epoch=best_loss_epoch,
+                early_stopped=early_stopped,
+            )
             # Ensure callbacks / callers see the best weights, not a crashed mid-step state.
             self.model.load_state_dict(best_state_dict)
 
@@ -298,6 +311,13 @@ class GPTrainerSingleProcess:
             "state_dict": best_state_dict,
             "callback_data": callback_data,
         }
+        if val_ckpt is not None:
+            result["best_val_RRMSE"] = float(val_ckpt["val_RRMSE"])
+            if val_ckpt.get("epoch") is not None:
+                result["best_val_RRMSE_epoch"] = int(val_ckpt["epoch"])
+            if val_ckpt.get("divergence_restore"):
+                result["val_checkpoint_restored"] = True
+                result["val_checkpoint_restore_reason"] = val_ckpt.get("divergence_reason")
         if final_lr is not None:
             result["final_lr"] = final_lr
         if abort_error is not None:

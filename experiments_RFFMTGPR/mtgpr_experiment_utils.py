@@ -310,6 +310,7 @@ def make_validation_callback(
     *,
     verbose: bool = True,
     log_every_n_epochs: int = 1,
+    val_log_every_n_epochs: int | None = None,
     log_every_n_iters: int = 10,
     chunk_size: int = 512,
     woodbury_form: str | None = None,
@@ -323,6 +324,7 @@ def make_validation_callback(
         val_y,
         verbose=verbose,
         log_every_n_epochs=log_every_n_epochs,
+        val_log_every_n_epochs=val_log_every_n_epochs,
         log_every_n_iters=log_every_n_iters,
         num_inits=num_inits,
         chunk_size=chunk_size,
@@ -350,9 +352,16 @@ def summarize_validation_from_runs(runs: list[dict], best_run: dict) -> dict:
     if best_index is not None:
         summary["best_init_index"] = int(best_index)
     if best_index is not None and int(best_index) in by_init:
-        last = by_init[int(best_index)][-1]
-        summary["best_val_NLL"] = last.get("val_NLL")
-        summary["best_val_RRMSE"] = last.get("val_RRMSE")
+        records = by_init[int(best_index)]
+        best_rec = min(
+            records,
+            key=lambda r: float(r.get("val_RRMSE", float("inf")))
+            if r.get("val_RRMSE") is not None
+            else float("inf"),
+        )
+        summary["best_val_NLL"] = best_rec.get("val_NLL")
+        summary["best_val_RRMSE"] = best_rec.get("val_RRMSE")
+        summary["best_val_epoch"] = best_rec.get("epoch")
         summary["best_init_hyperparams"] = extract_best_init_hyperparams(
             {str(k): v for k, v in by_init.items()},
             int(best_index),

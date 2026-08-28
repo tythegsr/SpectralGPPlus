@@ -27,7 +27,7 @@ _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
 QOI: list[str] | None = ["grain_size", "cos_i", "dust", "algae", "fsnow", "cwv", "lwc"] # all 10 S4 tasks
 N_TRAIN = 100000
 N_VAL = 5000
-NUM_RFF = 800
+NUM_RFF = 600
 NUM_INITS = 1
 NUM_EPOCHS = 1000
 LR = 1e-1
@@ -56,7 +56,7 @@ LOG_SCALE_QOI: list[str] | None = []
 LOGIT_SCALE_QOI: list[str] | None = []
 LOG_OFFSETS: dict[str, float] | None = None
 NIGP = True
-FREEZE_EPOCH_NIGP = 150
+FREEZE_EPOCH_NIGP = 300
 FILTER_VALID_LABELS = False
 OFF_FLOOR_TRAIN_TASKS: list[str] | None = []
 TASK_BAND_CONFIG: str | None = (
@@ -66,6 +66,7 @@ LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
 LOG_EVERY_N_EPOCHS = 50
+VAL_LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
 # EMIT processed or snow-TOA simulation NetCDF (schema auto-detected).
 # Examples:
@@ -76,7 +77,7 @@ DATA_PATH: str | None = str(
     / "experiments_toa"
     / "data 11 QoI"
     # / "emit_test_data_90to100_aotbelow02_20262608.nc"
-    / "snow_toa_fsnow_90to100_constrained_20262608.nc"
+    / "snow_toa_fsnow_90to100_constrained_20262808.nc"
 )
 # ---------------------------------------------------------------------------
 
@@ -143,7 +144,7 @@ if __name__ == "__main__":
     band_str = "_taskbandconfig" if TASK_BAND_CONFIG else ""
     of_str = "_offfloor" if OFF_FLOOR_TRAIN_TASKS else ""
     save_path = args.save_path or (
-        f"experiments_SORF/results/Aug27_constrained/s4_emit_aotbelow02_sorf_{args.num_inits}inits_"
+        f"experiments_SORF/results/Aug28_constrained/s4_emit_aotbelow02_sorf_{args.num_inits}inits_"
         f"numrff{args.num_rff}_lr{args.lr}{nigp_str}{freeze_str}"
         f"{band_str}{of_str}_dtype{args.dtype}"
     )
@@ -189,6 +190,7 @@ if __name__ == "__main__":
         parallel_verbose=PARALLEL_VERBOSE,
         training_verbose=TRAINING_LOG,
         log_every_n_epochs=LOG_EVERY_N_EPOCHS,
+        val_log_every_n_epochs=VAL_LOG_EVERY_N_EPOCHS,
         save_checkpoint=SAVE_CHECKPOINT,
         response_noise_prior=RESPONSE_NOISE_PRIOR,
         noise_var_fraction=NOISE_VAR_FRACTION,

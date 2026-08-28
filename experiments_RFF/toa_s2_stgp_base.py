@@ -1250,6 +1250,7 @@ def run_s2_toa_stgp(
                     task_name=name,
                     out_path=scatter_dir / f"{name}_scatter.png",
                     title=f"{title} | {name}",
+                    test_rrmse=float(per_task[f"{name}_RRMSE"]),
                 )
             post_dir = Path(save_path) / "plots" / "posterior" / title
             spectrum_ylabel = (

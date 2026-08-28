@@ -135,6 +135,7 @@ def plot_s2_task_scatter(
     task_name: str,
     out_path: str | Path,
     title: str | None = None,
+    test_rrmse: float | None = None,
 ) -> Path:
     out_path = Path(out_path)
     ensure_parent(out_path)
@@ -154,6 +155,17 @@ def plot_s2_task_scatter(
             colors="C0",
             alpha=0.15,
             lw=0.8,
+        )
+    if test_rrmse is not None and np.isfinite(test_rrmse):
+        ax.text(
+            0.05,
+            0.95,
+            f"Test RRMSE = {float(test_rrmse):.4f}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.85},
         )
     ax.set_xlabel(f"True {task_name}")
     ax.set_ylabel(f"Predicted {task_name}")

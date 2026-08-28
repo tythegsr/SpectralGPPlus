@@ -77,7 +77,7 @@ DATA_PATH: str | None = str(
     _ROOT
     / "experiments_toa"
     / "data 11 QoI"
-    / "snow_toa_fsnow_90to100_constrained_20262608.nc"
+    / "snow_toa_fsnow_90to100_constrained_20262808.nc"
 )
 # ---------------------------------------------------------------------------
 

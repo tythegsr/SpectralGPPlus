@@ -1,5 +1,6 @@
 from abc import ABC
 from typing import Any, Callable, List, Optional, Tuple, TypedDict
+import copy
 import math
 import torch
 
@@ -4218,30 +4219,47 @@ class ValidationMetricsCallback(Callback):
         *,
         verbose: bool = True,
         log_every_n_epochs: int = 1,
+        val_log_every_n_epochs: int | None = None,
         log_every_n_iters: int = 10,
         num_inits: Optional[int] = None,
         cholesky_jitter: Optional[float] = None,
         chunk_size: int = 512,
         woodbury_form: Optional[str] = None,
         woodbury_mt_method: Optional[str] = None,
+        checkpoint_on_val_rrmse: bool = True,
+        checkpoint_every_n_epochs: int | None = None,
+        divergence_rel_tolerance: float = 0.01,
     ):
         self.val_x = val_x
         self.val_y = val_y
         self.verbose = verbose
         self.log_every_n_epochs = max(1, int(log_every_n_epochs))
+        if val_log_every_n_epochs is None:
+            val_log_every_n_epochs = self.log_every_n_epochs
+        self.val_log_every_n_epochs = max(1, int(val_log_every_n_epochs))
         self.log_every_n_iters = max(1, int(log_every_n_iters))
         self.num_inits = num_inits
         self.cholesky_jitter = cholesky_jitter
         self.chunk_size = chunk_size
         self.woodbury_form = woodbury_form
         self.woodbury_mt_method = woodbury_mt_method
+        self.checkpoint_on_val_rrmse = bool(checkpoint_on_val_rrmse)
+        if checkpoint_every_n_epochs is None:
+            checkpoint_every_n_epochs = self.val_log_every_n_epochs
+        self.checkpoint_every_n_epochs = max(1, int(checkpoint_every_n_epochs))
+        self.divergence_rel_tolerance = float(divergence_rel_tolerance)
         self._run_index: Optional[int] = None
         self._fold_index: Optional[int] = None
         self._records: list[dict] = []
+        self._checkpoint_history: list[dict] = []
         self._trainer = None
         self._lbfgs_registered = False
         self._prev_val_nll: Optional[float] = None
         self._train_mode: Optional[str] = None
+        self._best_val_rrmse = float("inf")
+        self._best_val_state_dict: dict | None = None
+        self._best_val_epoch: int | None = None
+        self._best_val_train_loss: float | None = None
 
     def set_run_index(self, run_index: int) -> None:
         self._run_index = run_index
@@ -4389,6 +4407,8 @@ class ValidationMetricsCallback(Callback):
         *,
         epoch: Optional[int] = None,
         lbfgs_iter: Optional[int] = None,
+        append_record: bool = True,
+        track_checkpoint_history: bool = False,
     ) -> dict:
         from .training_metrics import compute_validation_metrics
         from .batch_utils import (
@@ -4448,9 +4468,137 @@ class ValidationMetricsCallback(Callback):
         if spike_logged:
             record["val_diag_expanded_logged"] = True
         self._prev_val_nll = float(metrics["val_NLL"])
-        self._records.append(record)
+        if append_record:
+            self._records.append(record)
+        if track_checkpoint_history and epoch is not None:
+            self._checkpoint_history.append(
+                {
+                    "epoch": int(epoch),
+                    "train_loss": self._to_float(train_loss),
+                    "val_RRMSE": float(metrics["val_RRMSE"]),
+                    "val_NLL": float(metrics["val_NLL"]),
+                }
+            )
         context["val_metrics"] = metrics
+        self._maybe_checkpoint_on_val_rrmse(context, metrics, epoch=epoch)
         return metrics
+
+    def _maybe_checkpoint_on_val_rrmse(
+        self,
+        context: dict,
+        metrics: dict,
+        *,
+        epoch: Optional[int] = None,
+    ) -> None:
+        if not self.checkpoint_on_val_rrmse:
+            return
+        rrmse = float(metrics.get("val_RRMSE", float("nan")))
+        if not math.isfinite(rrmse) or rrmse >= self._best_val_rrmse:
+            return
+        model = context.get("model")
+        if model is None:
+            return
+        self._best_val_rrmse = rrmse
+        self._best_val_state_dict = copy.deepcopy(model.state_dict())
+        self._best_val_epoch = int(epoch) if epoch is not None else None
+        self._best_val_train_loss = self._to_float(context.get("loss"))
+
+    def get_val_rrmse_checkpoint(self) -> dict | None:
+        if self._best_val_state_dict is None:
+            return None
+        return {
+            "state_dict": self._best_val_state_dict,
+            "val_RRMSE": self._best_val_rrmse,
+            "epoch": self._best_val_epoch,
+            "train_loss": self._best_val_train_loss,
+        }
+
+    def _history_rec_at_or_before(self, epoch: int) -> dict | None:
+        candidates = [r for r in self._checkpoint_history if int(r["epoch"]) <= int(epoch)]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda r: int(r["epoch"]))
+
+    def should_restore_val_rrmse_checkpoint(
+        self,
+        *,
+        train_loss_best_epoch: int | None,
+        early_stopped: bool,
+    ) -> tuple[bool, str]:
+        """Restore val-best weights only when train/val curves have diverged."""
+        ckpt = self.get_val_rrmse_checkpoint()
+        if ckpt is None or self._best_val_epoch is None:
+            return False, "no validation checkpoint tracked"
+        if not self._checkpoint_history:
+            return False, "no validation history for divergence check"
+
+        best_val_epoch = int(self._best_val_epoch)
+        best_val_rrmse = float(self._best_val_rrmse)
+        tol = self.divergence_rel_tolerance
+        last = self._checkpoint_history[-1]
+        best_val_rec = next(
+            (r for r in self._checkpoint_history if int(r["epoch"]) == best_val_epoch),
+            None,
+        )
+        if best_val_rec is None:
+            return False, "best-val epoch missing from validation history"
+
+        last_rrmse = float(last["val_RRMSE"])
+        last_train = float(last["train_loss"])
+        val_at_best_train = float(best_val_rec["train_loss"])
+        val_rrmse_at_best_val = float(best_val_rec["val_RRMSE"])
+        val_nll_at_best_val = float(best_val_rec["val_NLL"])
+        last_val_nll = float(last["val_NLL"])
+
+        train_improved_since_best_val = (
+            math.isfinite(last_train)
+            and math.isfinite(val_at_best_train)
+            and last_train < val_at_best_train - 1e-6
+        )
+        val_rrmse_worsened = (
+            math.isfinite(last_rrmse)
+            and math.isfinite(val_rrmse_at_best_val)
+            and last_rrmse > val_rrmse_at_best_val * (1.0 + tol)
+        )
+        val_nll_worsened = (
+            math.isfinite(last_val_nll)
+            and math.isfinite(val_nll_at_best_val)
+            and last_val_nll > val_nll_at_best_val + abs(val_nll_at_best_val) * tol
+        )
+        divergence = train_improved_since_best_val and (val_rrmse_worsened or val_nll_worsened)
+
+        wrong_train_checkpoint = False
+        if train_loss_best_epoch is not None:
+            train_best_epoch = int(train_loss_best_epoch)
+            if train_best_epoch > best_val_epoch:
+                train_best_rec = next(
+                    (r for r in self._checkpoint_history if int(r["epoch"]) == train_best_epoch),
+                    None,
+                )
+                if train_best_rec is None:
+                    train_best_rec = self._history_rec_at_or_before(train_best_epoch)
+                if train_best_rec is not None:
+                    train_best_val_rrmse = float(train_best_rec["val_RRMSE"])
+                    wrong_train_checkpoint = (
+                        math.isfinite(train_best_val_rrmse)
+                        and train_best_val_rrmse > best_val_rrmse * (1.0 + tol)
+                    )
+
+        if divergence:
+            return (
+                True,
+                "train/val divergence detected "
+                f"(val_RRMSE {val_rrmse_at_best_val:.4f}@epoch {best_val_epoch + 1} "
+                f"-> {last_rrmse:.4f}@epoch {int(last['epoch']) + 1})",
+            )
+        if wrong_train_checkpoint and (early_stopped or train_improved_since_best_val):
+            return (
+                True,
+                "train-loss-best epoch "
+                f"{int(train_loss_best_epoch) + 1} has worse val_RRMSE than "
+                f"best-val epoch {best_val_epoch + 1}",
+            )
+        return False, "train and validation metrics remain aligned"
 
     def _compute_batched_validation_metrics(
         self,
@@ -4541,7 +4689,10 @@ class ValidationMetricsCallback(Callback):
         if lbfgs_iter is not None:
             parts.append(f"LBFGS iter {lbfgs_iter}")
         elif epoch is not None:
-            parts.append(f"Epoch {epoch}")
+            trainer = context.get("trainer", self._trainer)
+            total = getattr(trainer, "num_epochs", None) if trainer is not None else None
+            epoch_1 = int(epoch) + 1
+            parts.append(f"Epoch {epoch_1}/{total}" if total else f"Epoch {epoch_1}")
         if train_loss is not None:
             parts.append(f"train_loss={train_loss:.4f}")
         parts.append(f"val_NLL={metrics['val_NLL']:.4f}")
@@ -4559,7 +4710,9 @@ class ValidationMetricsCallback(Callback):
             compact = self._format_compact_diag(val_diag)
             if compact:
                 parts.append(compact)
-        print(" | ".join(parts))
+        from ..config import logger
+
+        logger.info("%s", " | ".join(parts))
 
     def on_train_start(self, context: dict) -> None:
         self._trainer = context.get("trainer")
@@ -4567,16 +4720,31 @@ class ValidationMetricsCallback(Callback):
         self._fold_index = context.get("fold_index", self._fold_index)
         self._train_mode = context.get("train_mode", self._train_mode)
         self._records = []
+        self._checkpoint_history = []
         self._prev_val_nll = None
+        self._best_val_rrmse = float("inf")
+        self._best_val_state_dict = None
+        self._best_val_epoch = None
+        self._best_val_train_loss = None
 
     def on_epoch_end(self, context: dict) -> None:
         if self._lbfgs_registered:
             return
         epoch = context.get("epoch", 0)
-        if epoch != 0 and (epoch % self.log_every_n_epochs) != 0:
+        log_this_epoch = epoch == 0 or (epoch % self.val_log_every_n_epochs) == 0
+        checkpoint_this_epoch = self.checkpoint_on_val_rrmse and (
+            epoch == 0 or (epoch % self.checkpoint_every_n_epochs) == 0
+        )
+        if not log_this_epoch and not checkpoint_this_epoch:
             return
-        metrics = self._compute_and_record(context, epoch=epoch)
-        self._print_metrics(context, metrics, epoch=epoch)
+        metrics = self._compute_and_record(
+            context,
+            epoch=epoch,
+            append_record=log_this_epoch,
+            track_checkpoint_history=checkpoint_this_epoch,
+        )
+        if log_this_epoch:
+            self._print_metrics(context, metrics, epoch=epoch)
 
     def register_with_optimizer(self, optimizer, model=None, trainer=None) -> None:
         from .optimizers import LBFGSScipy
@@ -4617,4 +4785,11 @@ class ValidationMetricsCallback(Callback):
         self._run_index = context.get("run_index", self._run_index)
 
     def get_stored_parameters(self):
-        return {"records": self._records.copy()}
+        out: dict = {"records": self._records.copy()}
+        if self._best_val_state_dict is not None:
+            out["best_val_checkpoint"] = {
+                "val_RRMSE": self._best_val_rrmse,
+                "epoch": self._best_val_epoch,
+                "train_loss": self._best_val_train_loss,
+            }
+        return out
