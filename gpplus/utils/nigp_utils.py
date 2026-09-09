@@ -398,6 +398,7 @@ def posterior_mean_grad_wrt_x_mt(
     *,
     train_x: Tensor | None = None,
     jitter: float = 1e-6,
+    feature_weights: Tensor | None = None,
 ) -> Tensor:
     """
     Detached Jacobian ``∇_x μ`` of the multitask Woodbury posterior mean.
@@ -408,33 +409,76 @@ def posterior_mean_grad_wrt_x_mt(
         μ(x) = m(x) + unflatten(Ω(x) v)
 
     and differentiates only through ``m`` and spatial features.
+
+    When ``feature_weights`` is provided it must be the frozen homoskedastic ``v``
+    for ``train_x`` (or ``x`` when ``train_x`` is omitted), skipping the train solve.
+    For LogScaleKernel+RFF with an x-independent mean, uses an analytic RFF
+    Jacobian; otherwise falls back to per-task autograd.
     """
     from .rff_utils import (
         icm_omega_matvec,
         unflatten_multitask_targets,
     )
+    from .woodbury_mll_autograd import (
+        featurize_rbf_scaled_omega,
+        rff_grad_mu_from_proj,
+    )
 
     weight_x = (train_x if train_x is not None else x).detach()
     noise_mu = task_noises.detach()
     with torch.no_grad():
-        phi_det = model.scaled_spatial_features(weight_x)
         r_b = model.task_psd_factor().detach()
-        n_train = weight_x.shape[0]
-        v = _posterior_feature_weights_homoskedastic_mt(
-            noise_mu,
-            phi_det,
-            r_b,
-            n_train,
-            y_centered.detach(),
-            jitter=jitter,
-        )
+        if feature_weights is None:
+            phi_det = model.scaled_spatial_features(weight_x)
+            n_train = weight_x.shape[0]
+            v = _posterior_feature_weights_homoskedastic_mt(
+                noise_mu,
+                phi_det,
+                r_b,
+                n_train,
+                y_centered.detach(),
+                jitter=jitter,
+            )
+        else:
+            v = feature_weights.detach()
+
+    mean_module = getattr(model, "mean_module", None)
+    params = _rff_logscale_params(model)
+    if (
+        params is not None
+        and mean_module is not None
+        and _mean_independent_of_x(mean_module)
+    ):
+        lengthscale, outputscale, randn_weights, num_samples = params
+        x_det = x.detach()
+        with torch.no_grad():
+            _phi, proj, omega, scale_out = featurize_rbf_scaled_omega(
+                x_det,
+                randn_weights,
+                lengthscale,
+                outputscale,
+                num_samples,
+            )
+            # μ_t = φᵀ w_t with w = V @ R_B^T, V = v.view(m, T)
+            m = int(_phi.shape[-1])
+            t = int(r_b.shape[-1])
+            v_mat = v.detach().to(dtype=proj.dtype).reshape(m, t)
+            w_mt = v_mat @ r_b.to(dtype=proj.dtype).transpose(-1, -2)  # (m, T)
+            grads = []
+            for task in range(t):
+                grads.append(
+                    rff_grad_mu_from_proj(
+                        proj, omega, scale_out, w_mt[:, task], num_samples
+                    )
+                )
+            return torch.stack(grads, dim=1).to(dtype=x.dtype).detach()
 
     x_req = x.detach().requires_grad_(True)
     phi = model.scaled_spatial_features(x_req)
     mean = model.mean_module(x_req)
     num_tasks = int(mean.shape[-1])
     v_b = v.detach().to(dtype=phi.dtype)
-    r_b_b = model.task_psd_factor().detach().to(dtype=phi.dtype)
+    r_b_b = r_b.to(dtype=phi.dtype)
     f_flat = icm_omega_matvec(phi, r_b_b, v_b)
     f_mt = unflatten_multitask_targets(f_flat, num_tasks)
     mu = mean + f_mt

@@ -65,6 +65,7 @@ S3_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
 
 # S4 EMIT: cos_i from obs, cwv from ISOFIT state (90–100% snow subset).
 S4_LOGIT_BOUNDS: dict[str, tuple[float, float]] = {
+    "aot": (0.017, 0.61),
     "cos_i": (0.06, 1.0),
     "cwv": (0.05, 0.70),
 }
@@ -80,10 +81,12 @@ S4_TASK_NAMES: tuple[str, ...] = (
     "fNPV",
     "fsoil",
     "cwv",
+    "aot",
 )
 
 S4_SPECTRAL_DIM = 285
-S4_AUX_INPUT_NAMES: tuple[str, ...] = ("coszen", "ele_km", "RAA_TRUE")
+# RAA omitted: fixed at 0° in current snow-TOA / ASD sets (constant aux is useless).
+S4_AUX_INPUT_NAMES: tuple[str, ...] = ("coszen", "ele_km")
 S4_INPUT_DIM = S4_SPECTRAL_DIM + len(S4_AUX_INPUT_NAMES)
 
 # Band-config JSON keys use liquid_water; S4 task name is lwc.

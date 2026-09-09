@@ -118,3 +118,140 @@ def test_posterior_mean_grad_mt_finite():
         )
     assert g.shape == (x.shape[0], model.num_tasks, x.shape[-1])
     assert torch.isfinite(g).all()
+
+
+def test_analytic_mt_grad_mu_matches_autograd():
+    """Analytic ICM+RFF ∇μ matches the per-task autograd fallback."""
+    import gpplus.utils.nigp_utils as nigp_u
+
+    model, x, y = _make_mt_problem(rank_kernel=1, nigp=True, seed=6)
+    mean = model.mean_module(x)
+    y_c = (y - mean).reshape(-1)
+    tn = model.task_noises()
+
+    g_an = posterior_mean_grad_wrt_x_mt(model, x, y_c, tn, jitter=1e-6)
+
+    orig = nigp_u._rff_logscale_params
+    nigp_u._rff_logscale_params = lambda _m: None
+    try:
+        g_ref = posterior_mean_grad_wrt_x_mt(model, x, y_c, tn, jitter=1e-6)
+    finally:
+        nigp_u._rff_logscale_params = orig
+
+    assert g_an.shape == g_ref.shape
+    assert torch.allclose(g_an, g_ref, rtol=1e-8, atol=1e-8)
+
+
+def test_middle_matrix_blocked_matches_kron():
+    n, m, t = 12, 8, 3
+    g = torch.Generator().manual_seed(7)
+    phi = torch.randn(n, m, generator=g, dtype=torch.float64)
+    a = torch.randn(t, t, generator=g, dtype=torch.float64)
+    r_b = torch.linalg.cholesky(a @ a.T + torch.eye(t, dtype=torch.float64))
+    d = 0.05 + torch.rand(n, t, generator=g, dtype=torch.float64)
+
+    from gpplus.utils.rff_utils import woodbury_middle_matrix_mt_diag_noise
+
+    m_blocked = woodbury_middle_matrix_mt_diag_noise(d, phi, r_b, jitter=1e-6)
+    # Reference kron accumulation
+    inv = d.clamp_min(1e-12).reciprocal()
+    eye = torch.eye(m * t, dtype=torch.float64)
+    m_ref = eye.clone()
+    for task in range(t):
+        g_t = phi.T @ (phi * inv[:, task].unsqueeze(-1))
+        outer = torch.outer(r_b[task], r_b[task])
+        m_ref = m_ref + torch.kron(g_t, outer)
+    m_ref = m_ref + 1e-6 * eye
+    assert torch.allclose(m_blocked, m_ref, rtol=1e-10, atol=1e-10)
+
+
+def test_mt_diag_custom_autograd_matches_reference():
+    """Custom MT diag MLL value/grads match stock Chol autodiff."""
+    from gpplus.utils.rff_utils import woodbury_marginal_log_likelihood_mt_diag_noise
+    from gpplus.utils.woodbury_mll_autograd import woodbury_mt_diag_mll_apply
+
+    n, m, t = 16, 10, 3
+    g = torch.Generator().manual_seed(8)
+    phi0 = torch.randn(n, m, generator=g, dtype=torch.float64)
+    a = torch.randn(t, t, generator=g, dtype=torch.float64)
+    r0 = torch.linalg.cholesky(a @ a.T + torch.eye(t, dtype=torch.float64))
+    d0 = 0.08 + torch.rand(n, t, generator=g, dtype=torch.float64)
+    y0 = torch.randn(n * t, generator=g, dtype=torch.float64)
+
+    def _grads(fn):
+        phi = phi0.detach().clone().requires_grad_(True)
+        r_b = r0.detach().clone().requires_grad_(True)
+        d = d0.detach().clone().requires_grad_(True)
+        y = y0.detach().clone().requires_grad_(True)
+        mll = fn(d, phi, r_b, y)
+        mll.backward()
+        return (
+            mll.detach(),
+            d.grad.detach(),
+            phi.grad.detach(),
+            r_b.grad.detach(),
+            y.grad.detach(),
+        )
+
+    mll_c, gd_c, gp_c, gr_c, gy_c = _grads(
+        lambda d, phi, r_b, y: woodbury_mt_diag_mll_apply(d, phi, r_b, y, jitter=1e-6)
+    )
+    mll_r, gd_r, gp_r, gr_r, gy_r = _grads(
+        lambda d, phi, r_b, y: woodbury_marginal_log_likelihood_mt_diag_noise(
+            d, phi, r_b, n, y, jitter=1e-6
+        )
+    )
+    assert torch.allclose(mll_c, mll_r, rtol=1e-8, atol=1e-8)
+    assert torch.allclose(gd_c, gd_r, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(gp_c, gp_r, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(gr_c, gr_r, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(gy_c, gy_r, rtol=1e-5, atol=1e-5)
+
+
+def test_predict_diag_factor_reuse_matches():
+    """Precomputed Chol/α predict matches factoring inside the helper."""
+    from gpplus.utils.rff_utils import (
+        icm_omega_rmatvec,
+        woodbury_factor_mt_diag_noise,
+        woodbury_predict_mt_diag_noise,
+        woodbury_solve_mt_diag_noise_from_chol,
+    )
+
+    model, x, y = _make_mt_problem(n=24, rank_kernel=1, nigp=True, seed=9)
+    phi = model.scaled_spatial_features(x)
+    r_b = model.task_psd_factor().detach()
+    mean = model.mean_module(x)
+    y_c = (y - mean).reshape(-1)
+    tn = model.task_noises().detach()
+    g = torch.Generator().manual_seed(10)
+    grad_mu = torch.randn(x.shape[0], model.num_tasks, x.shape[-1], generator=g, dtype=x.dtype)
+    d_nt = effective_noise_variance_mt(tn, model.input_noise_var.detach(), grad_mu)
+
+    # Split train/test
+    n_tr = 16
+    phi_tr, phi_te = phi[:n_tr], phi[n_tr:]
+    d_tr, d_te = d_nt[:n_tr], d_nt[n_tr:]
+    y_tr = y_c[: n_tr * model.num_tasks]
+
+    ref = woodbury_predict_mt_diag_noise(
+        d_tr, phi_tr, phi_te, r_b, n_tr, model.num_tasks, y_tr, d_test=d_te
+    )
+    chol, d_c = woodbury_factor_mt_diag_noise(d_tr, phi_tr, r_b)
+    alpha = woodbury_solve_mt_diag_noise_from_chol(d_c, phi_tr, r_b, chol, y_tr.to(chol.dtype))
+    v = icm_omega_rmatvec(phi_tr, r_b, alpha.to(phi_tr.dtype))
+    reused = woodbury_predict_mt_diag_noise(
+        d_tr,
+        phi_tr,
+        phi_te,
+        r_b,
+        n_tr,
+        model.num_tasks,
+        y_tr,
+        d_test=d_te,
+        chol=chol,
+        d_factor=d_c,
+        alpha=alpha,
+        feature_weights=v,
+    )
+    for a, b in zip(ref, reused):
+        assert torch.allclose(a, b, rtol=1e-8, atol=1e-8)

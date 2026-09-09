@@ -508,7 +508,8 @@ def evaluate_rff_mt_gp_model(
     middle matrix once per call and reuses it across test chunks.
 
     When ``model.nigp`` correction is enabled, uses per-(i,t) diag-noise Woodbury
-    with McHutchon effective noise on train and test.
+    with McHutchon effective noise on train and test. Train ``Chol(M)`` / ``α`` /
+    feature weights are computed once per call and reused across test chunks.
 
     Returns mean, lower, upper, stddev each of shape ``(n_test, T)``.
     If ``return_latent_var`` is True, also returns latent ``f_var`` (before adding noise).
@@ -553,18 +554,58 @@ def evaluate_rff_mt_gp_model(
 
         if use_nigp:
             from ..utils.nigp_utils import (
+                _posterior_feature_weights_homoskedastic_mt,
                 effective_noise_variance_mt,
                 posterior_mean_grad_wrt_x_mt,
             )
-            from ..utils.rff_utils import woodbury_predict_mt_diag_noise
+            from ..utils.rff_utils import (
+                _task_factor_is_diagonal as _rb_diag,
+                icm_omega_rmatvec,
+                woodbury_factor_mt_diag_noise,
+                woodbury_predict_mt_diag_noise,
+                woodbury_solve_mt_diag_noise_from_chol,
+            )
 
+            # Homoskedastic feature weights once (shared by train/test ∇μ).
+            homo_v = _posterior_feature_weights_homoskedastic_mt(
+                task_noises.detach(),
+                phi_train,
+                r_b.detach(),
+                n_train,
+                y_centered.detach(),
+                jitter=jitter,
+            )
             with torch.enable_grad():
                 grad_mu_train = posterior_mean_grad_wrt_x_mt(
-                    model, train_x, y_centered, task_noises, jitter=jitter
+                    model,
+                    train_x,
+                    y_centered,
+                    task_noises,
+                    jitter=jitter,
+                    feature_weights=homo_v,
                 )
             d_train = effective_noise_variance_mt(
                 task_noises, model.input_noise_var, grad_mu_train
             )
+            # Factor train Σ once; reuse Chol/α/v across test chunks.
+            if _rb_diag(r_b):
+                nigp_chol = nigp_d_c = nigp_alpha = nigp_v = None
+            else:
+                nigp_chol, nigp_d_c = woodbury_factor_mt_diag_noise(
+                    d_train, phi_train, r_b, jitter=jitter
+                )
+                nigp_alpha = woodbury_solve_mt_diag_noise_from_chol(
+                    nigp_d_c,
+                    phi_train,
+                    r_b,
+                    nigp_chol,
+                    y_centered.to(dtype=nigp_chol.dtype),
+                )
+                nigp_v = icm_omega_rmatvec(
+                    phi_train.to(dtype=phi_train.dtype),
+                    r_b.to(dtype=phi_train.dtype),
+                    nigp_alpha.to(dtype=phi_train.dtype),
+                )
 
             for start in range(0, n_test, step):
                 chunk_x = test_x[start : start + step]
@@ -577,6 +618,7 @@ def evaluate_rff_mt_gp_model(
                         task_noises,
                         train_x=train_x,
                         jitter=jitter,
+                        feature_weights=homo_v,
                     )
                 d_test = effective_noise_variance_mt(
                     task_noises, model.input_noise_var, grad_mu_test
@@ -591,6 +633,10 @@ def evaluate_rff_mt_gp_model(
                     y_centered,
                     jitter=jitter,
                     d_test=d_test,
+                    chol=nigp_chol,
+                    d_factor=nigp_d_c,
+                    alpha=nigp_alpha,
+                    feature_weights=nigp_v,
                 )
                 f_mean = f_mean + model.mean_module(chunk_x)
                 mean_chunks.append(f_mean)

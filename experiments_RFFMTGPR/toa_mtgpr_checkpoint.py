@@ -14,6 +14,22 @@ from gpplus.utils import StandardScaler, UniformScaler
 
 CHECKPOINT_VERSION = 1
 
+# model_config also carries run metadata (aux, bands, slope refreshes, ...);
+# only these keys are RFFMTGPR constructor arguments.
+_RFFMTGPR_INIT_KEYS = (
+    "num_tasks",
+    "num_rff",
+    "ard",
+    "rff_sampling",
+    "correct_sorf",
+    "spectral_kernel",
+    "rank_kernel",
+    "rank_likelihood",
+    "nigp",
+    "input_noise_init",
+    "batch_shape",
+)
+
 
 def scaler_to_dict(scaler: StandardScaler | UniformScaler | None) -> dict[str, Any] | None:
     if scaler is None:
@@ -171,10 +187,11 @@ def load_toa_mtgpr_checkpoint(path: str | Path, device: str = "cpu") -> ToaMtgpr
 
     dtype = _dtype_from_str(payload["dtype"])
     model_config = dict(payload["model_config"])
+    init_kwargs = {k: v for k, v in model_config.items() if k in _RFFMTGPR_INIT_KEYS}
     train_x = payload["train_x"].to(dtype=dtype, device=device)
     train_y = payload["train_y"].to(dtype=dtype, device=device)
 
-    model = RFFMTGPR(train_x, train_y, **model_config)
+    model = RFFMTGPR(train_x, train_y, **init_kwargs)
     model.load_state_dict(payload["state_dict"])
     model = model.to(device=device, dtype=dtype)
     model.eval()

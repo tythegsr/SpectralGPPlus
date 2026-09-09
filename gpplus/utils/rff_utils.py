@@ -1885,7 +1885,8 @@ def woodbury_middle_matrix_mt_diag_noise(
     ``M = I + Ωᵀ Λ⁻¹ Ω`` for ``Λ = diag(d)``, ``Ω = Φ ⊗ R_B``.
 
     Uses ``M = I + Σ_t kron(G^{(t)}, r_t r_tᵀ)`` with
-    ``G^{(t)} = Φᵀ diag(1/d_{:,t}) Φ``.
+    ``G^{(t)} = Φᵀ diag(1/d_{:,t}) Φ``. Weighted Grams are formed in ``phi``
+    dtype (mixed precision); ``M`` accumulates in the caller's dtype.
     """
     n, m = phi.shape[-2], phi.shape[-1]
     t = r_b.shape[-2]
@@ -1895,11 +1896,17 @@ def woodbury_middle_matrix_mt_diag_noise(
     eye = torch.eye(m_r, device=phi.device, dtype=phi.dtype)
     middle = eye.clone()
     inv = d_nt.reciprocal()
+    # View as (m, r, m, r) for blocked Kronecker accumulation.
+    middle_blocks = middle.view(m, r, m, r)
     for task in range(t):
-        g_t = phi.transpose(-1, -2) @ (phi * inv[:, task].unsqueeze(-1))
-        r_t = r_b[task]
-        outer = torch.outer(r_t, r_t)
-        middle = middle + torch.kron(g_t.contiguous(), outer.contiguous())
+        # Gram in phi dtype; cast once into M dtype.
+        g_t = phi.transpose(-1, -2) @ (phi * inv[:, task].unsqueeze(-1).to(dtype=phi.dtype))
+        g_t = g_t.to(dtype=middle.dtype)
+        r_t = r_b[task].to(dtype=middle.dtype)
+        # kron(G, r rᵀ)_{ia,jb} = G_ij * r_a * r_b
+        middle_blocks.add_(
+            g_t.unsqueeze(1).unsqueeze(3) * r_t.view(1, r, 1, 1) * r_t.view(1, 1, 1, r)
+        )
     if jitter > 0:
         middle = middle + jitter * eye
     return middle
@@ -1914,18 +1921,42 @@ def woodbury_factor_mt_diag_noise(
     """
     Cholesky of ``M = I + Ωᵀ Λ⁻¹ Ω`` for general per-(i,t) diag noise.
 
-    Returns ``(chol, d_nt)`` with ``d_nt`` clamped ``(n, T)`` in ``phi`` / factor dtype.
+    Returns ``(chol, d_nt)`` with ``d_nt`` clamped ``(n, T)`` in factor dtype.
+    Weighted Grams use ``phi`` dtype; only the middle factor is promoted.
     """
     n = phi.shape[-2]
     t = r_b.shape[-2]
     d_nt = _coerce_mt_diag_noise(d, n, t)
     lin_dtype = _woodbury_linalg_dtype(phi.dtype)
-    phi_c = phi.to(dtype=lin_dtype)
+    # Keep phi in its dtype for Grams; promote r_b / d for M accumulation.
     r_c = r_b.to(dtype=lin_dtype)
     d_c = d_nt.to(dtype=lin_dtype)
 
     def build_middle(j: float) -> Tensor:
-        return woodbury_middle_matrix_mt_diag_noise(d_c, phi_c, r_c, jitter=j)
+        # Form M in lin_dtype: Grams stay in phi.dtype inside the helper via phi,
+        # then cast blocks into lin_dtype eye.
+        n_loc, m_loc = phi.shape[-2], phi.shape[-1]
+        t_loc = r_c.shape[-2]
+        r_loc = r_c.shape[-1]
+        d_use = d_c.clamp_min(1e-12)
+        inv = d_use.reciprocal()
+        m_r = m_loc * r_loc
+        eye = torch.eye(m_r, device=phi.device, dtype=lin_dtype)
+        middle = eye.clone()
+        blocks = middle.view(m_loc, r_loc, m_loc, r_loc)
+        inv_phi = inv.to(dtype=phi.dtype)
+        for task in range(t_loc):
+            g_t = phi.transpose(-1, -2) @ (phi * inv_phi[:, task].unsqueeze(-1))
+            g_t = g_t.to(dtype=lin_dtype)
+            r_t = r_c[task]
+            blocks.add_(
+                g_t.unsqueeze(1).unsqueeze(3)
+                * r_t.view(1, r_loc, 1, 1)
+                * r_t.view(1, 1, 1, r_loc)
+            )
+        if j > 0:
+            middle = middle + j * eye
+        return middle
 
     chol, _ = _woodbury_cholesky_factor(build_middle, jitter, max_attempts=12, jitter_scale=10.0)
     return chol, d_c
@@ -2022,6 +2053,50 @@ def woodbury_marginal_log_likelihood_mt_diag_noise(
     return const - 0.5 * quad - 0.5 * (log_det_lam + log_det_m)
 
 
+def woodbury_predict_mt_diag_noise_from_factor(
+    chol: Tensor,
+    d_c: Tensor,
+    phi_train: Tensor,
+    phi_test: Tensor,
+    r_b: Tensor,
+    num_tasks: int,
+    alpha: Tensor,
+    *,
+    feature_weights: Tensor | None = None,
+    d_test: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """
+    Predict from a precomputed diag-noise Chol(``M``) and ``α = Σ⁻¹ y``.
+
+    ``feature_weights`` is ``v = Ωᵀ α`` when already available (avoids a train
+    rmatvec per chunk). Latent variance uses a structured multi-RHS solve so
+    full ``Ω_*`` is not required for the mean path; variance still forms a
+    test-chunk ``Ω_*`` for the quadratic form (chunk-sized, not re-factored).
+    """
+    r_f = r_b.to(dtype=phi_train.dtype)
+    phi_tr_f = phi_train.to(dtype=phi_train.dtype)
+    phi_te_f = phi_test.to(dtype=phi_train.dtype)
+    if feature_weights is None:
+        v = icm_omega_rmatvec(phi_tr_f, r_f, alpha.to(dtype=phi_train.dtype))
+    else:
+        v = feature_weights.to(dtype=phi_train.dtype)
+    mean_flat = icm_omega_matvec(phi_te_f, r_f, v)
+    # Latent var: diag(Ω_* M^{-1} Ω_*^T) via chunk-sized Ω_* (Chol reused).
+    omega_star = build_icm_joint_features(
+        phi_test.to(dtype=chol.dtype), r_b.to(dtype=chol.dtype)
+    )
+    solved = torch.cholesky_solve(omega_star.transpose(-1, -2), chol)
+    var_flat = (omega_star * solved.transpose(-1, -2)).sum(dim=-1).clamp_min(0.0)
+    f_mean = unflatten_multitask_targets(mean_flat, num_tasks)
+    f_var = unflatten_multitask_targets(var_flat.to(dtype=phi_test.dtype), num_tasks)
+    if d_test is None:
+        obs_std = f_var.clamp_min(0.0).sqrt()
+    else:
+        d_te = _coerce_mt_diag_noise(d_test, phi_test.shape[-2], num_tasks)
+        obs_std = woodbury_predictive_obs_std(f_var, d_te)
+    return f_mean, f_var, obs_std
+
+
 def woodbury_predict_mt_diag_noise(
     d_train: Tensor,
     phi_train: Tensor,
@@ -2032,12 +2107,20 @@ def woodbury_predict_mt_diag_noise(
     y_centered: Tensor,
     jitter: float = 1e-6,
     d_test: Tensor | None = None,
+    *,
+    chol: Tensor | None = None,
+    d_factor: Tensor | None = None,
+    alpha: Tensor | None = None,
+    feature_weights: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """
     Posterior mean ``(n*, T)``, latent var ``(n*, T)``, obs std ``(n*, T)``.
 
     Observation std uses ``d_test`` when provided (NIGP), else train task-averaged
     is not used — caller should pass ``d_test`` or use latent-only intervals.
+
+    Optional ``chol`` / ``d_factor`` / ``alpha`` / ``feature_weights`` reuse a
+    train factorization across test chunks (eval hot path).
     """
     d_nt = _coerce_mt_diag_noise(d_train, n_train, num_tasks)
     y_flat = flatten_multitask_targets(y_centered)
@@ -2073,27 +2156,22 @@ def woodbury_predict_mt_diag_noise(
         obs_std = torch.stack(stds, dim=-1)
         return f_mean, f_var, obs_std
 
-    chol, d_c = woodbury_factor_mt_diag_noise(d_nt, phi_train, r_b, jitter=jitter)
-    alpha = woodbury_solve_mt_diag_noise_from_chol(
-        d_c, phi_train, r_b, chol, y_flat.to(dtype=chol.dtype)
-    )
-    # μ_* = Ω_* Ωᵀ α
-    r_f = r_b.to(dtype=phi_train.dtype)
-    phi_tr_f = phi_train.to(dtype=phi_train.dtype)
-    phi_te_f = phi_test.to(dtype=phi_train.dtype)
-    v = icm_omega_rmatvec(phi_tr_f, r_f, alpha.to(dtype=phi_train.dtype))
-    mean_flat = icm_omega_matvec(phi_te_f, r_f, v)
-    # Latent var via Chol(M) on materialised Ω_* (test chunk sized).
-    omega_star = build_icm_joint_features(
-        phi_test.to(dtype=chol.dtype), r_b.to(dtype=chol.dtype)
-    )
-    solved = torch.cholesky_solve(omega_star.transpose(-1, -2), chol)
-    var_flat = (omega_star * solved.transpose(-1, -2)).sum(dim=-1).clamp_min(0.0)
-    f_mean = unflatten_multitask_targets(mean_flat, num_tasks)
-    f_var = unflatten_multitask_targets(var_flat.to(dtype=phi_test.dtype), num_tasks)
-    if d_test is None:
-        obs_std = f_var.clamp_min(0.0).sqrt()
+    if chol is None or d_factor is None:
+        chol, d_c = woodbury_factor_mt_diag_noise(d_nt, phi_train, r_b, jitter=jitter)
     else:
-        d_te = _coerce_mt_diag_noise(d_test, phi_test.shape[-2], num_tasks)
-        obs_std = woodbury_predictive_obs_std(f_var, d_te)
-    return f_mean, f_var, obs_std
+        d_c = d_factor
+    if alpha is None:
+        alpha = woodbury_solve_mt_diag_noise_from_chol(
+            d_c, phi_train, r_b, chol, y_flat.to(dtype=chol.dtype)
+        )
+    return woodbury_predict_mt_diag_noise_from_factor(
+        chol,
+        d_c,
+        phi_train,
+        phi_test,
+        r_b,
+        num_tasks,
+        alpha,
+        feature_weights=feature_weights,
+        d_test=d_test,
+    )

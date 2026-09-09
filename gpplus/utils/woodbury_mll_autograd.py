@@ -877,3 +877,194 @@ def woodbury_dual_rff_diag_mll_apply(
         x.new_tensor(float(num_samples)),
         x.new_tensor(float(jitter)),
     )
+
+
+# ---------------------------------------------------------------------------
+# Multitask ICM diag-noise Woodbury (NIGP) — closed-form grads, no Chol VJP
+# ---------------------------------------------------------------------------
+
+
+def _mt_diag_mll_backward_terms(
+    chol: Tensor,
+    d_nt: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    alpha: Tensor,
+    *,
+    chunk_size: int = 128,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Analytic pieces for ``ℓ = log N(y; 0, diag(d)+ΩΩᵀ)``, ``Ω = Φ ⊗ R_B``.
+
+    Returns ``(diag_sinv, grad_phi_base, grad_r_b_base, v)`` where
+    ``∇_Φ ℓ = grad_output * grad_phi_base``, etc., and
+    ``∂ℓ/∂d_p = grad_output * (-½)(diag_sinv_p − α_p²)``.
+    """
+    from .rff_utils import build_icm_joint_features, icm_omega_rmatvec
+
+    n, m = phi.shape[-2], phi.shape[-1]
+    t = r_b.shape[-1]
+    dtype = chol.dtype
+    device = chol.device
+    phi_f = phi.to(dtype=dtype)
+    r_f = r_b.to(dtype=dtype)
+    d_f = d_nt.to(dtype=dtype).clamp_min(1e-12)
+    alpha_f = alpha.to(dtype=dtype)
+    if alpha_f.dim() > 1:
+        alpha_f = alpha_f.reshape(-1)
+    a_mt = alpha_f.reshape(n, t)
+    inv_d = d_f.reciprocal()
+
+    v = icm_omega_rmatvec(phi_f, r_f, alpha_f)
+    v_mat = v.reshape(m, t)
+    # α vᵀ contracted through Kronecker → Φ and R_B
+    av_phi = (a_mt @ r_f) @ v_mat.transpose(-1, -2)
+    av_rb = (phi_f.transpose(-1, -2) @ a_mt).transpose(-1, -2) @ v_mat
+
+    diag_sinv = torch.empty(n, t, device=device, dtype=dtype)
+    corr_phi = torch.zeros(n, m, device=device, dtype=dtype)
+    corr_rb = torch.zeros(t, t, device=device, dtype=dtype)
+    step = max(1, int(chunk_size))
+    for start in range(0, n, step):
+        end = min(start + step, n)
+        phi_c = phi_f[start:end]
+        c = end - start
+        omega_c = build_icm_joint_features(phi_c, r_f)
+        solved = torch.cholesky_solve(omega_c.transpose(-1, -2), chol)
+        quad = (omega_c * solved.transpose(-1, -2)).sum(dim=-1).view(c, t)
+        inv_c = inv_d[start:end]
+        diag_sinv[start:end] = inv_c - quad * (inv_c * inv_c)
+        # W = Λ^{-1} Ω M^{-1} = (Ω M^{-1}) / d ; solved = M^{-1} Ωᵀ
+        w = solved.transpose(-1, -2) * inv_c.reshape(c * t, 1)
+        w4 = w.view(c, t, m, t)
+        corr_phi[start:end] = (w4 * r_f.view(1, t, 1, t)).sum(dim=(1, 3))
+        corr_rb = corr_rb + torch.einsum("ctms,cm->ts", w4, phi_c)
+
+    grad_phi = av_phi - corr_phi
+    grad_rb = av_rb - corr_rb
+    return diag_sinv, grad_phi, grad_rb, v
+
+
+class WoodburyMTDiagMLL(torch.autograd.Function):
+    """
+    Multitask diag-noise Woodbury MLL with closed-form grads (no Chol VJP).
+
+    Forward matches ``woodbury_marginal_log_likelihood_mt_diag_noise`` (dense
+    Chol of ``M``). Backward uses matrix-calculus grads w.r.t. ``d``, ``Φ``,
+    ``R_B``, and ``y``.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        d: Tensor,
+        phi: Tensor,
+        r_b: Tensor,
+        y_centered: Tensor,
+        jitter: Tensor,
+    ) -> Tensor:
+        from .rff_utils import (
+            _coerce_mt_diag_noise,
+            flatten_multitask_targets,
+            woodbury_factor_mt_diag_noise,
+            woodbury_solve_mt_diag_noise_from_chol,
+        )
+
+        jitter_f = float(jitter.detach().item())
+        n = phi.shape[-2]
+        t = r_b.shape[-2]
+        d_nt = _coerce_mt_diag_noise(d, n, t)
+        y_shape = tuple(y_centered.shape)
+        y_flat = flatten_multitask_targets(
+            y_centered if y_centered.dim() > 1 else y_centered.reshape(n, t)
+        )
+        if y_flat.numel() != n * t:
+            raise ValueError(
+                f"y_centered has {y_flat.numel()} elems, expected n*T={n * t}"
+            )
+
+        below_floor = d_nt < 1e-12
+        with torch.no_grad():
+            chol, d_c = woodbury_factor_mt_diag_noise(
+                d_nt.detach(), phi.detach(), r_b.detach(), jitter=jitter_f
+            )
+            y_f = y_flat.detach().to(dtype=chol.dtype)
+            alpha = woodbury_solve_mt_diag_noise_from_chol(
+                d_c, phi.detach(), r_b.detach(), chol, y_f
+            )
+            if alpha.dim() > 1:
+                alpha = alpha.reshape(-1)
+            quad = (y_f * alpha).sum()
+            log_det_lam = d_c.log().sum()
+            log_det_m = 2.0 * torch.diagonal(chol, dim1=-2, dim2=-1).log().sum()
+            n_t = float(y_f.numel())
+            const = -0.5 * n_t * math.log(2.0 * math.pi)
+            mll = const - 0.5 * quad - 0.5 * (log_det_lam + log_det_m)
+
+        ctx.save_for_backward(chol, d_c, phi.detach(), r_b.detach(), alpha, y_f)
+        ctx.below_floor = below_floor
+        ctx.n = n
+        ctx.t = t
+        ctx.d_shape = tuple(d.shape)
+        ctx.y_shape = y_shape
+        ctx.d_dtype = d.dtype
+        ctx.phi_dtype = phi.dtype
+        ctx.rb_dtype = r_b.dtype
+        ctx.y_dtype = y_centered.dtype
+        return mll.to(dtype=y_centered.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        chol, d_c, phi, r_b, alpha, y_f = ctx.saved_tensors
+        n, t = ctx.n, ctx.t
+        needs = ctx.needs_input_grad
+        grad_d = grad_phi = grad_rb = grad_y = None
+
+        if not any(needs[:4]):
+            return None, None, None, None, None
+
+        diag_sinv, g_phi, g_rb, _v = _mt_diag_mll_backward_terms(
+            chol, d_c, phi, r_b, alpha
+        )
+        scale = grad_output.reshape(())
+
+        if needs[0]:
+            a_mt = alpha.reshape(n, t)
+            g_d = -0.5 * (diag_sinv - a_mt * a_mt) * scale
+            below = ctx.below_floor
+            if below.shape != g_d.shape:
+                below = below.reshape(g_d.shape)
+            g_d = torch.where(below, torch.zeros_like(g_d), g_d)
+            g_d = g_d.to(dtype=ctx.d_dtype)
+            if g_d.shape != ctx.d_shape:
+                g_d = g_d.reshape(ctx.d_shape)
+            grad_d = g_d
+
+        if needs[1]:
+            grad_phi = (g_phi * scale).to(dtype=ctx.phi_dtype)
+
+        if needs[2]:
+            grad_rb = (g_rb * scale).to(dtype=ctx.rb_dtype)
+
+        if needs[3]:
+            g_y = (-alpha * scale).to(dtype=ctx.y_dtype)
+            grad_y = g_y.reshape(ctx.y_shape)
+
+        return grad_d, grad_phi, grad_rb, grad_y, None
+
+
+def woodbury_mt_diag_mll_apply(
+    d: Tensor,
+    phi: Tensor,
+    r_b: Tensor,
+    y_centered: Tensor,
+    jitter: float = 1e-6,
+) -> Tensor:
+    """MT ICM diag-noise Woodbury MLL with closed-form grads (NIGP hot path)."""
+    return WoodburyMTDiagMLL.apply(
+        d,
+        phi,
+        r_b,
+        y_centered,
+        phi.new_tensor(float(jitter)),
+    )

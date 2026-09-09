@@ -290,9 +290,24 @@ class RFFMTGPR(gpytorch.models.ExactGP):
         task_noises = self.task_noises()
 
         if nigp_correction_enabled(self):
+            from ..utils.nigp_utils import _posterior_feature_weights_homoskedastic_mt
+
+            homo_v = _posterior_feature_weights_homoskedastic_mt(
+                task_noises.detach(),
+                phi_train,
+                r_b.detach(),
+                n_train,
+                y_centered.detach(),
+                jitter=jitter,
+            )
             with torch.enable_grad():
                 grad_mu_train = posterior_mean_grad_wrt_x_mt(
-                    self, train_x, y_centered, task_noises, jitter=jitter
+                    self,
+                    train_x,
+                    y_centered,
+                    task_noises,
+                    jitter=jitter,
+                    feature_weights=homo_v,
                 )
             d_train = effective_noise_variance_mt(
                 task_noises, self.input_noise_var, grad_mu_train
@@ -305,6 +320,7 @@ class RFFMTGPR(gpytorch.models.ExactGP):
                     task_noises,
                     train_x=train_x,
                     jitter=jitter,
+                    feature_weights=homo_v,
                 )
             d_test = effective_noise_variance_mt(
                 task_noises, self.input_noise_var, grad_mu_test

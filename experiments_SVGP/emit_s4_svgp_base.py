@@ -1,8 +1,8 @@
-"""S4 independent SORF-GP runner (Woodbury RFFGPR, no SVGP/VIRFF).
+"""S4 independent SVGP runner (minibatch inducing-point SVGPR).
 
 Uses radiance + geometry aux (coszen, ele_km) and S4 QoI labels from
 ``emit_s4_mtgpr_base``. Accepts EMIT processed or snow-TOA simulation NetCDF
-(schema auto-detected). Trains one ``RFFGPR`` per QoI with ``rff_sampling='sorf'``.
+(schema auto-detected). Trains one ``SVGPR`` per QoI with minibatch ELBO SGD.
 """
 
 from __future__ import annotations
@@ -10,25 +10,31 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SORF_DIR = Path(__file__).resolve().parent
-_RFF_DIR = _ROOT / "experiments_RFF"
+_SVGP_DIR = Path(__file__).resolve().parent
+_GP_DIR = _ROOT / "experiments_GP"
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
-_DEFAULT_SAVE_DIR = "experiments_SORF/results/s4_emit_sorf"
+_RFF_DIR = _ROOT / "experiments_RFF"
+_DEFAULT_SAVE_DIR = "experiments_SVGP/results/s4_emit_svgp"
 
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _SORF_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _GP_DIR, _SVGP_DIR)
 
-from experiments_toa.s2_bands import band_config_metadata, load_task_band_config
+from experiments_toa.s2_bands import (
+    NComponentsSpec,
+    band_config_metadata,
+    load_task_band_config,
+    resolve_task_pca_components,
+)
 from experiments_toa.s2_constants import (
     S3_LABEL_FLOOR_THRESHOLDS,
     S4_BAND_CONFIG_ALIASES,
@@ -42,13 +48,18 @@ from experiments_toa.s2_plotting import (
     save_s2_predictions_npz,
     select_posterior_example_indices,
 )
-from experiments_toa.s2_reporting import plot_per_task_validation_curves
+from experiments_toa.s2_reporting import (
+    apply_log_scale_extra_metrics,
+    plot_per_task_validation_curves,
+)
 from experiments_toa.s2_utils import (
     compute_floor_bound_slice_metrics,
     compute_per_task_metrics,
+    extract_ard_lengthscales,
     format_floor_bound_summary,
     macro_metric,
     macro_rrmse,
+    map_ard_to_bands,
     select_bands,
 )
 from experiments_toa.s2_y_transform import (
@@ -61,32 +72,19 @@ from experiments_toa.s2_y_transform import (
 from experiments_toa.merge_emit_chunks import EMIT_STATE_FEATURE_NAMES
 from experiments_toa.emit_geometry import calc_cos_i_from_state_obs
 from experiments_toa.export_emit_as_s2 import mapped_qois
-from gpplus.models import RFFGPR
+from gpplus.models import SVGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
-    GPTrainer,
-    MinLossChangeStopCondition,
+    MinibatchGPTrainer,
     NIGPInputNoiseFreezeCallback,
-    RFFParameterInitializer,
-    evaluate_rff_gp_model,
-    nigp_woodbury_mll_class,
+    evaluate_svgp_gp_model,
 )
-from gpplus.training.optimizers import LBFGSScipy
 from gpplus.utils import StandardScaler, UniformScaler, compute_metrics, set_seed
-from experiments_RFF.rff_gp_defaults import (
-    DEFAULT_WOODBURY_FORM,
-    build_rff_scalar_noise_likelihood,
-    merge_rff_noise_initializer_kwargs,
-    rff_eval_kwargs,
-    rff_mll_class,
-    woodbury_jitter_for_dtype,
-)
 from emit_s4_mtgpr_base import (
     S4_INPUT_DIM,
     S4_SCHEMA_EMIT,
     S4_SCHEMA_SNOW_TOA,
     S4_TASK_NAMES,
-    TASK_VALID_Y_RANGE,
     _DEFAULT_EMIT_PATH,
     _DEFAULT_WL_SRC,
     _load_wavelengths_nm,
@@ -96,25 +94,23 @@ from emit_s4_mtgpr_base import (
     parse_s4_task_names,
     split_emit_s4,
 )
-from mtgpr_experiment_utils import (
+from gp_experiment_utils import (
     DEFAULT_ADAM_KWARGS,
-    DEFAULT_LBFGS_KWARGS,
-    DEFAULT_TOA_ADAM_LR,
+    extract_learned_likelihood_noise,
+    json_safe_optimizer_kwargs,
+    save_metrics_json,
+)
+from mtgpr_experiment_utils import (
     DEFAULT_TOA_ADAM_STOP_PATIENCE,
-    compute_relative_error_metrics,
     compute_prediction_coverage_metrics,
+    compute_relative_error_metrics,
     format_coverage_summary,
     format_relative_error_summary,
-    json_safe_optimizer_kwargs,
     make_train_loss_callback,
     make_validation_callback,
-    save_metrics_json,
     summarize_validation_from_runs,
 )
-from rff_experiment_utils import extract_learned_likelihood_noise
-from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
-
-RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
+from toa_svgp_checkpoint import checkpoint_path_for_run, save_toa_svgp_checkpoint
 
 
 def _task_input_columns(
@@ -142,14 +138,12 @@ def _off_floor_mask(
     return y > thr
 
 
-def run_s4_emit_sorf(
-    n_train: int = 10000,
+def run_s4_emit_svgp(
+    n_train: int = 20000,
     n_val: int = 5000,
-    num_rff: int | None = None,
-    rff_sampling: Literal["rff", "orf", "sorf"] = "sorf",
     seed: int = 42,
     num_inits: int = 1,
-    num_epochs: int = 2000,
+    num_epochs: int = 300,
     device: str = "cuda",
     dtype: torch.dtype = torch.float32,
     save_path: str | None = None,
@@ -157,7 +151,7 @@ def run_s4_emit_sorf(
     x_standardize_method: int = 2,
     standardize_y: bool = True,
     ard: bool = True,
-    predict_chunk_size: int = 2048,
+    predict_chunk_size: int = 4096,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
     monitor_validation: bool = True,
@@ -171,10 +165,10 @@ def run_s4_emit_sorf(
     wl_src: str | None = None,
     parallel_verbose: int = 10,
     training_verbose: bool = True,
-    log_every_n_epochs: int = 50,
-    val_log_every_n_epochs: int = 1,
+    log_every_n_epochs: int = 10,
+    val_log_every_n_epochs: int = 10,
     save_checkpoint: bool = True,
-    log_scale: bool | None = True,
+    log_scale: bool | None = None,
     log_scale_qoi: Sequence[str] | None = None,
     logit_scale_qoi: Sequence[str] | None = None,
     logit_bounds: dict[str, tuple[float, float]] | None = None,
@@ -182,22 +176,32 @@ def run_s4_emit_sorf(
     response_noise_prior: bool = False,
     noise_var_fraction: float = 0.01,
     noise_prior_log_scale: float = 0.5,
-    correct_sorf: bool = True,
     task_names: Sequence[str] | None = None,
     nigp: bool = True,
-    freeze_epoch_nigp: int = 100,
-    nigp_slope_refreshes: int | None = None,
+    freeze_epoch_nigp: int = 50,
+    n_pca_components: NComponentsSpec | None = None,
+    pca_svd_solver: str = "randomized",
+    num_inducing: int = 512,
+    learn_inducing_locations: bool = True,
+    batch_size: int = 1024,
+    variational_lr: float | None = None,
+    kl_beta: float = 1.0,
+    adam_stop_patience: int = DEFAULT_TOA_ADAM_STOP_PATIENCE,
     filter_valid_labels: bool = False,
     task_band_config: str | None = None,
     off_floor_train_tasks: Sequence[str] | None = None,
     floor_thresholds: Mapping[str, float] | None = None,
 ) -> dict:
-    """Train independent SORF RFFGPR + NIGP models on EMIT snow90 (Woodbury)."""
-    if rff_sampling not in RFF_SAMPLING_CHOICES:
+    """Train independent SVGPR + optional NIGP models on S4 EMIT / snow-TOA."""
+    if nigp and n_pca_components is not None:
         raise ValueError(
-            f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}"
+            "SVGP supports NIGP or PCA, not both: NIGP learns a per-input-"
+            "dimension sigma_x, which has no interpretation in a rotated, "
+            "truncated PCA basis. Set nigp=False or n_pca_components=None."
         )
-    correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
+    if num_epochs <= 1:
+        raise ValueError(f"SVGP needs many SGD epochs, got num_epochs={num_epochs}.")
+
     names = parse_s4_task_names(task_names)
     num_tasks = len(names)
     emit_path = Path(data_path) if data_path is not None else _DEFAULT_EMIT_PATH
@@ -207,22 +211,12 @@ def run_s4_emit_sorf(
         save_path = _DEFAULT_SAVE_DIR
 
     set_seed(seed)
-    if num_rff is None:
-        num_rff = min(512, max(64, n_train // 3))
 
-    if num_epochs <= 1:
-        optimizer_class = LBFGSScipy
-        default_optimizer_kwargs = DEFAULT_LBFGS_KWARGS
-        stop_conditions = [
-            ConvergencePatienceStopCondition(patience=10),
-            MinLossChangeStopCondition(min_loss_change=1e-7),
-        ]
-    else:
-        optimizer_class = torch.optim.Adam
-        default_optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": DEFAULT_TOA_ADAM_LR}
-        stop_conditions = [
-            ConvergencePatienceStopCondition(patience=DEFAULT_TOA_ADAM_STOP_PATIENCE),
-        ]
+    optimizer_class = torch.optim.Adam
+    default_optimizer_kwargs = dict(DEFAULT_ADAM_KWARGS)
+    stop_conditions = [
+        ConvergencePatienceStopCondition(patience=int(adam_stop_patience))
+    ]
     if optimizer_kwargs is None:
         optimizer_kwargs = dict(default_optimizer_kwargs)
 
@@ -268,6 +262,16 @@ def run_s4_emit_sorf(
             f"or floor_thresholds=...; missing {missing_thr}"
         )
 
+    n_components_by_task: dict[str, int] | None = None
+    pca_components_meta: dict = {}
+    pca_title_token: str | None = None
+    if n_pca_components is not None:
+        n_components_by_task, pca_components_meta = resolve_task_pca_components(
+            n_pca_components, task_names=names
+        )
+        unique_ps = sorted(set(n_components_by_task.values()))
+        pca_title_token = str(unique_ps[0]) if len(unique_ps) == 1 else "perQoI"
+
     if task_band_config is not None:
         from experiments_toa.s2_constants import S2_TASK_NAMES
 
@@ -290,33 +294,34 @@ def run_s4_emit_sorf(
     else:
         shared_bands = list(range(S4_SPECTRAL_DIM))
         bands_by_task = {name: list(shared_bands) for name in names}
-    input_column_indices = _task_input_columns(
-        shared_bands, aux_indices=aux_indices
-    )
+    input_column_indices = _task_input_columns(shared_bands, aux_indices=aux_indices)
 
     title = (
         f"S4_EMIT_ST_nTrain{n_train}_nVal{n_val_eff}_nTest{n_test}_"
-        f"{rff_sampling}D{num_rff}_T{num_tasks}"
+        f"svgpM{num_inducing}_T{num_tasks}"
     )
-    if rff_sampling == "sorf":
-        title = f"{title}_correctSorf{correct_sorf}"
-    feature_dim = 2 * num_rff
-    sampling_label = rff_sampling.upper()
+    if pca_title_token is not None:
+        title = f"{title}_pcaP{pca_title_token}"
+    if nigp:
+        title = f"{title}_nigp"
 
     print("=" * 60)
     print(title)
     print(
-        f"Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
-        f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={names}, "
+        f"Independent SVGP, M={num_inducing}, batch={batch_size}, ARD={ard}, "
+        f"dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={names}, "
         f"n_bands={S4_SPECTRAL_DIM}, input_dim={input_dim}, aux={aux_indices}, "
-        f"nigp={bool(nigp)}"
-        + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
+        f"nigp={bool(nigp)}, learn_inducing={learn_inducing_locations}, kl_beta={kl_beta}"
+        + (f", pca={n_components_by_task}" if n_components_by_task is not None else "")
     )
-    print(f"Optimizer: {getattr(optimizer_class, '__name__', optimizer_class)}, kwargs={optimizer_kwargs}")
+    print(
+        f"Optimizer: {getattr(optimizer_class, '__name__', optimizer_class)}, "
+        f"kwargs={optimizer_kwargs}"
+    )
     print(f"Device: {device}")
     print(
         f"Split: filtered={n_filtered}  train={n_train}  val={n_val_eff}  test={n_test}  "
-        f"(EMIT {emit_path})"
+        f"(data {emit_path})"
     )
     print("=" * 60)
 
@@ -362,18 +367,16 @@ def run_s4_emit_sorf(
             "Off-floor train masks: "
             + ", ".join(f"{n}>{floor_thr[n]:g}" for n in sorted(off_floor_train))
         )
-
-    x_test_orig = x_test_full.clone()
     if nigp:
         print(
-            "NIGP: on (independent input noise, sigma_x=10^SoftClamp(raw), "
-            f"freeze_epochs={int(freeze_epoch_nigp)}, "
-            f"slope_refreshes={nigp_slope_refreshes})"
+            "NIGP: on (independent input noise, "
+            f"freeze_epochs={int(freeze_epoch_nigp)})"
         )
 
     task_metrics: dict[str, dict] = {}
     task_runs: dict[str, list] = {}
     task_best_runs: dict[str, dict] = {}
+    input_bands_by_task: dict[str, dict] = {}
     y_pred_all: list[np.ndarray] = []
     y_std_all: list[np.ndarray] = []
     lower_all: list[np.ndarray] = []
@@ -431,6 +434,31 @@ def run_s4_emit_sorf(
                 y_va = y_va[va_mask]
                 print(f"Off-floor val {task_name}: kept {int(va_mask.sum().item())}")
 
+        pca_meta = None
+        input_dim_before_pca = int(x_tr.shape[-1])
+        if n_components_by_task is not None:
+            _pca_dir = _ROOT / "experiments_PCA"
+            if str(_pca_dir) not in sys.path:
+                sys.path.insert(0, str(_pca_dir))
+            from toa_pca_utils import fit_pca_on_train, transform_pca
+
+            task_n_components = int(n_components_by_task[task_name])
+            pca_fit = fit_pca_on_train(
+                x_tr,
+                n_components=task_n_components,
+                svd_solver=pca_svd_solver,
+                random_state=seed,
+            )
+            x_tr = transform_pca(pca_fit, x_tr, dtype=dtype)
+            x_te = transform_pca(pca_fit, x_te, dtype=dtype)
+            if x_va.numel() > 0:
+                x_va = transform_pca(pca_fit, x_va, dtype=dtype)
+            pca_meta = pca_fit.to_dict()
+            print(
+                f"PCA ({task_name}): {input_dim_before_pca} -> {pca_fit.n_components}, "
+                f"var={pca_fit.total_variance_explained:.4f}"
+            )
+
         x_scaler = None
         x_scaling_type = "None"
         if standardize_x:
@@ -455,7 +483,6 @@ def run_s4_emit_sorf(
             print(f"X scaling ({task_name}): {x_scaling_type}  n_features={x_tr.shape[-1]}")
 
         y_tr_model = forward_y_s2(y_tr, task_name, warps=warps)
-
         y_scaler = None
         if standardize_y:
             y_scaler = StandardScaler()
@@ -473,28 +500,22 @@ def run_s4_emit_sorf(
                 y_val_scaled = y_va_model
 
         callbacks = []
-        if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1:
+        if nigp and int(freeze_epoch_nigp) > 0:
             callbacks.append(
                 NIGPInputNoiseFreezeCallback(
                     freeze_epochs=int(freeze_epoch_nigp),
                     verbose=training_verbose,
                 )
             )
-        if num_epochs > 1 and training_verbose:
-            val_logs_train_loss = (
-                monitor_validation
-                and n_val_eff > 0
-                and val_log_every_n_epochs <= log_every_n_epochs
-            )
-            if not val_logs_train_loss:
-                callbacks.append(
-                    make_train_loss_callback(
-                        num_inits,
-                        num_epochs,
-                        verbose=training_verbose,
-                        log_every_n_epochs=log_every_n_epochs,
-                    )
+        if training_verbose:
+            callbacks.append(
+                make_train_loss_callback(
+                    num_inits,
+                    num_epochs,
+                    verbose=training_verbose,
+                    log_every_n_epochs=log_every_n_epochs,
                 )
+            )
         if monitor_validation and n_val_eff > 0:
             callbacks.append(
                 make_validation_callback(
@@ -505,66 +526,65 @@ def run_s4_emit_sorf(
                     verbose=validation_verbose,
                     log_every_n_epochs=log_every_n_epochs,
                     val_log_every_n_epochs=val_log_every_n_epochs,
-                    woodbury_form=DEFAULT_WOODBURY_FORM,
                 )
             )
 
-        initializer_kwargs: dict | None = None
+        likelihood = None
+        initializer_kwargs = None
+        noise_prior_meta = None
         if response_noise_prior:
             from gpplus.priors.response_noise import (
-                empirical_task_noise_variances,
-                log_normal_noise_prior_from_responses,
+                build_scalar_noise_likelihood,
+                empirical_scalar_noise_variance,
+                log_normal_scalar_noise_prior_from_responses,
                 scalar_noise_raw_init_from_variance,
             )
 
-            target_var = empirical_task_noise_variances(
-                y_tr_fit.unsqueeze(-1), fraction=noise_var_fraction
-            ).reshape(-1)[0]
-            noise_prior = log_normal_noise_prior_from_responses(
-                y_tr_fit.unsqueeze(-1),
+            target_var = empirical_scalar_noise_variance(
+                y_tr_fit, fraction=noise_var_fraction
+            )
+            noise_prior = log_normal_scalar_noise_prior_from_responses(
+                y_tr_fit,
                 fraction=noise_var_fraction,
                 log_scale=noise_prior_log_scale,
                 dtype=dtype,
                 device=y_tr_fit.device,
             )
-            likelihood = build_rff_scalar_noise_likelihood(noise_prior=noise_prior)
-            raw_init = scalar_noise_raw_init_from_variance(likelihood, target_var.to(dtype=dtype))
+            likelihood = build_scalar_noise_likelihood(noise_prior=noise_prior)
+            raw_init = scalar_noise_raw_init_from_variance(
+                likelihood, target_var.to(dtype=dtype)
+            )
             initializer_kwargs = {
-                "parameter_configs": {"raw_noise": {"method": "constant", "value": raw_init}}
+                "parameter_configs": {
+                    "raw_noise": {"method": "constant", "value": raw_init}
+                }
             }
-        else:
-            likelihood = build_rff_scalar_noise_likelihood()
+            noise_prior_meta = {
+                "noise_prior_target_var": float(target_var.detach().cpu()),
+                "noise_prior_loc": float(noise_prior.loc.detach().cpu()),
+            }
 
-        initializer_kwargs = merge_rff_noise_initializer_kwargs(initializer_kwargs)
-        model = RFFGPR(
+        kernel_dims = int(x_tr.shape[-1]) if ard else None
+        from gpplus import kernels as _kernels
+
+        model = SVGPR(
             x_tr,
             y_tr_fit,
+            kernel_module=_kernels.LogScaleKernel(
+                _kernels.GaussianKernel(ard_num_dims=kernel_dims)
+            ),
             likelihood=likelihood,
-            num_rff=num_rff,
-            ard=ard,
-            rff_sampling=rff_sampling,
-            correct_sorf=correct_sorf,
-            nigp=bool(nigp),
+            num_inducing=num_inducing,
+            learn_inducing_locations=learn_inducing_locations,
+            nigp=nigp,
+            seed=seed,
         )
-        if nigp:
-            nigp_mll_kwargs: dict = {}
-            slope_r = (
-                None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
-            )
-            if slope_r is not None:
-                nigp_mll_kwargs["nigp_slope_refreshes"] = slope_r
-                nigp_mll_kwargs["nigp_active_epochs"] = max(
-                    1, int(num_epochs) - max(0, int(freeze_epoch_nigp))
-                )
-            task_mll_class = nigp_woodbury_mll_class(
-                DEFAULT_WOODBURY_FORM, **nigp_mll_kwargs
-            )
-        else:
-            task_mll_class = rff_mll_class()
 
-        trainer = GPTrainer(
+        trainer = MinibatchGPTrainer(
             model,
-            mll_class=task_mll_class,
+            batch_size=batch_size,
+            variational_lr=variational_lr,
+            kl_beta=kl_beta,
             num_epochs=num_epochs,
             num_inits=num_inits,
             seed=seed,
@@ -572,27 +592,20 @@ def run_s4_emit_sorf(
             dtype=dtype,
             optimizer_class=optimizer_class,
             optimizer_kwargs=optimizer_kwargs,
-            initializer_class=RFFParameterInitializer,
             initializer_kwargs=initializer_kwargs,
             n_jobs=n_jobs,
-            inner_max_num_threads=1,
-            cholesky_jitter=woodbury_jitter_for_dtype(dtype),
             callbacks=callbacks,
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
-            min_epochs=(
-                int(freeze_epoch_nigp)
-                if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
-                else 0
-            ),
         )
         t_train = time.time()
         runs = trainer.train()
         train_time = time.time() - t_train
         total_train_time += train_time
-        model = trainer.model
 
-        successful = [r for r in runs if r.get("loss") is not None and r.get("state_dict") is not None]
+        successful = [
+            r for r in runs if r.get("loss") is not None and r.get("state_dict") is not None
+        ]
         if not successful:
             errors = [r.get("error", "unknown") for r in runs if r.get("error")]
             raise RuntimeError(
@@ -604,14 +617,40 @@ def run_s4_emit_sorf(
         best_loss = float(best_run["loss"])
         y_std_for_noise = y_scaler.std.squeeze() if y_scaler is not None else None
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
+        ard_info = extract_ard_lengthscales(model)
+        ard_mapped = map_ard_to_bands(
+            ard_info["lengthscale"],
+            band_indices,
+            wavelengths_nm=wl_np,
+            ard_space="pca_components" if n_components_by_task is not None else "bands",
+        )
+        if ard_info["outputscale"] is not None:
+            ard_mapped["outputscale"] = ard_info["outputscale"]
+        ard_mapped["raw_lengthscale"] = ard_info["raw_lengthscale"]
+        ard_mapped["model_input_dim"] = int(x_tr.shape[-1])
+        if nigp:
+            ard_mapped["input_noise"] = [
+                float(v) for v in model.input_noise.detach().cpu().reshape(-1).tolist()
+            ]
+        if pca_meta is not None:
+            ard_mapped["pca"] = pca_meta
+        input_bands_by_task[task_name] = {
+            "indices": list(band_indices),
+            "input_column_indices": list(task_cols),
+            "wavelength_nm": [float(wl_np[i]) for i in band_indices if i < len(wl_np)],
+            "model_input_dim": int(x_tr.shape[-1]),
+            "x_scaling_type": x_scaling_type,
+            **ard_mapped,
+        }
 
         if save_checkpoint and save_path:
-            ckpt_path = save_toa_stgp_checkpoint(
-                checkpoint_path_for_run(save_path, title, task_name),
+            ckpt_path = checkpoint_path_for_run(save_path, title, task_name)
+            save_toa_svgp_checkpoint(
+                ckpt_path,
                 model=model,
                 task_name=task_name,
-                train_x=x_tr.cpu(),
-                train_y=y_tr_fit.cpu(),
+                train_x=x_tr,
+                train_y=y_tr_fit,
                 x_scaler=x_scaler,
                 y_scaler=y_scaler,
                 standardize_x=standardize_x,
@@ -629,33 +668,35 @@ def run_s4_emit_sorf(
                 data_path=str(emit_path),
                 rel_tolerance=rel_tolerance,
                 dtype=dtype,
-                log_grain=task_uses_log_scale(task_name, warps=warps),
-                logit_cos=task_uses_logit_scale(task_name, warps=warps),
-                input_column_indices=torch.as_tensor(task_cols, dtype=torch.int64),
                 model_config={
-                    "num_rff": num_rff,
-                    "ard": ard,
-                    "rff_sampling": rff_sampling,
-                    "correct_sorf": correct_sorf,
+                    "num_inducing": int(num_inducing),
+                    "learn_inducing_locations": bool(learn_inducing_locations),
                     "nigp": bool(nigp),
-                    "nigp_slope_refreshes": (
-                        None
-                        if nigp_slope_refreshes is None
-                        else int(nigp_slope_refreshes)
-                    ),
+                    "seed": int(seed),
+                    "ard": bool(ard),
+                    "batch_size": int(batch_size),
+                    "kl_beta": float(kl_beta),
+                    "variational_lr": variational_lr,
                     "aux_inputs": list(data_meta.get("aux_inputs", [])),
                     "task_band_config": task_band_config,
                     "off_floor_train": task_name in off_floor_train,
                 },
+                input_column_indices=torch.as_tensor(task_cols, dtype=torch.int64),
+                pca_meta=pca_meta,
+                x_transform="none",
+                log_scale_qoi=list(log_scale_qoi) if log_scale_qoi is not None else None,
+                logit_scale_qoi=(
+                    list(logit_scale_qoi) if logit_scale_qoi is not None else None
+                ),
+                input_variable=str(data_meta.get("input_variable", "toa_radiance")),
             )
             learned_noise["checkpoint_path"] = str(ckpt_path)
-            print(f"Saved checkpoint to {ckpt_path}")
+            print(f"Saved checkpoint: {ckpt_path}")
 
         model.eval()
-        model.invalidate_feature_cache()
         t_pred = time.time()
-        pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-            model, x_te, chunk_size=predict_chunk_size, **rff_eval_kwargs(dtype)
+        pred_mean, lower, upper, pred_std = evaluate_svgp_gp_model(
+            model, x_te, chunk_size=predict_chunk_size
         )
         prediction_time = time.time() - t_pred
         total_prediction_time += prediction_time
@@ -698,6 +739,7 @@ def run_s4_emit_sorf(
             if inv.logit_sigma is not None
             else nan_col
         )
+
         computed = compute_metrics(
             y_te.cpu(),
             pred_mean,
@@ -706,6 +748,13 @@ def run_s4_emit_sorf(
             upper_95=upper,
             training_time=train_time,
             prediction_time=prediction_time,
+        )
+        apply_log_scale_extra_metrics(
+            computed,
+            y_true=y_te,
+            inv=inv,
+            task_name=task_name,
+            warps=warps,
         )
         rel_m = compute_relative_error_metrics(
             y_te.cpu().numpy(),
@@ -731,14 +780,18 @@ def run_s4_emit_sorf(
             f"{task_name}_coverage_90": float(cov_m["coverage_90"]),
             f"{task_name}_coverage_95": float(cov_m["coverage_95"]),
         }
+        if noise_prior_meta:
+            tm.update(noise_prior_meta)
         if best_run.get("final_lr") is not None:
             tm["final_lr"] = float(best_run["final_lr"])
-        if best_run.get("best_val_RRMSE") is not None and best_run.get("val_checkpoint_restored"):
+        if best_run.get("best_val_RRMSE") is not None and best_run.get(
+            "val_checkpoint_restored"
+        ):
             tm["checkpoint_val_RRMSE"] = float(best_run["best_val_RRMSE"])
-        if best_run.get("best_val_RRMSE_epoch") is not None and best_run.get("val_checkpoint_restored"):
+        if best_run.get("best_val_RRMSE_epoch") is not None and best_run.get(
+            "val_checkpoint_restored"
+        ):
             tm["checkpoint_val_RRMSE_epoch"] = int(best_run["best_val_RRMSE_epoch"])
-        if best_run.get("val_checkpoint_restore_reason"):
-            tm["val_checkpoint_restore_reason"] = str(best_run["val_checkpoint_restore_reason"])
         task_metrics[task_name] = tm
         task_runs[task_name] = runs
         task_best_runs[task_name] = best_run
@@ -766,10 +819,18 @@ def run_s4_emit_sorf(
     )
     per_task.update(slice_metrics)
     for name in names:
-        per_task[f"{name}_max_rel_error"] = float(rel_metrics_by_task[name]["max_rel_error"])
-        per_task[f"{name}_mean_rel_error"] = float(rel_metrics_by_task[name]["mean_rel_error"])
-        per_task[f"{name}_median_rel_error"] = float(rel_metrics_by_task[name]["median_rel_error"])
-        per_task[f"{name}_pct_within_1pct"] = float(rel_metrics_by_task[name]["pct_within_1pct"])
+        per_task[f"{name}_max_rel_error"] = float(
+            rel_metrics_by_task[name]["max_rel_error"]
+        )
+        per_task[f"{name}_mean_rel_error"] = float(
+            rel_metrics_by_task[name]["mean_rel_error"]
+        )
+        per_task[f"{name}_median_rel_error"] = float(
+            rel_metrics_by_task[name]["median_rel_error"]
+        )
+        per_task[f"{name}_pct_within_1pct"] = float(
+            rel_metrics_by_task[name]["pct_within_1pct"]
+        )
         per_task[f"{name}_coverage_50"] = float(cov_metrics_by_task[name]["coverage_50"])
         per_task[f"{name}_coverage_90"] = float(cov_metrics_by_task[name]["coverage_90"])
         per_task[f"{name}_coverage_95"] = float(cov_metrics_by_task[name]["coverage_95"])
@@ -813,6 +874,7 @@ def run_s4_emit_sorf(
         "input_column_indices": list(input_column_indices),
         "task_band_config": task_band_config,
         "bands_by_task": band_config_metadata(bands_by_task, wavelengths_nm=wl_np),
+        "input_bands_by_task": input_bands_by_task,
         "off_floor_train_tasks": sorted(off_floor_train),
         "off_floor_train_counts": off_floor_train_counts,
         "floor_thresholds": {k: floor_thr[k] for k in names if k in floor_thr},
@@ -824,17 +886,16 @@ def run_s4_emit_sorf(
         "split": "permutation_train_val_remaining_test",
         "num_tasks": num_tasks,
         "task_names": list(names),
-        "num_rff": num_rff,
-        "rff_sampling": rff_sampling,
-        "correct_sorf": correct_sorf,
-        "feature_dim": feature_dim,
+        "svgp": True,
+        "num_inducing": int(num_inducing),
+        "learn_inducing_locations": bool(learn_inducing_locations),
+        "batch_size": int(batch_size),
+        "variational_lr": variational_lr,
+        "kl_beta": float(kl_beta),
         "nigp": bool(nigp),
-        "freeze_epoch_nigp": int(freeze_epoch_nigp),
-        "nigp_slope_refreshes": (
-            None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
-        ),
+        "freeze_epoch_nigp": int(freeze_epoch_nigp) if nigp else 0,
         "ard": ard,
-        "model_class": "RFFGPR",
+        "model_class": "SVGPR",
         "train_mode": "independent",
         "num_epochs": num_epochs,
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
@@ -860,6 +921,15 @@ def run_s4_emit_sorf(
         **per_task,
         "task_metrics": task_metrics,
     }
+    if n_components_by_task is not None:
+        unique_ps = sorted(set(n_components_by_task.values()))
+        metrics["n_pca_components"] = (
+            n_components_by_task if len(unique_ps) > 1 else unique_ps[0]
+        )
+        metrics["n_components_by_task"] = dict(n_components_by_task)
+        metrics["pca_components_meta"] = pca_components_meta
+        metrics["pca_svd_solver"] = pca_svd_solver
+
     for task_name, tm in task_metrics.items():
         if tm.get("checkpoint_path"):
             metrics[f"{task_name}_checkpoint_path"] = tm["checkpoint_path"]
@@ -873,6 +943,7 @@ def run_s4_emit_sorf(
             for key, value in val_summary.items():
                 metrics[f"{task_name}_{key}"] = value
 
+    x_test_orig = x_test_full
     if save_path:
         Path(save_path).mkdir(parents=True, exist_ok=True)
         example_indices = select_posterior_example_indices(
@@ -949,7 +1020,6 @@ def run_s4_emit_sorf(
 
                 with h5py.File(emit_path, "r") as f:
                     if schema == S4_SCHEMA_EMIT and "state" in f:
-                        # Fancy index must be increasing in h5py; load then index.
                         state_all = np.asarray(f["state"][:], dtype=np.float64)
                         state_test = state_all[test_src]
                         del state_all
@@ -983,7 +1053,6 @@ def run_s4_emit_sorf(
                                     f[key][:], dtype=np.float64
                                 ).reshape(-1)[test_src]
 
-                # Aux inputs from X (after spectral bands).
                 x_te_np = x_test_orig.numpy()
                 if x_te_np.shape[1] > S4_SPECTRAL_DIM:
                     derived["coszen"] = x_te_np[:, S4_SPECTRAL_DIM]
@@ -994,7 +1063,6 @@ def run_s4_emit_sorf(
                     for n in logit_task_names
                     if n in warps.logit_bounds
                 }
-                # Fall back to S4 defaults when caller didn't pass bounds.
                 for n in logit_task_names:
                     if n not in plot_logit_bounds and n in S4_LOGIT_BOUNDS:
                         plot_logit_bounds[n] = tuple(S4_LOGIT_BOUNDS[n])
@@ -1045,9 +1113,7 @@ def run_s4_emit_sorf(
 
 __all__ = [
     "S4_INPUT_DIM",
-    "S4_SPECTRAL_DIM",
     "S4_TASK_NAMES",
-    "TASK_VALID_Y_RANGE",
     "parse_s4_task_names",
-    "run_s4_emit_sorf",
+    "run_s4_emit_svgp",
 ]

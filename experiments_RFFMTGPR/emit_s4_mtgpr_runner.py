@@ -1,6 +1,6 @@
 """S4 joint SORF+NIGP MTGPR runner (Woodbury RFFMTGPR, no SVGP/VIRFF).
 
-Uses radiance + geometry aux (coszen, ele_km, RAA_TRUE) and S4 QoI labels from
+Uses radiance + geometry aux (coszen, ele_km) and S4 QoI labels from
 ``emit_s4_mtgpr_base``. Accepts EMIT processed or snow-TOA simulation NetCDF
 (schema auto-detected). Trains one ``RFFMTGPR`` with ``rff_sampling='sorf'``.
 
@@ -66,7 +66,7 @@ from gpplus.training import (
     GPTrainer,
     MinLossChangeStopCondition,
     NIGPInputNoiseFreezeCallback,
-    NIGPMTWoodburyMarginalLogLikelihood,
+    nigp_mt_woodbury_mll_class,
     RFFMTParameterInitializer,
     evaluate_rff_mt_gp_model,
 )
@@ -88,6 +88,7 @@ from emit_s4_mtgpr_base import (
     _DEFAULT_WL_SRC,
     _load_wavelengths_nm,
     _subsample_scatter,
+    force_train_local_from_asd_appended,
     load_emit_s4_xy,
     parse_s4_task_names,
     split_emit_s4,
@@ -121,7 +122,7 @@ def _task_input_columns(
     aux_indices: Sequence[int],
     n_spectral: int = S4_SPECTRAL_DIM,
 ) -> list[int]:
-    """Spectral band indices plus fixed S4 aux columns (coszen, ele_km, RAA_TRUE)."""
+    """Spectral band indices plus fixed S4 aux columns (coszen, ele_km)."""
     cols = [int(i) for i in band_indices]
     for idx in aux_indices:
         if int(idx) < n_spectral:
@@ -218,6 +219,7 @@ def run_s4_emit_mtgpr(
     task_names: Sequence[str] | None = None,
     nigp: bool = True,
     freeze_epoch_nigp: int = 100,
+    nigp_slope_refreshes: int | None = None,
     filter_valid_labels: bool = False,
     task_band_config: str | None = None,
     off_floor_train_tasks: Sequence[str] | None = None,
@@ -265,11 +267,18 @@ def run_s4_emit_mtgpr(
     )
     n_filtered = int(X_np.shape[0])
     aux_indices = list(data_meta.get("aux_indices", []))
+    force_train_local = force_train_local_from_asd_appended(emit_path, source_idx)
+    if force_train_local.size:
+        print(
+            f"Forcing {force_train_local.size} ASD-appended row(s) into train "
+            f"(source indices {source_idx[force_train_local].tolist()})"
+        )
     train_local, val_local, test_local = split_emit_s4(
         n_filtered,
         n_train=n_train,
         n_val=n_val_eff,
         seed=seed,
+        force_train_local=force_train_local,
     )
     n_test = int(test_local.size)
     train_idx = torch.as_tensor(source_idx[train_local], dtype=torch.int64)
@@ -553,16 +562,21 @@ def run_s4_emit_mtgpr(
     if nigp:
         print(
             "NIGP: on (independent input noise, sigma_x=10^SoftClamp(raw), "
-            f"freeze_epochs={int(freeze_epoch_nigp)})"
+            f"freeze_epochs={int(freeze_epoch_nigp)}, "
+            f"slope_refreshes={nigp_slope_refreshes})"
         )
-        _mt_method = DEFAULT_MT_WOODBURY_METHOD
-
-        class _NIGPMTMLL(NIGPMTWoodburyMarginalLogLikelihood):
-            def __init__(self, likelihood, model, jitter: float = 1e-6):
-                super().__init__(likelihood, model, jitter=jitter, method=_mt_method)
-
-        _NIGPMTMLL.__name__ = f"NIGPMTWoodburyMarginalLogLikelihood_{_mt_method}"
-        mll_cls = _NIGPMTMLL
+        nigp_mll_kwargs: dict = {}
+        slope_r = (
+            None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
+        )
+        if slope_r is not None:
+            nigp_mll_kwargs["nigp_slope_refreshes"] = slope_r
+            nigp_mll_kwargs["nigp_active_epochs"] = max(
+                1, int(num_epochs) - max(0, int(freeze_epoch_nigp))
+            )
+        mll_cls = nigp_mt_woodbury_mll_class(
+            DEFAULT_MT_WOODBURY_METHOD, **nigp_mll_kwargs
+        )
     else:
         mll_cls = mt_mll_class()
 
@@ -766,6 +780,9 @@ def run_s4_emit_mtgpr(
         "rank_kernel": rank_kernel,
         "nigp": bool(nigp),
         "freeze_epoch_nigp": int(freeze_epoch_nigp),
+        "nigp_slope_refreshes": (
+            None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
+        ),
         "ard": ard,
         "model_class": "RFFMTGPR",
         "train_mode": "joint",
@@ -844,6 +861,11 @@ def run_s4_emit_mtgpr(
                     "rank_kernel": rank_kernel,
                     "rank_likelihood": 0,
                     "nigp": bool(nigp),
+                    "nigp_slope_refreshes": (
+                        None
+                        if nigp_slope_refreshes is None
+                        else int(nigp_slope_refreshes)
+                    ),
                     "aux_inputs": list(data_meta.get("aux_inputs", [])),
                     "task_band_config": task_band_config,
                     "off_floor_train": bool(off_floor_train),
@@ -972,7 +994,6 @@ def run_s4_emit_mtgpr(
                 if x_te_np.shape[1] > S4_SPECTRAL_DIM:
                     derived["coszen"] = x_te_np[:, S4_SPECTRAL_DIM]
                     derived["ele_km"] = x_te_np[:, S4_SPECTRAL_DIM + 1]
-                    derived["RAA_TRUE"] = x_te_np[:, S4_SPECTRAL_DIM + 2]
 
                 plot_logit_bounds = {
                     n: tuple(warps.logit_bounds[n])

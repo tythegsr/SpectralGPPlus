@@ -30,7 +30,7 @@ from .nigp_mll import (
     NIGPWoodburyMarginalLogLikelihood,
     nigp_woodbury_mll_class,
 )
-from .nigp_mt_mll import NIGPMTWoodburyMarginalLogLikelihood
+from .nigp_mt_mll import NIGPMTWoodburyMarginalLogLikelihood, nigp_mt_woodbury_mll_class
 from .rff_mll import RFFWoodburyMarginalLogLikelihood, WoodburyMarginalLogLikelihood
 from .rff_mt_mll import RFFMTWoodburyMarginalLogLikelihood
 from .stop_conditions import (

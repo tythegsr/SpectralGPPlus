@@ -1,10 +1,9 @@
-"""S4 independent SORF+NIGP (Woodbury RFFGPR) on EMIT or snow-TOA NetCDF.
+"""S4 independent SVGP+NIGP on EMIT or snow-TOA NetCDF.
 
-Fourth example in the S1/S2/S3/S4 series: trains with radiance + geometry aux
-(coszen, ele_km) predicting S4 QoIs. ``DATA_PATH`` may be either a
-processed EMIT file (``radiance``/``obs``/``state``) or a snow-TOA simulation
-file (``toa_radiance`` + named QoIs). One ``RFFGPR`` per QoI with
-``rff_sampling='sorf'`` and classic NIGP.
+Fourth-example SVGP counterpart to ``experiments_SORF/S4_emit_SORF.py``: trains
+with radiance + geometry aux (coszen, ele_km) predicting S4 QoIs. ``DATA_PATH``
+may be either a processed EMIT file or a snow-TOA simulation file. One
+``SVGPR`` per QoI with minibatch ELBO SGD (optional classic NIGP).
 """
 
 from __future__ import annotations
@@ -17,25 +16,30 @@ from pathlib import Path
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SORF_DIR = Path(__file__).resolve().parent
-_RFF_DIR = _ROOT / "experiments_RFF"
+_SVGP_DIR = Path(__file__).resolve().parent
+_GP_DIR = _ROOT / "experiments_GP"
 _MTGPR_DIR = _ROOT / "experiments_RFFMTGPR"
+_RFF_DIR = _ROOT / "experiments_RFF"
 
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-# QOI: list[str] | None = ["grain_size", "cos_i", "dust", "algae", "fsnow", "cwv", "lwc", "aot"]  # subset; None = all 11 S4 tasks
-QOI: list[str] | None = ["cos_i", "grain_size", "dust", "algae", "cwv", "lwc", "aot"]  # subset; None = all 11 S4 tasks
-N_TRAIN = 10000
+QOI: list[str] | None = ["cos_i", "grain_size"]  # subset; None = all 11 S4 tasks
+N_TRAIN = 20000
 N_VAL = 5000
-NUM_RFF = 2000
+NUM_INDUCING = 512
+LEARN_INDUCING_LOCATIONS = True
+BATCH_SIZE = 1024
+VARIATIONAL_LR: float | None = None
+KL_BETA = 1.0
 NUM_INITS = 1
-NUM_EPOCHS = 700
-LR = 4e-2
+NUM_EPOCHS = 300
+LR = 0.05
+ADAM_STOP_PATIENCE = 50
 SEED = 42
 DEVICE = "cuda"
-DTYPE = "float64"  # "float32" | "float64"
-PREDICT_CHUNK_SIZE = 2048
+DTYPE = "float32"  # "float32" | "float64"
+PREDICT_CHUNK_SIZE = 4096
 N_JOBS = 1
 ARD = True
 SAVE_PATH: str | None = None
@@ -45,7 +49,6 @@ PLOT_POSTERIOR = True
 REL_TOLERANCE = 0.01
 POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None
-CORRECT_SORF = True
 SAVE_CHECKPOINT = True
 # After training: evaluate checkpoints on ASD validation + write plots.
 EVAL_ASD = True
@@ -53,40 +56,30 @@ ASD_PATH: str | None = str(
     _ROOT / "experiments_toa" / "data 11 QoI" / "asd_validation_set.nc"
 )
 RESPONSE_NOISE_PRIOR = False
-NOISE_VAR_FRACTION = 0.1
-NOISE_PRIOR_LOG_SCALE = 0.05
-LOG_SCALE_QOI: list[str] | None = ["dust", "algae"]
-# LOGIT_SCALE_QOI: list[str] | None = ["fsnow"]
-LOG_OFFSETS: dict[str, float] | None = {"dust": 100.0, "algae": 100.0}  # default dust C=1.0 from S2_LOG_OFFSETS
-# LOG_SCALE_QOI: list[str] | None = []
+NOISE_VAR_FRACTION = 0.01
+NOISE_PRIOR_LOG_SCALE = 0.5
+LOG_SCALE_QOI: list[str] | None = []
 LOGIT_SCALE_QOI: list[str] | None = []
-# LOG_OFFSETS: dict[str, float] | None = None
+LOG_OFFSETS: dict[str, float] | None = None
 NIGP = True
-FREEZE_EPOCH_NIGP = 200
-# Paper-style outer-loop slope refreshes after NIGP unlock (None = every epoch).
-# E.g. 20 with FREEZE=200 and NUM_EPOCHS=1000 → ~20 ∇μ recomputes over the NIGP phase.
-NIGP_SLOPE_REFRESHES: int | None = 10
+FREEZE_EPOCH_NIGP = 50
+N_PCA_COMPONENTS: int | None = None  # mutually exclusive with NIGP
+PCA_SVD_SOLVER = "randomized"
 FILTER_VALID_LABELS = False
 OFF_FLOOR_TRAIN_TASKS: list[str] | None = []
-TASK_BAND_CONFIG: str | None = (
-    None
-)
+TASK_BAND_CONFIG: str | None = None
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
-LOG_EVERY_N_EPOCHS = 50
-VAL_LOG_EVERY_N_EPOCHS = 50
+LOG_EVERY_N_EPOCHS = 10
+VAL_LOG_EVERY_N_EPOCHS = 10
 TRAINING_LOG = True
 # EMIT processed or snow-TOA simulation NetCDF (schema auto-detected).
-# Examples:
-#   emit_test_data_90to100_aotbelow02_20262608.nc
-#   snow_toa_fsnow_90to100_20262608.nc
 DATA_PATH: str | None = str(
     _ROOT
     / "experiments_toa"
     / "data 11 QoI"
-    # / "emit_test_data_90to100_aotbelow02_20262608.nc"
-    / "snow_toa_fsnow_pure_flat_Sep04.nc"
+    / "snow_toa_fsnow_90to100_20260309.nc"
 )
 # ---------------------------------------------------------------------------
 
@@ -95,32 +88,44 @@ if str(_ROOT) not in sys.path:
 
 from experiments_toa.paths import pin_toa_import_paths
 
-pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _SORF_DIR)
+pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _GP_DIR, _SVGP_DIR)
 
 import gpplus
 from experiments_toa.s2_cli import parse_example_indices
 from experiments_toa.s2_constants import S4_LOGIT_BOUNDS
-from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
-from emit_s4_sorf_base import parse_s4_task_names, run_s4_emit_sorf
 from experiments_toa.s4_asd_posttrain import run_s4_asd_eval_and_plots
+from emit_s4_svgp_base import parse_s4_task_names, run_s4_emit_svgp
+from gp_experiment_utils import DEFAULT_ADAM_KWARGS
 
 
-def run_s4_emit_sorf_entry(**kwargs) -> dict:
-    return run_s4_emit_sorf(**kwargs)
+def run_s4_emit_svgp_entry(**kwargs) -> dict:
+    return run_s4_emit_svgp(**kwargs)
 
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="S4 EMIT independent SORF+NIGP (Woodbury RFFGPR; radiance + geometry aux)"
+        description=(
+            "S4 independent SVGP+NIGP (minibatch inducing-point; "
+            "radiance + geometry aux)"
+        )
     )
     parser.add_argument("--n-train", type=int, default=N_TRAIN)
     parser.add_argument("--n-val", type=int, default=N_VAL)
-    parser.add_argument("--num-rff", type=int, default=NUM_RFF)
+    parser.add_argument("--num-inducing", type=int, default=NUM_INDUCING)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument(
+        "--learn-inducing-locations",
+        action=argparse.BooleanOptionalAction,
+        default=LEARN_INDUCING_LOCATIONS,
+    )
+    parser.add_argument("--variational-lr", type=float, default=VARIATIONAL_LR)
+    parser.add_argument("--kl-beta", type=float, default=KL_BETA)
     parser.add_argument("--num-inits", type=int, default=NUM_INITS)
     parser.add_argument("--num-epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--lr", type=float, default=LR)
+    parser.add_argument("--adam-stop-patience", type=int, default=ADAM_STOP_PATIENCE)
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--device", type=str, default=DEVICE)
     parser.add_argument("--dtype", type=str, default=DTYPE, choices=("float32", "float64"))
@@ -133,21 +138,16 @@ if __name__ == "__main__":
         nargs="+",
         default=None,
         metavar="NAME",
-        help="QoIs (default: all S4 tasks)",
+        help="QoIs (default: IDE QOI / all S4 tasks)",
     )
     parser.add_argument("--nigp", action=argparse.BooleanOptionalAction, default=NIGP)
     parser.add_argument("--freeze-epoch-nigp", type=int, default=FREEZE_EPOCH_NIGP)
     parser.add_argument(
-        "--nigp-slope-refreshes",
+        "--n-pca-components",
         type=int,
-        default=NIGP_SLOPE_REFRESHES,
-        metavar="N",
-        help=(
-            "Recompute NIGP ∇μ slopes N times after NIGP unlock "
-            "(default: every epoch when omitted/None)"
-        ),
+        default=N_PCA_COMPONENTS,
+        help="PCA dim (mutually exclusive with --nigp)",
     )
-    parser.add_argument("--correct-sorf", action=argparse.BooleanOptionalAction, default=CORRECT_SORF)
     parser.add_argument(
         "--filter-valid-labels",
         action=argparse.BooleanOptionalAction,
@@ -169,50 +169,64 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     nigp = bool(args.nigp)
+    if nigp and args.n_pca_components is not None:
+        parser.error("Cannot combine --nigp with --n-pca-components")
+
     nigp_str = "_nigp" if nigp else ""
     freeze_str = (
-        f"_freezeepochnigp{args.freeze_epoch_nigp}" if nigp and args.freeze_epoch_nigp > 0 else ""
-    )
-    slope_refreshes_str = (
-        f"_sloperefreshes{args.nigp_slope_refreshes}"
-        if nigp and args.nigp_slope_refreshes is not None
+        f"_freezeepochnigp{args.freeze_epoch_nigp}"
+        if nigp and args.freeze_epoch_nigp > 0
         else ""
+    )
+    pca_str = (
+        f"_pca{args.n_pca_components}" if args.n_pca_components is not None else ""
     )
     band_str = "_taskbandconfig" if TASK_BAND_CONFIG else ""
     of_str = "_offfloor" if OFF_FLOOR_TRAIN_TASKS else ""
     save_path = args.save_path or (
-        f"experiments_SORF/results/Sept08/s4_emit_aotbelow02_sorf_{args.num_inits}inits_"
-        f"numrff{args.num_rff}_lr{args.lr}{nigp_str}{freeze_str}{slope_refreshes_str}"
-        f"{band_str}{of_str}_dtype{args.dtype}"
+        f"experiments_SVGP/results/s4_emit_svgp_{args.num_inits}inits_"
+        f"M{args.num_inducing}_batch{args.batch_size}_lr{args.lr}"
+        f"{nigp_str}{freeze_str}{pca_str}{band_str}{of_str}_dtype{args.dtype}"
     )
     log_file = LOG_FILE
     if log_file is None and args.device.startswith("cuda"):
         log_file = os.path.join(save_path, "train.log")
-    gpplus.config.configure_logger(level=getattr(logging, LOG_LEVEL), log_to_file=log_file)
+    gpplus.config.configure_logger(
+        level=getattr(logging, LOG_LEVEL), log_to_file=log_file
+    )
     dtype = torch.float32 if args.dtype == "float32" else torch.float64
+    device = args.device
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        print("CUDA unavailable; falling back to CPU (expect this to be slow).")
+        device = "cpu"
+
     optimizer_kwargs = None
     if args.num_epochs > 1 and args.lr is not None:
         optimizer_kwargs = {**DEFAULT_ADAM_KWARGS, "lr": args.lr}
 
     qoi = parse_s4_task_names(args.qoi if args.qoi is not None else QOI)
     print(
-        f"S4 EMIT independent SORF  nigp={nigp}  freeze_epoch_nigp={args.freeze_epoch_nigp}  "
-        f"nigp_slope_refreshes={args.nigp_slope_refreshes}  "
-        f"qoi={qoi}  n_train={args.n_train}  n_val={args.n_val}  "
-        f"log_qoi={LOG_SCALE_QOI}  logit_qoi={LOGIT_SCALE_QOI}  "
-        f"off_floor={OFF_FLOOR_TRAIN_TASKS}  task_bands={TASK_BAND_CONFIG}"
+        f"S4 EMIT independent SVGP  M={args.num_inducing}  batch={args.batch_size}  "
+        f"nigp={nigp}  freeze_epoch_nigp={args.freeze_epoch_nigp}  "
+        f"pca={args.n_pca_components}  qoi={qoi}  n_train={args.n_train}  "
+        f"n_val={args.n_val}  log_qoi={LOG_SCALE_QOI}  logit_qoi={LOGIT_SCALE_QOI}  "
+        f"device={device}  dtype={args.dtype}"
     )
 
-    metrics = run_s4_emit_sorf(
+    metrics = run_s4_emit_svgp(
         n_train=args.n_train,
         n_val=args.n_val,
-        num_rff=args.num_rff,
-        rff_sampling="sorf",
+        num_inducing=args.num_inducing,
+        learn_inducing_locations=args.learn_inducing_locations,
+        batch_size=args.batch_size,
+        variational_lr=args.variational_lr,
+        kl_beta=args.kl_beta,
         num_inits=args.num_inits,
         num_epochs=args.num_epochs,
         optimizer_kwargs=optimizer_kwargs,
+        adam_stop_patience=args.adam_stop_patience,
         seed=args.seed,
-        device=args.device,
+        device=device,
         dtype=dtype,
         ard=ARD,
         save_path=save_path,
@@ -233,7 +247,6 @@ if __name__ == "__main__":
         response_noise_prior=RESPONSE_NOISE_PRIOR,
         noise_var_fraction=NOISE_VAR_FRACTION,
         noise_prior_log_scale=NOISE_PRIOR_LOG_SCALE,
-        correct_sorf=args.correct_sorf,
         log_scale_qoi=LOG_SCALE_QOI,
         logit_scale_qoi=LOGIT_SCALE_QOI,
         logit_bounds=dict(S4_LOGIT_BOUNDS),
@@ -241,7 +254,8 @@ if __name__ == "__main__":
         task_names=qoi,
         nigp=nigp,
         freeze_epoch_nigp=args.freeze_epoch_nigp,
-        nigp_slope_refreshes=args.nigp_slope_refreshes,
+        n_pca_components=args.n_pca_components,
+        pca_svd_solver=PCA_SVD_SOLVER,
         filter_valid_labels=args.filter_valid_labels,
         task_band_config=TASK_BAND_CONFIG,
         off_floor_train_tasks=OFF_FLOOR_TRAIN_TASKS,
@@ -253,8 +267,8 @@ if __name__ == "__main__":
         else:
             run_s4_asd_eval_and_plots(
                 save_path,
-                backend="sorf",
-                device=args.device,
+                backend="svgp",
+                device=device,
                 asd_path=args.asd_path,
                 checkpoint_title=metrics.get("title"),
                 tasks=qoi,

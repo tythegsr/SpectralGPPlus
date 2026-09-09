@@ -1,7 +1,7 @@
 """S4 joint SORF+NIGP MTGPR (Woodbury RFFMTGPR) on EMIT or snow-TOA NetCDF.
 
 Fourth example in the S1/S2/S3/S4 series: trains with radiance + geometry aux
-(coszen, ele_km, RAA_TRUE) predicting S4 QoIs. ``DATA_PATH`` may be either a
+(coszen, ele_km) predicting S4 QoIs. ``DATA_PATH`` may be either a
 processed EMIT file (``radiance``/``obs``/``state``) or a snow-TOA simulation
 file (``toa_radiance`` + named QoIs). One ``RFFMTGPR`` with
 ``rff_sampling='sorf'`` and classic NIGP.
@@ -27,13 +27,13 @@ _SORF_DIR = _ROOT / "experiments_SORF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["grain_size", "cos_i", "dust", "algae", "fsnow", "cwv", "lwc"]
+QOI: list[str] | None = ["grain_size", "cos_i", "dust", "algae", "cwv", "lwc", "aot"]
 N_TRAIN = 10000
 N_VAL = 5000
-NUM_RFF = 800
+NUM_RFF = 1600
 NUM_INITS = 1
-NUM_EPOCHS = 1000
-LR = 5e-3  # joint MTGPR: use S3-scale LR (1e-1 overfits / val-NLL blow-up)
+NUM_EPOCHS = 200
+LR = 1e-1  # joint MTGPR: use S3-scale LR (1e-1 overfits / val-NLL blow-up)
 SEED = 42
 DEVICE = "cuda"
 DTYPE = "float32"  # "float32" | "float64"
@@ -49,7 +49,12 @@ POSTERIOR_N_EXAMPLES = 20
 POSTERIOR_EXAMPLE_INDICES: str | None = None
 CORRECT_SORF = True
 SAVE_CHECKPOINT = True
-RESPONSE_NOISE_PRIOR = True
+# After training: evaluate joint MTGPR checkpoint on ASD validation + plots.
+EVAL_ASD = True
+ASD_PATH: str | None = str(
+    _ROOT / "experiments_toa" / "data 11 QoI" / "asd_validation_set.nc"
+)
+RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.25
 # LOG_SCALE_QOI: list[str] | None = ["grain_size", "dust", "algae"]
@@ -60,7 +65,8 @@ LOGIT_SCALE_QOI: list[str] | None = []
 LOG_OFFSETS: dict[str, float] | None = None
 RANK_KERNEL = 1
 NIGP = True
-FREEZE_EPOCH_NIGP = 200
+FREEZE_EPOCH_NIGP = 150
+NIGP_SLOPE_REFRESHES: int | None = 1
 FILTER_VALID_LABELS = False
 OFF_FLOOR_TRAIN_TASKS: list[str] | None = []
 TASK_BAND_CONFIG: str | None = None
@@ -77,7 +83,7 @@ DATA_PATH: str | None = str(
     _ROOT
     / "experiments_toa"
     / "data 11 QoI"
-    / "snow_toa_fsnow_90to100_constrained_20262808.nc"
+    / "snow_toa_fsnow_pure_flat_Sep04.nc"
 )
 # ---------------------------------------------------------------------------
 
@@ -93,6 +99,7 @@ from experiments_toa.s2_cli import parse_example_indices
 from experiments_toa.s2_constants import S4_LOGIT_BOUNDS
 from emit_s4_mtgpr_base import parse_s4_task_names
 from emit_s4_mtgpr_runner import run_s4_emit_mtgpr
+from experiments_toa.s4_asd_posttrain import run_s4_asd_eval_and_plots
 from mtgpr_experiment_utils import DEFAULT_ADAM_KWARGS
 
 
@@ -129,6 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--nigp", action=argparse.BooleanOptionalAction, default=NIGP)
     parser.add_argument("--freeze-epoch-nigp", type=int, default=FREEZE_EPOCH_NIGP)
     parser.add_argument("--rank-kernel", type=int, default=RANK_KERNEL)
+    parser.add_argument("--nigp-slope-refreshes", type=int, default=NIGP_SLOPE_REFRESHES)
     parser.add_argument("--correct-sorf", action=argparse.BooleanOptionalAction, default=CORRECT_SORF)
     parser.add_argument(
         "--filter-valid-labels",
@@ -136,6 +144,18 @@ if __name__ == "__main__":
         default=FILTER_VALID_LABELS,
     )
     parser.add_argument("--no-plot", action="store_true")
+    parser.add_argument(
+        "--eval-asd",
+        action=argparse.BooleanOptionalAction,
+        default=EVAL_ASD,
+        help="After training, evaluate joint checkpoint on ASD validation and write plots",
+    )
+    parser.add_argument(
+        "--asd-path",
+        type=str,
+        default=ASD_PATH,
+        help="ASD validation NetCDF (default: asd_validation_set.nc)",
+    )
     args = parser.parse_args()
 
     nigp = bool(args.nigp)
@@ -143,11 +163,16 @@ if __name__ == "__main__":
     freeze_str = (
         f"_freezeepochnigp{args.freeze_epoch_nigp}" if nigp and args.freeze_epoch_nigp > 0 else ""
     )
+    slope_refreshes_str = (
+        f"_sloperefreshes{args.nigp_slope_refreshes}"
+        if nigp and args.nigp_slope_refreshes is not None
+        else ""
+    )
     band_str = "_taskbandconfig" if TASK_BAND_CONFIG else ""
     of_str = "_offfloor" if OFF_FLOOR_TRAIN_TASKS else ""
     save_path = args.save_path or (
-        f"experiments_RFFMTGPR/results/Aug27_constrained/s4_emit_mtgpr_{args.num_inits}inits_"
-        f"numrff{args.num_rff}_lr{args.lr}{nigp_str}{freeze_str}"
+        f"experiments_RFFMTGPR/results/Sept08/s4_emit_mtgpr_{args.num_inits}inits_"
+        f"numrff{args.num_rff}_lr{args.lr}{nigp_str}{freeze_str}{slope_refreshes_str}"
         f"{band_str}{of_str}_dtype{args.dtype}"
     )
     log_file = LOG_FILE
@@ -162,12 +187,13 @@ if __name__ == "__main__":
     qoi = parse_s4_task_names(args.qoi if args.qoi is not None else QOI)
     print(
         f"S4 EMIT joint MTGPR  nigp={nigp}  freeze_epoch_nigp={args.freeze_epoch_nigp}  "
+        f"nigp_slope_refreshes={args.nigp_slope_refreshes}  "
         f"rank_kernel={args.rank_kernel}  qoi={qoi}  n_train={args.n_train}  n_val={args.n_val}  "
         f"log_qoi={LOG_SCALE_QOI}  logit_qoi={LOGIT_SCALE_QOI}  "
         f"off_floor={OFF_FLOOR_TRAIN_TASKS}  task_bands={TASK_BAND_CONFIG}"
     )
 
-    run_s4_emit_mtgpr(
+    metrics = run_s4_emit_mtgpr(
         n_train=args.n_train,
         n_val=args.n_val,
         num_rff=args.num_rff,
@@ -205,7 +231,24 @@ if __name__ == "__main__":
         task_names=qoi,
         nigp=nigp,
         freeze_epoch_nigp=args.freeze_epoch_nigp,
+        nigp_slope_refreshes=args.nigp_slope_refreshes,
         filter_valid_labels=args.filter_valid_labels,
         task_band_config=TASK_BAND_CONFIG,
         off_floor_train_tasks=OFF_FLOOR_TRAIN_TASKS,
     )
+
+    if args.eval_asd:
+        if not SAVE_CHECKPOINT:
+            print("ASD eval skipped: SAVE_CHECKPOINT is False")
+        else:
+            run_s4_asd_eval_and_plots(
+                save_path,
+                backend="mtgpr",
+                device=args.device,
+                asd_path=args.asd_path,
+                checkpoint_title=metrics.get("title"),
+                tasks=qoi,
+                plot=PLOT and not args.no_plot,
+                predict_chunk_size=args.predict_chunk_size,
+                sim_path=args.data_path,
+            )

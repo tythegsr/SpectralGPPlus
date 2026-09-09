@@ -166,8 +166,27 @@ def load_toa_stgp_checkpoint(path: str | Path, device: str = "cpu") -> ToaStgpBu
     init_kwargs = {k: v for k, v in model_config.items() if k in _MODEL_INIT_KEYS}
     if model_class is RFFGPR:
         init_kwargs.pop("variational_cov", None)
-    model = model_class(train_x, train_y, **init_kwargs)
-    model.load_state_dict(payload["state_dict"])
+    state_dict = payload["state_dict"]
+    has_noise_prior = any("noise_prior" in k for k in state_dict)
+    likelihood = None
+    if has_noise_prior and model_class is RFFGPR:
+        from experiments_RFF.rff_gp_defaults import build_rff_scalar_noise_likelihood
+        from gpplus.priors.response_noise import log_normal_noise_prior_from_responses
+
+        y_col = train_y.unsqueeze(-1) if train_y.dim() == 1 else train_y
+        noise_prior = log_normal_noise_prior_from_responses(
+            y_col,
+            fraction=0.01,
+            log_scale=0.5,
+            dtype=dtype,
+            device=train_y.device,
+        )
+        likelihood = build_rff_scalar_noise_likelihood(noise_prior=noise_prior)
+    if likelihood is not None:
+        model = model_class(train_x, train_y, likelihood=likelihood, **init_kwargs)
+    else:
+        model = model_class(train_x, train_y, **init_kwargs)
+    model.load_state_dict(state_dict)
     model = model.to(device=device, dtype=dtype)
     model.eval()
     model.invalidate_feature_cache()
