@@ -1,0 +1,19 @@
+{
+    "input_dim": 285,
+    "default": [[0, 131]],
+    "tasks": {
+      "algae": [[0, 131]],
+      "aot": [[0, 131]],
+      "cos_i": [[0, 131]],
+      "cwv": [[0, 131]],
+      "dust": [[0, 131]],
+      "fNPV": [[0, 131]],
+      "fPV": [[0, 131]],
+      "fsnow": [[0, 131]],
+      "fsoil": [[0, 131]],
+      "grain_size": [[0, 131]],
+      "liquid_water": [[0, 131]]
+    },
+    "notes": "131 wavelengths for every QoI as used in the ASD fit."
+  }
+  

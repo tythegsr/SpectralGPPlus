@@ -72,6 +72,10 @@ class RFFGPR(gpytorch.models.ExactGP):
         init_batch_size: int | None = None,
         nigp: bool = False,
         input_noise_init: float | None = None,
+        hetero_sorf: bool = False,
+        num_rff_het: int = 64,
+        hetero_mode: str = "additive",
+        hetero_seed: int | None = None,
     ):
         if not isinstance(train_x, torch.Tensor) or not isinstance(train_y, torch.Tensor):
             raise TypeError("train_x and train_y must be torch.Tensor instances.")
@@ -129,20 +133,39 @@ class RFFGPR(gpytorch.models.ExactGP):
         if not isinstance(likelihood, gpytorch.likelihoods.Likelihood):
             raise TypeError("likelihood must be a gpytorch.likelihoods.Likelihood.")
 
+        # Hetero schedule requires NIGP parameters (Σ_x) even during early phases.
+        if bool(hetero_sorf):
+            nigp = True
+
         super().__init__(train_x, train_y, likelihood)
         self.num_rff = num_rff
         self.rff_sampling = rff_sampling
         self.correct_sorf = bool(correct_sorf)
         self.spectral_kernel = spectral_kernel
         self.nigp = bool(nigp)
+        self.hetero_sorf = bool(hetero_sorf)
+        self.num_rff_het = int(num_rff_het)
+        self.hetero_mode = str(hetero_mode)
         self.mean_module = mean_module.to(dtype=self.dtype)
         self.covar_module = kernel_module.to(dtype=self.dtype)
         self.likelihood = self.likelihood.to(dtype=self.dtype)
         align_registered_priors(self)
         self._train_z_cache: torch.Tensor | None = None
         self._train_z_cache_key: tuple | None = None
-        # When False (freeze warm-start), MLL/predict ignore σ_x (standard GP).
-        self.nigp_correction_enabled = True
+        # Schedule flags persist in state_dict (bool buffers + properties).
+        # Hetero schedule starts in Hom with NIGP off; callback enables later.
+        self.register_buffer(
+            "_flag_nigp_correction_enabled",
+            torch.tensor(not bool(hetero_sorf), dtype=torch.bool),
+            persistent=True,
+        )
+        self.register_buffer(
+            "_flag_use_hetero_noise",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=True,
+        )
+        self.hetero_nigp_manual_slopes = bool(hetero_sorf)
+        self.nigp_force_slope_refresh = False
 
         if self.nigp:
             input_dim = int(train_x.shape[-1])
@@ -162,6 +185,90 @@ class RFFGPR(gpytorch.models.ExactGP):
                 "(D=%s, sigma_x=10^SoftClamp(raw) in (1e-6, 1)).",
                 input_dim,
             )
+
+        if self.hetero_sorf:
+            from ..utils.hetero_noise import NoiseSORFLogNoise, resolve_hetero_mode
+
+            if len(self.batch_shape) > 0:
+                raise NotImplementedError(
+                    "hetero_sorf is not supported with batched multi-init RFFGPR yet."
+                )
+            self.hetero_mode = resolve_hetero_mode(self.hetero_mode, nigp=True)
+            self.noise_sorf = NoiseSORFLogNoise(
+                int(train_x.shape[-1]),
+                num_rff_het=self.num_rff_het,
+                correct_sorf=self.correct_sorf,
+                dtype=self.dtype,
+                device=train_x.device,
+                seed=hetero_seed,
+            )
+            self.add_module("noise_sorf", self.noise_sorf)
+            self.noise_sorf.set_trainable(False)
+            logger.info(
+                "Hetero SORF noise enabled: num_rff_het=%s mode=%s "
+                "(MAP mean -> sigma_y,het^2).",
+                self.num_rff_het,
+                self.hetero_mode,
+            )
+
+    @property
+    def nigp_correction_enabled(self) -> bool:
+        """Whether ``σ_nigp`` enters MLL / predict (persisted in ``state_dict``)."""
+        buf = getattr(self, "_flag_nigp_correction_enabled", None)
+        if buf is None:
+            return True
+        return bool(buf.item())
+
+    @nigp_correction_enabled.setter
+    def nigp_correction_enabled(self, value: bool) -> None:
+        if not hasattr(self, "_flag_nigp_correction_enabled"):
+            self.register_buffer(
+                "_flag_nigp_correction_enabled",
+                torch.tensor(bool(value), dtype=torch.bool),
+                persistent=True,
+            )
+        else:
+            self._flag_nigp_correction_enabled.fill_(bool(value))
+
+    @property
+    def use_hetero_noise(self) -> bool:
+        """Whether MAP ``σ_{y,het}²`` enters MLL / predict (persisted in ``state_dict``)."""
+        buf = getattr(self, "_flag_use_hetero_noise", None)
+        if buf is None:
+            return False
+        return bool(buf.item())
+
+    @use_hetero_noise.setter
+    def use_hetero_noise(self, value: bool) -> None:
+        if not hasattr(self, "_flag_use_hetero_noise"):
+            self.register_buffer(
+                "_flag_use_hetero_noise",
+                torch.tensor(bool(value), dtype=torch.bool),
+                persistent=True,
+            )
+        else:
+            self._flag_use_hetero_noise.fill_(bool(value))
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        """Load weights; inject schedule-flag buffers missing from older checkpoints."""
+        sd = dict(state_dict)
+        if (
+            "_flag_nigp_correction_enabled" not in sd
+            and hasattr(self, "_flag_nigp_correction_enabled")
+        ):
+            # Pre-flag checkpoints: keep NIGP correction on (S4 default).
+            sd["_flag_nigp_correction_enabled"] = torch.tensor(
+                True,
+                dtype=torch.bool,
+                device=self._flag_nigp_correction_enabled.device,
+            )
+        if "_flag_use_hetero_noise" not in sd and hasattr(self, "_flag_use_hetero_noise"):
+            sd["_flag_use_hetero_noise"] = torch.tensor(
+                False,
+                dtype=torch.bool,
+                device=self._flag_use_hetero_noise.device,
+            )
+        return super().load_state_dict(sd, strict=strict, assign=assign)
 
     def to(self, *args, **kwargs):
         out = super().to(*args, **kwargs)
@@ -247,6 +354,12 @@ class RFFGPR(gpytorch.models.ExactGP):
         s = self.input_noise
         return s * s
 
+    def sigma_y_het(self, x: torch.Tensor) -> torch.Tensor:
+        """MAP hetero nugget ``σ_{y,het}²(x)`` from the Noise SORF (shape ``(n,)``)."""
+        if not getattr(self, "hetero_sorf", False) or not hasattr(self, "noise_sorf"):
+            raise AttributeError("Model has no Noise SORF (construct with hetero_sorf=True).")
+        return self.noise_sorf(x)
+
     def unscaled_features(self, x: torch.Tensor) -> torch.Tensor:
         z = self._rff_kernel.featurize(x)
         return _drop_singleton_batch(z)
@@ -309,7 +422,6 @@ class RFFGPR(gpytorch.models.ExactGP):
         train_x = _drop_singleton_batch(self.train_inputs[0])
         train_y = _drop_singleton_batch(self.train_targets)
         z_train = self.train_features()
-        z_test = self.scaled_features(test_x)
         mean_train = self.mean_module(train_x)
         if mean_train.dim() > 1 and mean_train.shape[0] == 1 and z_train.dim() == 2:
             mean_train = mean_train.squeeze(0)
@@ -318,26 +430,89 @@ class RFFGPR(gpytorch.models.ExactGP):
         if noise.dim() > 1:
             noise = noise.reshape(noise.shape[0])
 
-        if nigp_correction_enabled(self):
-            with torch.enable_grad():
-                grad_mu_train = posterior_mean_grad_wrt_x(
-                    self, train_x, y_centered, noise, jitter=jitter
-                )
-            d_train = effective_noise_variance(
-                noise, self.input_noise_var, grad_mu_train
+        use_hetero = bool(getattr(self, "use_hetero_noise", False)) and getattr(
+            self, "hetero_sorf", False
+        )
+        nigp_on = nigp_correction_enabled(self)
+
+        if nigp_on or use_hetero:
+            from ..utils.nigp_utils import (
+                _posterior_feature_weights_homoskedastic,
+                _rff_logscale_params,
             )
-            with torch.enable_grad():
-                grad_mu_test = posterior_mean_grad_wrt_x(
-                    self,
-                    test_x,
-                    y_centered,
-                    noise,
-                    train_x=train_x,
-                    jitter=jitter,
-                )
-            d_test = effective_noise_variance(
-                noise, self.input_noise_var, grad_mu_test
+            from ..utils.woodbury_mll_autograd import featurize_rbf_scaled_omega
+
+            base_noise = self.sigma_y_het(train_x) if use_hetero else noise
+            slope_noise = noise.detach()
+            homo_w = _posterior_feature_weights_homoskedastic(
+                slope_noise, z_train, y_centered.detach(), jitter=jitter
             )
+            rff_params = _rff_logscale_params(self)
+            if rff_params is not None:
+                lengthscale, outputscale, randn_weights, num_samples = rff_params
+                z_test, proj, omega, scale_out = featurize_rbf_scaled_omega(
+                    test_x.detach(),
+                    randn_weights,
+                    lengthscale,
+                    outputscale,
+                    num_samples,
+                )
+                z_test = z_test.to(dtype=test_x.dtype)
+                with torch.enable_grad():
+                    grad_mu_train = posterior_mean_grad_wrt_x(
+                        self,
+                        train_x,
+                        y_centered,
+                        slope_noise,
+                        jitter=jitter,
+                        feature_weights=homo_w,
+                    )
+                    grad_mu_test = posterior_mean_grad_wrt_x(
+                        self,
+                        test_x,
+                        y_centered,
+                        slope_noise,
+                        train_x=train_x,
+                        jitter=jitter,
+                        feature_weights=homo_w,
+                        proj=proj,
+                        omega=omega,
+                        scale_out=scale_out,
+                    )
+            else:
+                z_test = self.scaled_features(test_x)
+                with torch.enable_grad():
+                    grad_mu_train = posterior_mean_grad_wrt_x(
+                        self,
+                        train_x,
+                        y_centered,
+                        slope_noise,
+                        jitter=jitter,
+                        feature_weights=homo_w,
+                    )
+                    grad_mu_test = posterior_mean_grad_wrt_x(
+                        self,
+                        test_x,
+                        y_centered,
+                        slope_noise,
+                        train_x=train_x,
+                        jitter=jitter,
+                        feature_weights=homo_w,
+                    )
+            if nigp_on:
+                d_train = effective_noise_variance(
+                    base_noise, self.input_noise_var, grad_mu_train
+                )
+                d_test = effective_noise_variance(
+                    self.sigma_y_het(test_x) if use_hetero else noise,
+                    self.input_noise_var,
+                    grad_mu_test,
+                )
+            else:
+                d_train = base_noise.clamp_min(1e-12)
+                d_test = (
+                    self.sigma_y_het(test_x) if use_hetero else noise
+                ).clamp_min(1e-12)
             f_mean, f_var, obs_std = woodbury_predict_diag_noise(
                 d_train,
                 z_train,
@@ -352,6 +527,7 @@ class RFFGPR(gpytorch.models.ExactGP):
                 return f_mean, f_mean - 2 * f_std, f_mean + 2 * f_std
             return f_mean, f_mean - 2 * obs_std, f_mean + 2 * obs_std
 
+        z_test = self.scaled_features(test_x)
         f_mean, f_var = woodbury_predict(noise, z_train, z_test, y_centered, jitter=jitter)
         f_mean = f_mean + self.mean_module(test_x)
         f_std = f_var.clamp_min(0.0).sqrt()

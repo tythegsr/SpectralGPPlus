@@ -4,22 +4,22 @@
   "variance_threshold": 0.99,
   "r2_tol": 0.02,
   "input_variable": "toa_radiance",
-  "task_band_config": "experiments_toa/configs/s2_task_bands_from_corr.json",
+  "task_band_config": "experiments_toa/reports/snow_toa_fsnow_90to100_20262608/band_selection/s2_task_bands_from_corr.json",
   "n_train": 16000,
   "x_transform": "none",
   "seed": 42,
-  "default": 3,
+  "default": 2,
   "tasks": {
-    "algae": 2,
-    "aot": 3,
-    "cos_i": 3,
-    "cwv": 3,
-    "dust": 3,
-    "fNPV": 2,
+    "algae": 1,
+    "aot": 1,
+    "cos_i": 1,
+    "cwv": 2,
+    "dust": 2,
+    "fNPV": 1,
     "fPV": 1,
     "fsnow": 1,
-    "fsoil": 3,
-    "grain_size": 3,
-    "liquid_water": 3
+    "fsoil": 1,
+    "grain_size": 2,
+    "liquid_water": 2
   }
 }

@@ -1,0 +1,14 @@
+\begin{tabular}{llrrr}
+\toprule
+Model & Architecture & Epochs & Train & Infer \\
+\midrule
+NI-SVGP & SVGP+NIGP, M=512, indep. & 300 & 33.1 min & 1.13 s \\
+PCA-SVGP & PCA$\to$SVGP, M=512, P/QoI & 300 & 44.0 min & 0.87 s \\
+SORF & SORF-RFF GP, D=2000, RBF & 700 & 2.40 h & 19.30 s \\
+NI-SORF & SORF-RFF+NIGP, D=2000, RBF & 700 & 2.13 h & 1.5 min \\
+NI-SORF Mat3/2 & SORF-RFF+NIGP, D=2400, Mat3/2 & 1000 & 3.55 h & 2.1 min \\
+NI-SORF-MTGP & Joint SORF-MTGP+NIGP, D=1600, r=1 & 200 & 3.44 h & 15.5 min \\
+TabPFN & TabPFNRegressor & --- & 34.26 s & 7.33 h \\
+PCA-GP & PCA$\to$exact GP, LBFGS CPU, part=2000, top-5 & 1 & 5.73 h & 32.34 s \\
+\bottomrule
+\end{tabular}

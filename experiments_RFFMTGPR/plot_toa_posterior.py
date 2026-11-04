@@ -121,11 +121,12 @@ def _metrics_text_for_task(
     *,
     rel_tolerance: float,
 ) -> str:
+    nan = float("nan")
     lines = [
-        f"mean_rel: {_pct_str(float(rel_metrics['mean_rel_error']))}",
-        f"median_rel: {_pct_str(float(rel_metrics.get('median_rel_error', float('nan'))))}",
-        f"max_rel: {_pct_str(float(rel_metrics['max_rel_error']))}",
-        f"within_{rel_tolerance * 100:g}%: {_pct_str(float(rel_metrics['pct_within_1pct']))}",
+        f"mean_rel: {_pct_str(float(rel_metrics.get('mean_rel_error', nan)))}",
+        f"median_rel: {_pct_str(float(rel_metrics.get('median_rel_error', nan)))}",
+        f"max_rel: {_pct_str(float(rel_metrics.get('max_rel_error', nan)))}",
+        f"within_{rel_tolerance * 100:g}%: {_pct_str(float(rel_metrics.get('pct_within_1pct', nan)))}",
     ]
     return "\n".join(lines)
 

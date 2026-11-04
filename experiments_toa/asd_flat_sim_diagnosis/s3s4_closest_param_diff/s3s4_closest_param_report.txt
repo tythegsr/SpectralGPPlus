@@ -1,0 +1,118 @@
+sim=snow_toa_fsnow_pure_flat_Sep04.nc  asd=asd_validation_set.nc
+Distance = mean-normalized RMSE over 285 bands
+
+========================================================================
+ASD S3 20260113  (closest 5 sims)
+========================================================================
+ASD parameters (±1σ where available):
+  grain_size     =       459.27  ± 118.66
+  dust           =      243.485  ± 298.518
+  algae          =      21.0716  ± 1.42128
+  lwc            =      1.36581  ± 1.39544
+  cos_i          =     0.490366
+  aot            =    0.0464519
+  cwv            =     0.311791
+  sza            =      60.6354
+  elevation_km   =          2.7
+  RAA            =            0
+
+rank    idx   mnRMSE grain_size       dust      algae        lwc      cos_i        aot        cwv        sza elevation_km        RAA
+ ASD      —        0      459.3      243.5      21.07      1.366     0.4904    0.04645     0.3118      60.64        2.7          0
+   1  15271   0.0589      279.9       1.17      7.875      18.12     0.6293    0.06011     0.1153         51      0.676          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=59.23 coszen=0.6293
+   2  25343   0.0614      346.1      37.01      94.43      4.998     0.6334    0.03336    0.07915       50.7      1.772          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=203.2 coszen=0.6334
+   3  13035   0.0620      374.3      3.455      5.756     0.8583      0.623    0.04366    0.05825      51.47     0.2497          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=14.76 coszen=0.623
+   4  11635   0.0630      302.4      13.09      70.26      17.01     0.6371    0.04256     0.1606      50.43      1.017          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=27.46 coszen=0.6371
+   5  38374   0.0632        295      16.83      20.61    0.01934     0.6356    0.01058     0.1322      50.54      2.009          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=139.9 coszen=0.6356
+
+NN1 (idx=15271) parameter deltas (sim - ASD) and |delta|/ASD_std:
+  grain_size      Δ=     -179.41  |Δ|/σ=    1.51  (ASD=459.27, sim=279.86)
+  dust            Δ=     -242.31  |Δ|/σ=    0.81  (ASD=243.48, sim=1.1703)
+  algae           Δ=     -13.197  |Δ|/σ=    9.28  (ASD=21.072, sim=7.875)
+  lwc             Δ=     +16.756  |Δ|/σ=   12.01  (ASD=1.3658, sim=18.122)
+  cos_i           Δ=    +0.13896  |Δ|/|ASD|=   0.283  (ASD=0.49037, sim=0.62932)
+  aot             Δ=   +0.013657  |Δ|/|ASD|=   0.294  (ASD=0.046452, sim=0.060109)
+  cwv             Δ=    -0.19649  |Δ|/|ASD|=   0.630  (ASD=0.31179, sim=0.1153)
+  sza             Δ=     -9.6356  |Δ|/|ASD|=   0.159  (ASD=60.635, sim=51)
+  elevation_km    Δ=      -2.024  |Δ|/|ASD|=   0.750  (ASD=2.7, sim=0.67605)
+  RAA             Δ=          +0  |Δ|/|ASD|=   0.000  (ASD=0, sim=0)
+
+NN1 spectral residual by window (contrib to mnRMSE):
+  VIS 400-700         rms=0.0926  SSE_share= 34.7%  n_bands=40
+  NIR 700-1000        rms=0.0874  SSE_share= 31.7%  n_bands=41
+  SWIR1 1000-1350     rms=0.0410  SSE_share=  8.0%  n_bands=47
+  H2O 1350-1450       rms=0.0535  SSE_share=  3.8%  n_bands=13
+  SWIR2 1450-1800     rms=0.0184  SSE_share=  1.6%  n_bands=47
+  H2O 1800-1950       rms=0.0084  SSE_share=  0.1%  n_bands=20
+  SWIR3 1950-2500     rms=0.0045  SSE_share=  0.1%  n_bands=74
+Largest |sim-ASD| radiance bands:
+  λ= 403.23 nm  ASD=36.231  sim=33.907  Δ=-2.3234  resid/mean=-0.2910
+  λ= 381.01 nm  ASD=23.466  sim=21.192  Δ=-2.2745  resid/mean=-0.2849
+  λ= 388.41 nm  ASD=22.646  sim=20.66  Δ=-1.9854  resid/mean=-0.2487
+  λ= 410.64 nm  ASD=36.474  sim=34.55  Δ=-1.9238  resid/mean=-0.2409
+  λ= 395.82 nm  ASD=25.471  sim=23.632  Δ=-1.8393  resid/mean=-0.2304
+  λ= 418.05 nm  ASD=37.298  sim=35.581  Δ=-1.7163  resid/mean=-0.2149
+  λ= 425.47 nm  ASD=35.345  sim=34.034  Δ=-1.3115  resid/mean=-0.1643
+  λ= 797.90 nm  ASD=18.03  sim=19.111  Δ=+1.0812  resid/mean=+0.1354
+
+========================================================================
+ASD S4 20260124  (closest 5 sims)
+========================================================================
+ASD parameters (±1σ where available):
+  grain_size     =      1032.48  ± 216.28
+  dust           =      411.488  ± 365.992
+  algae          =      21.8271  ± 1.65924
+  lwc            =      1.06037  ± 1.47457
+  cos_i          =     0.520876
+  aot            =        0.051
+  cwv            =        0.136
+  sza            =       58.609
+  elevation_km   =          2.7
+  RAA            =            0
+
+rank    idx   mnRMSE grain_size       dust      algae        lwc      cos_i        aot        cwv        sza elevation_km        RAA
+ ASD      —        0       1032      411.5      21.83       1.06     0.5209      0.051      0.136      58.61        2.7          0
+   1  23299   0.0508        604    0.08047       22.9      1.382      0.633    0.02016     0.1258      50.73      2.485          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=220.1 coszen=0.633
+   2  10919   0.0541      473.3      19.58      49.76     0.5086     0.6175     0.0503     0.1563      51.87   0.002206          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=198.4 coszen=0.6175
+   3  17913   0.0565      524.1      7.431      34.15    0.05264     0.6349    0.04755     0.1837      50.59      2.311          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=23.27 coszen=0.6349
+   4   2946   0.0573      655.5       54.1     0.2086      13.86     0.6399    0.05574     0.0664      50.22     0.3394          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=307.3 coszen=0.6399
+   5  10285   0.0574      645.9      40.64      56.32     0.1847     0.6359    0.01372     0.1462      50.51      4.414          0
+     extras: slope=0 fsnow=1 fsoil=0 fPV=0 fNPV=0 saa-asp=286.5 coszen=0.6359
+
+NN1 (idx=23299) parameter deltas (sim - ASD) and |delta|/ASD_std:
+  grain_size      Δ=     -428.48  |Δ|/σ=    1.98  (ASD=1032.5, sim=604)
+  dust            Δ=     -411.41  |Δ|/σ=    1.12  (ASD=411.49, sim=0.080468)
+  algae           Δ=     +1.0697  |Δ|/σ=    0.64  (ASD=21.827, sim=22.897)
+  lwc             Δ=    +0.32143  |Δ|/σ=    0.22  (ASD=1.0604, sim=1.3818)
+  cos_i           Δ=    +0.11215  |Δ|/|ASD|=   0.215  (ASD=0.52088, sim=0.63302)
+  aot             Δ=   -0.030838  |Δ|/|ASD|=   0.605  (ASD=0.051, sim=0.020162)
+  cwv             Δ=   -0.010196  |Δ|/|ASD|=   0.075  (ASD=0.136, sim=0.1258)
+  sza             Δ=     -7.8825  |Δ|/|ASD|=   0.134  (ASD=58.609, sim=50.727)
+  elevation_km    Δ=    -0.21482  |Δ|/|ASD|=   0.080  (ASD=2.7, sim=2.4852)
+  RAA             Δ=          +0  |Δ|/|ASD|=   0.000  (ASD=0, sim=0)
+
+NN1 spectral residual by window (contrib to mnRMSE):
+  VIS 400-700         rms=0.0732  SSE_share= 29.2%  n_bands=40
+  NIR 700-1000        rms=0.0690  SSE_share= 26.5%  n_bands=41
+  SWIR1 1000-1350     rms=0.0601  SSE_share= 23.1%  n_bands=47
+  H2O 1350-1450       rms=0.0515  SSE_share=  4.7%  n_bands=13
+  SWIR2 1450-1800     rms=0.0225  SSE_share=  3.2%  n_bands=47
+  H2O 1800-1950       rms=0.0139  SSE_share=  0.5%  n_bands=20
+  SWIR3 1950-2500     rms=0.0048  SSE_share=  0.2%  n_bands=74
+Largest |sim-ASD| radiance bands:
+  λ= 403.23 nm  ASD=35.126  sim=33.598  Δ=-1.5276  resid/mean=-0.2001
+  λ= 381.01 nm  ASD=22.578  sim=21.082  Δ=-1.4962  resid/mean=-0.1960
+  λ= 388.41 nm  ASD=21.831  sim=20.56  Δ=-1.2705  resid/mean=-0.1664
+  λ= 395.82 nm  ASD=24.634  sim=23.414  Δ=-1.2206  resid/mean=-0.1599
+  λ= 410.64 nm  ASD=35.39  sim=34.228  Δ=-1.1622  resid/mean=-0.1522
+  λ= 418.05 nm  ASD=36.314  sim=35.329  Δ=-0.98485  resid/mean=-0.1290
+  λ=1357.34 nm  ASD=1.0062  sim=0.1798  Δ=-0.82641  resid/mean=-0.1082
+  λ= 782.98 nm  ASD=18.275  sim=19.095  Δ=+0.82001  resid/mean=+0.1074

@@ -1,0 +1,656 @@
+% First interim report outline — upload to Overleaf (pdfLaTeX).
+% Companion notes: rff_multitask_gp_plan.tex, rff_woodbury_derivation.tex,
+%                  rff_predictive_uncertainty.tex, pca_gp_pipeline.tex
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{cleveref}
+
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black}
+
+% cleveref names (British spelling optional; adjust as needed)
+\crefname{equation}{Equation}{Equations}
+\crefname{section}{Section}{Sections}
+\crefname{subsection}{Subsection}{Subsections}
+\crefname{figure}{Figure}{Figures}
+\crefname{table}{Table}{Tables}
+
+\newcommand{\noise}{\sigma^2}
+\newcommand{\Sig}{\Sigma}
+\newcommand{\Ph}{\Phi}
+\newcommand{\Om}{\Omega}
+\newcommand{\RB}{R_B}
+\newcommand{\GP}{\mathcal{GP}}
+
+\title{First Interim Report\\[0.4em]
+\large Scalable Multitask Gaussian Process Regression with Random Fourier Features}
+\author{
+By Tyler Johnson\\
+  % [FILL IN: your name]\\
+  % [FILL IN: supervisor / research group]
+Co-mentors: Dr. Jouni Susiluoto and Dr. Niklas Bohn\\
+Research Group: 341G
+}
+\date{% [FILL IN: submission date]
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% [FILL IN: 150--250 word summary covering motivation, problem, approach, progress, and outlook.]
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Motivation and Research Context}
+\label{sec:motivation}
+%=============================================================================
+
+AVIRIS and EMIT are examples of airborne and spaceborne platforms that collect an ever-increasing volume of high-resolution data. 
+These platforms use imaging spectrometers to map relevant surfaces on Earth and provide us with measurements from the visible and short-wave infrared spectrum to identify things such as gas leaks, impurity concentrations, and liquid water content.
+The large datasets obtained by these instruments are complex and high-dimensional, but can be used to predict surface properties and monitor environmental changes.
+Currently, this process requires massive look-up-tables (LUTs) to be built and multi-dimensional interpolations from various computational methods that are expensive.
+
+My final project aims to develop a surrogate model that can predict quantities of interest (QOI) that are critical for monitoring snow albedo and stream flow rates in mountainous watersheds \citep{Bohn03172025, Bohn25, COLEMAN2024114450}.
+For the scope of this report, I developed and tested surrogate models using Top of Atmosphere (TOA) radiance data. This data was generated using the GitHub repo ISOFit and it specifically simulated the 285-channel EMIT platform. The design of experiments (DOE) used full factorial design on two QOI, angle of incident radiation ($cos(i)$) and grain size (in $\mu m$). First, I will develop a scalable single task surrogates using Gaussian Processes (GPs). Then, I will extend this method to multi-task Gaussian process regression (MTGPR).
+% [FILL IN: Write in some detail why this project matters. Include:
+%  - The scientific / engineering application (e.g.\ TOA spectroscopy, multi-output prediction).
+%  - Why Gaussian processes are a natural model (uncertainty, smoothness, data efficiency).
+%  - Why scalability is the bottleneck at realistic dataset sizes ($n \sim 10^4$--$10^5$).
+%  - Brief background on multitask / coregionalized GPs \citep{bonilla2008mtgp,alvarez2012kernels}.
+%  - Brief background on random Fourier features (RFF) \citep{rahimi2007rff} and Woodbury inference
+%    \citep{cutajar2017dgp}.
+%]
+
+\section{Technical Background}
+\label{sec:techbackground}
+
+\subsection{Gaussian Processes}
+\label{sec:gps}
+GPs provide a natural Bayesian framework for function approximation by placing a prior on functions and then updating that prior based on data \cite{RN332}. They are completely characterized by their mean function $\textit{m}(\boldsymbol{x}; \boldsymbol{\theta})$ and kernel or covariance function $\textit{k}(\boldsymbol{x}, \boldsymbol{x'}; \boldsymbol{\beta})$ where $\boldsymbol{\theta}$ and $\boldsymbol{\beta}$ are hyperparameters that are conventionally estimated based on a training dataset. 
+
+They are widely regarded as a strong approach for UQ because they produce a mean prediction and an uncertainty metric for every estimate \cite{UncertaintyReview}. We can parameterize a GP by its mean function $\textit{m}(\boldsymbol{x}; \boldsymbol{\theta})$ and covariance function $\textit{k}(\boldsymbol{x}, \boldsymbol{x'}; \boldsymbol{\beta})$ (or kernel), ie. $GP\big(\textit{m}(\boldsymbol{x}; \boldsymbol{\theta}), \textit{k}(\boldsymbol{x}, \boldsymbol{x'}; \boldsymbol{\beta})\big)$, where $\boldsymbol{\theta}$ and $\boldsymbol{\beta}$ are hyperparameters the model must estimate.
+
+The optimal choice of mean and covariance functions depends on the problem but it is common practice to use a zero or constant mean and a stationary kernel such as the Gaussian or Mat\'ern \cite{RN2089}. The Gaussian kernel is defined as ($\boldsymbol{\beta} = \{s, \omega_i\}$ are the hyperparameters):
+%=============================================================
+\begin{equation}
+    k(\mathbf{x}, \mathbf{x}'; \boldsymbol{\beta}) = 10^s \exp\left(-\sum_{i=1}^{D_x} 10^{\omega_i}\left( x_i - x_i'\right)^2\right)
+    \label{eq gaussian kernel}
+\end{equation}
+%=============================================================
+which leverages automatic relevance determination. 
+
+In practice, regression or interpolation with GPs requires two major steps: (1) selecting the mean and covariance functions, and (2) using the training data for hyperparameter optimization which is typically done via maximum likelihood estimation (MLE).
+
+GPs have limitations such as scalability, since the cost of repeatedly inverting the covariance matrix during training scales as $O(N^3)$ where $N$ is the number of samples. Their performance also degrades in very high dimensions since selecting an appropriate kernel and effectively estimating its hyperparameters becomes very challenging.
+Over the past two decades, many scalable approximations have been proposed---including sparse,
+variational, and deep kernel constructions
+\citep{snelson2005sparse,hensman2013svgp,deisenroth2015dgp,gal2016dropout,wilson2016deep}.
+This project focuses on random Fourier feature (RFF) methods
+\citep{rahimi2007rff,yu2016orf} to reduce the impact of these limitations while retaining
+explicit Bayesian predictive uncertainty.
+
+\subsection{Ongoing work in the research group}
+\label{sec:group-work}
+
+This interim work is developed on top of GP+, an open-source PyTorch library for
+kernel-based learning with GPs maintained by the Bostanabad Research Group.
+GP+ aims to improve the performance and computational efficiency of GP modeling through advanced
+hyperparameter optimization, flexible kernel composition, and latent mapping techniques that
+integrate nonlinear manifold learning with GP inference. This supports tasks such as multi-fidelity
+emulation, model calibration, sensitivity analysis, and Bayesian optimization
+\citep{yousefpour2024gpplus}.
+The library is available at
+\href{https://github.com/Bostanabad-Research-Group/GP-Plus}{github.com/Bostanabad-Research-Group/GP-Plus};
+methodological details are given in the GP+ software paper
+\citep{yousefpour2024gpplus}.
+
+Within this codebase, the present project extends GP+ toward scalable multi-task regression. GP+'s MTGPR and GPyTorch's MultitaskKernel \citep{gardner2018gpytorch} provides a reference to the proposed method on the intrinsic coregionalization model (ICM). The existing methods will merge MTGPR, RFF/Orthogonal Random Features (ORF)/Structured Orthogonal Random Features (SORF) sampling, and the Woodbury matrix identity to create RFFMTGPR.
+% TOA spectroscopy experiments ($n \approx 49{,}000$, $d = 270$, cosine and grain-size tasks) and
+% comparisons with PCA-partitioned exact GPs, TabPFN, and independent per-task RFF models motivate
+% unifying these two stacks into a single \texttt{RFFMTGPR} path that learns cross-task correlation at
+% Woodbury cost.
+
+\subsection{Tabular Prior-data Fitted Network}
+\label{sec:tabpfn}
+
+Without an exiting and/or readily available baseline for my research, I decided to choose a new and efficient model to compare the results. TabPFN is a foundational model (FM) built on the Prior-Data Fitted Network (PFN) framework, which trains a neural model to approximate the Bayesian posterior predictive distribution induced by a user-defined prior over supervised learning tasks. In this setup, one first specifies a prior over datasets by defining how to sample synthetic tasks. Then, training repeatedly draws datasets from this prior and optimizes the model to predict held-out samples. The PFN training objective is designed such that minimizing it makes the model's predictive distribution close to the true posterior predictive under the specified prior, yielding a Bayesian interpretation: after offline training, the model can output posterior predictive distributions for new datasets through conditioning on the provided context.
+
+Under this view, TabPFN's uncertainty behavior is tightly linked to the designed prior since the model is trained to return predictive distributions consistent with the posterior predictive implied by the synthetic data-generating process. The original TabPFN constructs synthetic tabular tasks from a mixture of generative mechanisms, including causal-style generators and Bayesian NNs, to expose the model to diverse feature-target relationships.
+
+Later versions refine the synthetic-task distribution to better reflect practical tabular issues that affect both accuracy and uncertainty (i.e., incorporating corruptions such as missing values, uninformative features, and outliers during pretraining) \cite{Hollmann2025NatureTabPFN}. 
+
+% \subsection{Ongoing work in the research group}
+% \label{sec:group-work}
+
+% [FILL IN: Describe GP+ / SpectralGP+ and what already exists:
+%  - Dense multitask \texttt{MTGPR} with GPyTorch \texttt{MultitaskKernel} \citep{gardner2018gpytorch}.
+%  - Scalar \texttt{RFFGPR} with ORF/RFF/SORF feature sampling and Woodbury MLL.
+%  - TOA benchmark experiments (cosine and grain-size tasks; $n \approx 49{,}000$, $d = 270$).
+%  - Alternative pipelines: PCA + partitioned exact GP; independent scalar RFF per task;
+%    comparisons with TabPFN, SORF, etc.
+%  - Position this project as unifying the multitask ICM prior with scalable RFF inference.]
+
+%-----------------------------------------------------------------------------
+
+% \section{Problem statement and fit with ongoing work}
+% \label{sec:problem}
+%=============================================================================
+
+% [FILL IN: State the specific problem you are solving.
+%  - Today: \texttt{MTGPR} learns cross-task correlation but costs $O(n^3 T^3)$;
+%    \texttt{RFFGPR} scales in $n$ but treats tasks independently.
+%  - Goal: a single \texttt{RFFMTGPR} model that jointly learns task correlation at Woodbury cost
+%    $O((mT)^3)$ when $mT \ll nT$.
+%  - Explain how this extends (not replaces) existing group infrastructure and experiments.]
+
+% \subsection{Application setting}
+% \label{sec:application}
+
+% [FILL IN: TOA or other benchmark details — inputs, tasks, train/val/test splits,
+%  primary metrics (e.g.\ RRMSE), and why multitask structure is scientifically meaningful.]
+
+% \subsection{Gap in the current codebase}
+% \label{sec:gap}
+
+% [FILL IN: Cannot merge by wrapping \texttt{RFFKernel} inside \texttt{MTGPR} alone — exact MLL
+%  still materializes dense $(nT) \times (nT)$ covariance. Two independent \texttt{RFFGPR} models
+%  do not learn $B$. Reference \Cref{sec:methods} for the planned fix.]
+
+%=============================================================================
+\section{Approach and methods}
+\label{sec:methods}
+%=============================================================================
+
+The proposed method is centered around three key concepts. These concepts include (1) using RFF to approximate the covariance matrix, (2) leveraging the Woodbury matrix identity to reduce the cost of inverting the covariance matrix, and (3) incorporating the kronecker product into the intrinsic coregionalization model (ICM) to reduce the cost of inverting the covariance matrix further.
+
+In this section, there will be the following detailed derivations and explanations: the MTGPR with ICM prior, RFF approximation, using Woodbury for inference, the MT extension using Woodbury, and an alternative method used as a baseline.
+% [FILL IN: Outline your approach at a high level, then point to the equations below.
+%  Methods used or expected: ICM multitask kernel, RFF/ORF/SORF, Kronecker feature construction,
+%  Woodbury MLL and prediction, validation against dense \texttt{MTGPR} at small $n$.]
+
+\subsection{Multitask Gaussian process (ICM prior)}
+\label{sec:icm}
+
+At each input location $x_i \in \mathbb{R}^d$, we define a latent task vector $f(x_i) \in \mathbb{R}^T$.
+Observations satisfy
+\begin{equation}
+  \label{eq:obs-model}
+  Y_{i,t} = f_t(x_i) + \varepsilon_{i,t},
+  \qquad
+  Y \in \mathbb{R}^{n \times T}.
+\end{equation}
+The ICM separates spatial variation from cross-task correlation
+\citep{bonilla2008mtgp,alvarez2012kernels}:
+\begin{equation}
+  \label{eq:icm-element}
+  \mathrm{Cov}\bigl[f_t(x_i), f_{t'}(x_j)\bigr]
+  = B_{t,t'}\, k(x_i, x_j),
+  \qquad
+  B \in \mathbb{R}^{T \times T}\ \text{PSD}.
+\end{equation}
+Let $K_x \in \mathbb{R}^{n \times n}$ with $(K_x)_{ij} = k(x_i, x_j)$.
+With GPyTorch vectorization (task index fastest within each spatial row),
+the latent training covariance is
+\begin{equation}
+  \label{eq:kron-latent}
+  \Sig_{\mathrm{latent}} = K_x \otimes B
+  \;\in\; \mathbb{R}^{(nT)\times(nT)}.
+\end{equation}
+See \Cref{eq:kron-latent} and the joint feature identity in \Cref{eq:omega-identity} for the RFF extension.
+
+% [FILL IN: Describe \texttt{MultitaskKernel}, \texttt{MultitaskGaussianLikelihood}, and dense
+%  \texttt{MTGPR} as the reference implementation.]
+
+\subsection{Random Fourier feature approximation}
+\label{sec:rff}
+
+Random Fourier Features (RFF) \citep{rahimi2007rff} scale kernel methods by replacing an implicit
+kernel with a finite-dimensional feature map.
+For a stationary kernel $k$, Bochner's theorem writes $k$ as an integral over random frequencies
+weighted by a spectral density $p(\mathbf w)$.
+In GP+ we target the Gaussian (RBF) kernel; RFF approximates the corresponding integral by drawing
+$D$ frequencies $\mathbf w_1,\ldots,\mathbf w_D$ and averaging finitely many cosine terms.
+
+GP+ implements three sampling modes---standard RFF, orthogonal RFF (ORF), and structured ORF (SORF)---
+that differ only in how the frequency matrix $W \in \mathbb{R}^{d \times D}$ is drawn.
+After $W$ is fixed, all modes share the same cos/sin featurization and Woodbury inference
+(\Cref{sec:woodbury,sec:mt-woodbury}).
+
+Standard RFF draws each column of $W$ independently:
+\begin{equation}
+  \label{eq:rff-iid}
+  \mathbf w_j \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, I_d),
+  \qquad j = 1,\ldots,D.
+\end{equation}
+GP+ draws this via \texttt{torch.randn(d, D)} in \texttt{init\_rbf\_weights} with
+\texttt{rff\_sampling="rff"}.
+Lengthscale enters by scaling inputs before projection,
+$(\tilde{\mathbf x})_a = 10^{\omega_a/2}(\mathbf x)_a$; optional spectral rescaling of $W$ can align
+the draw more closely with the RBF spectral density.
+
+Given scaled frequencies $\tilde{\mathbf w}_j$ and inputs $\tilde{\mathbf x}$, GP+ builds cos/sin
+feature pairs (Sutherland--Schneider):
+\begin{equation}
+  \label{eq:featurize}
+  \mathbf z(x)
+  = \frac{1}{\sqrt{D}}
+  \begin{bmatrix}
+    \cos(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \cos(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}) \\
+    \sin(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x})
+  \end{bmatrix}
+  \in \mathbb{R}^{2D},
+  \qquad m := 2D.
+\end{equation}
+Stacking features for $n$ training points gives $\Ph \in \mathbb{R}^{n \times m}$ with rows
+$\Ph_{i,:} = \mathbf z(x_i)^\top$.
+The cos/sin pair is needed so the Monte Carlo estimate is real and unbiased; the identity
+$\cos a \cos b + \sin a \sin b = \cos(a-b)$ shows each frequency contributes a term that depends only
+on the input separation $\tilde{\mathbf x} - \tilde{\mathbf x}'$, as required for a stationary kernel.
+
+The finite feature map induces a low-rank Gram approximation to the spatial kernel matrix:
+\begin{equation}
+  \label{eq:rff-kernel}
+  k(x, x') \;\approx\; \mathbf z(x)^\top \mathbf z(x')
+  \quad\Longleftrightarrow\quad
+  K_x \approx \Ph\Ph^\top.
+\end{equation}
+This is the object Woodbury exploits: $\Sig = \noise I_n + \Ph\Ph^\top$ has rank structure with
+middle matrix $M \in \mathbb{R}^{m \times m}$, $m \ll n$.
+ORF and SORF (\Cref{sec:progress-orf,sec:progress-sorf}) improve the quality of this approximation at
+fixed $D$ by drawing $W$ with lower Monte Carlo variance, without changing the featurization or
+Woodbury formulas above.
+
+% [FILL IN: Optional paragraph on Bochner / spectral view if useful for the report audience.]
+
+\subsection{Woodbury inference (\texttt{RFFGPR})}
+\label{sec:woodbury}
+
+For centered scalar observations $y \in \mathbb{R}^n$, the training covariance is
+\begin{equation}
+  \label{eq:sigma-scalar}
+  \Sig = \noise I_n + \Ph\Ph^\top.
+\end{equation}
+By the Woodbury identity \citep{cutajar2017dgp},
+\begin{equation}
+  \label{eq:woodbury-scalar}
+  \Sig^{-1}
+  = (\noise I_n)^{-1}
+  - (\noise I_n)^{-1}\,
+    \Ph\,
+    \Bigl(I_m + \Ph^{\top}(\noise I_n)^{-1}\Ph\Bigr)^{-1}
+    \Ph^{\top}\,
+    (\noise I_n)^{-1},
+\end{equation}
+with middle matrix $M = I_m + \Ph^{\top}\Ph/\noise$ of size $m \times m$ (Cholesky $M$, not $\Sig$).
+The marginal log-likelihood is
+\begin{equation}
+  \label{eq:mll}
+  \log p(y \mid X)
+  = -\tfrac{1}{2}\,y^\top \Sig^{-1} y
+  - \tfrac{1}{2}\log|\Sig|
+  - \tfrac{n}{2}\log(2\pi),
+  \qquad
+  \log|\Sig| = n\log\noise + \log|M|.
+\end{equation}
+This reduces training cost from $O(n^3)$ to $O(m^3)$ when $m \ll n$.
+
+\subsection{Multitask extension: joint features and Woodbury}
+\label{sec:mt-woodbury}
+
+Let $\RB \in \mathbb{R}^{T \times T}$ satisfy $B = \RB\RB^\top$ (symmetric PSD square root of the
+full task matrix from GPyTorch's \texttt{IndexKernel}).
+Define joint features
+\begin{equation}
+  \label{eq:omega}
+  \Om = \Ph \otimes \RB
+  \;\in\; \mathbb{R}^{(nT) \times (mT)}.
+\end{equation}
+Then the Kronecker identity
+\begin{equation}
+  \label{eq:omega-identity}
+  (\Ph \otimes \RB)(\Ph \otimes \RB)^\top
+  = (\Ph\Ph^\top) \otimes B
+  \;\approx\; K_x \otimes B
+  = \Sig_{\mathrm{latent}}
+\end{equation}
+packages the ICM prior into a low-rank Gram form.
+With per-task observation noise $\noise_1,\ldots,\noise_T$ and
+$\Lambda = I_n \otimes \mathrm{diag}(\noise_1,\ldots,\noise_T)$,
+\begin{equation}
+  \label{eq:sigma-mt}
+  \Sig = \Lambda + \Om\Om^\top.
+\end{equation}
+Woodbury extends directly:
+\begin{equation}
+  \label{eq:woodbury-mt}
+  \Sig^{-1}
+  = \Lambda^{-1}
+  - \Lambda^{-1}\,\Om\,
+    \Bigl(I_{mT} + \Om^\top \Lambda^{-1} \Om\Bigr)^{-1}
+    \Om^\top \Lambda^{-1}.
+\end{equation}
+When all $\noise_t \equiv \noise$, \Cref{eq:woodbury-mt} reduces to the scalar template in
+\Cref{eq:woodbury-scalar} with dimension $nT$ and features $\Om$.
+Woodbury is advantageous when $mT \ll nT$ (e.g.\ TOA: $nT \sim 10^5$, $mT \sim 3{,}200$).
+
+% [FILL IN: Implementation plan — \texttt{RFFMTGPR}, \texttt{RFFMTWoodburyMarginalLogLikelihood},
+%  \texttt{torch.kron(phi, r\_b)}, regression tests vs.\ \texttt{MTGPR}.]
+
+% \subsection{Predictive uncertainty}
+% \label{sec:prediction}
+
+% For a test point $x_*$, the latent posterior variance (single task) is
+% \begin{equation}
+%   \label{eq:fvar}
+%   f_{\mathrm{var}}(x_*)
+%   = \|z(x_*)\|^2
+%   - z(x_*)\,Z_{\mathrm{tr}}^\top \Sig^{-1}\, Z_{\mathrm{tr}}\, z(x_*)^\top,
+% \end{equation}
+% with the multitask analogue applied in $(nT)$-dimensional vec space using $\Om$.
+% Observation predictive variance adds aleatoric noise:
+% \begin{equation}
+%   \label{eq:obs-var}
+%   \mathrm{Var}(y_* \mid y)
+%   = \max\bigl(f_{\mathrm{var}}(x_*),\,0\bigr) + \noise_t
+%   \qquad\text{(task $t$ in the multitask case).}
+% \end{equation}
+% [FILL IN: Note distinction between kernel prior, learned $\noise_t$, and optional training-only
+%  LogNormal prior on response noise.]
+
+
+% [FILL IN: Also mention val\_NLL, val\_RRMSE, per-task JSON logs, posterior plots.]
+
+\subsection{Alternative methods under comparison}
+\label{sec:alternatives}
+
+TabPFN v2.5, which I will be using as one of my baseline models, is one of the more recent versions of this FM and has improved predictive accuracy and uncertainty estimates across a broader range of tabular datasets.
+
+The computational cost of transformer attention scales quadratically in the number of rows processed in a forward pass \cite{lin2021surveytransformers}. For TabPFN-style in-context inference, if $N_c$ is the number of labeled context (training) rows and $N_q$ is the number of query rows, the computational cost scales as:
+\begin{equation}
+    \mathrm{Cost} = \mathcal{O}\!\left(N_c(N_c+N_q)\right),
+\end{equation}
+since query rows attend only to training rows and not to each other \cite{Hollmann2025NatureTabPFN}. Recent versions of TabPFN mitigate this by caching the training-context state, amortizing the $\mathcal{O}(N_c^2)$ cost across repeated queries against a fixed training set.
+% [FILL IN: Briefly describe other group pipelines and how they relate:
+%  - PCA + partitioned exact GP (fixes $d$ but not $n$; ensemble of $K$ GPs).
+%  - Kronecker / LMC fast inference with exact $K_x$ \citep{wilson2015kronecker,leroy2023lmc,lin2025latentkronecker}.
+%  - RFF-BLR \citep{sevilla2023rffblr} (shared RFF, different model class).
+%  - TabPFN and other baselines in TOA experiments.
+%  Position \texttt{RFFMTGPR} relative to these.]
+
+%=============================================================================
+\section{Experiments}
+\label{sec:progress}
+%=============================================================================
+
+% [FILL IN: What you have done so far. Suggested subsections below — delete or merge as needed.]
+
+% \subsection{Literature and mathematical groundwork}
+% \label{sec:progress-lit}
+A central part of the progress to date has been documenting and validating three random-feature
+sampling modes that were implemented on top of the GP+ package.
+All three share the same downstream recipe: draw a frequency matrix $W \in \mathbb{R}^{d \times D}$,
+featurize inputs into $\Ph \in \mathbb{R}^{n \times m}$ with $m = 2D$, then run Woodbury MLL and
+prediction (\Cref{sec:woodbury}) on the two different tasks.
+Only the draw of $W$ differs
+% ; implementation lives in
+% \texttt{gpplus/utils/rff\_utils.py} and is selected by \texttt{rff\_sampling} on
+% \texttt{RFFKernel} / \texttt{RFFGPR} / \texttt{RFFMTGPR}.
+The full implementation of RFFMTGPR is not ready for experimentation at this time.
+The data is composed of TOA spectroscopy simulations ($n \approx 49{,}000$, $d = 285$ (reduced to 270), angle of incident radiation and grain-size tasks). The current satisfactory result is as follows: the models must have an error of $10\%$ or less on the test data, with preference closer to $1\%$ error.
+
+\subsection{Random Fourier Features}
+\label{sec:progress-rff}
+
+The standard RFF construction used in GP+ is summarized in \Cref{sec:rff}:
+i.i.d.\ Gaussian frequencies (\Cref{eq:rff-iid}), cos/sin featurization (\Cref{eq:featurize}), and the
+resulting kernel approximation (\Cref{eq:rff-kernel}).
+Within the three-mode pipeline introduced above, RFF is the baseline sampler: cheapest to draw
+($O(dD)$), unbiased for the target kernel, but typically highest Monte Carlo variance in
+$\hat k(x,x') = \mathbf z(x)^\top \mathbf z(x')$ for fixed $D$.
+
+% Progress to date includes a full derivation note (\texttt{rff\_woodbury\_derivation.tex}) covering the
+% Bochner view, featurization, and Woodbury algebra, plus TOA experiments comparing RFF against ORF and
+% SORF at large $n$.
+
+
+\subsection{Orthogonal Random Features}
+\label{sec:progress-orf}
+
+Orthogonal Random Features (ORF) \citep{yu2016orf} keep the same marginal distribution
+$\mathbf w_j \sim \mathcal{N}(0, I_d)$ as RFF, but reduce kernel-estimate variance by forcing
+frequency directions to be mutually orthogonal within each block of size at most $d$.
+Theorem~1 in \citet{yu2016orf} shows this lowers variance without introducing bias.
+
+Full ORF construction.
+Plain QR on a Gaussian matrix yields unit-norm directions; Gaussian RFF norms follow a $\chi(d)$
+distribution.
+GP+ implements full ORF, which restores those norms:
+\begin{equation}
+  \label{eq:progress-orf}
+  W_{\mathrm{ORF}} = S Q,
+  \qquad
+  \mathbf w_j = s_j\,\mathbf q_j,
+\end{equation}
+where $G \sim \mathcal{N}(0,I)^{d \times d}$, $G = QR$ is a QR factorization with $Q$ orthogonal,
+$\mathbf q_j$ is column $j$ of $Q$ ($\|\mathbf q_j\| = 1$, $\mathbf q_i^\top \mathbf q_j = 0$ for $i \ne j$),
+and $s_j \sim \chi(d) = \|\mathcal{N}(0, I_d)\|$ are independent length scalings.
+% Code path: \texttt{\_sample\_orf\_weights} (\texttt{torch.linalg.qr}, then scale first $b_k$ columns).
+
+When more than $d$ frequencies are needed, GP+ builds independent ORF blocks and concatenates
+columns horizontally:
+\begin{equation}
+  \label{eq:progress-block-loop}
+  K = \left\lceil \frac{D}{d} \right\rceil,
+  \qquad
+  W = \bigl[\, W^{(1)} \,\|\, \cdots \,\|\, W^{(K)} \,\bigr] \in \mathbb{R}^{d \times D},
+  \qquad
+  \sum_{k=1}^{K} b_k = D.
+\end{equation}
+Each block uses a fresh Gaussian $\to$ QR $\to$ $\chi(d)$ draw; orthogonality holds \emph{within} a block,
+not across blocks.
+For TOA-scale settings ($d = 270$, $D = 1600$), this yields six blocks (five full, one partial).
+
+ORF costs $O(d^2 D/d) = O(dD)$ per block due to QR, but typically improves kernel approximation quality
+at fixed $D$.
+After $W$ is fixed, featurization and Woodbury steps are identical to RFF; the same structure extends to
+multitask joint features $\Om = \Ph \otimes \RB$.
+
+\subsection{Structured Orthogonal Random Features}
+\label{sec:progress-sorf}
+
+Structured ORF (SORF) \citep{yu2016orf} targets the same variance-reduction goal as ORF but replaces
+QR with a Walsh--Hadamard transform sandwiched between random sign flips, enabling
+$O(d \log d)$ construction per block via a fast Walsh--Hadamard transform (FWHT):
+\begin{equation}
+  \label{eq:progress-sorf}
+  W_{\mathrm{SORF}} = \sqrt{d}\; H\, D_1\, H\, D_2\, H\, D_3,
+\end{equation}
+where $H$ is the normalized Walsh--Hadamard matrix and $D_1, D_2, D_3$ are independent diagonal
+Rademacher matrices ($\mathrm{diag}(\pm 1)$ i.i.d.).
+Column $j$ can be written as $\mathbf w_j = \sqrt{d}\, H D_3 H D_2 H D_1 \mathbf e_j$.
+
+SORF uses the same block loop as ORF (\Cref{eq:progress-block-loop}).
+FWHT requires dimension $2^p$; inputs are padded to the next power of two, then truncated back to $d$ rows.
+The scale factor $\sqrt{d}$ uses the actual input dimension, not the padded size.
+Weights are materialized explicitly as $W \in \mathbb{R}^{d \times D}$ (no implicit apply-only path).
+
+SORF approximates ORF's orthogonal structure via Hadamard mixing; marginal distributions are only
+approximately Gaussian, but empirical kernel variance is still lower than i.i.d.\ RFF for fixed $D$.
+
+% \textbf{Comparison across modes.}
+% \begin{center}
+% \small
+% \renewcommand{\arraystretch}{1.25}
+% \begin{tabular}{@{}llll@{}}
+% \toprule
+% \textbf{Mode} & \textbf{Draw} & \textbf{Cost to build $W$} & \textbf{Variance at fixed $D$} \\
+% \midrule
+% RFF & i.i.d.\ $\mathcal{N}(0,I_d)$ columns & $O(dD)$ & highest \\
+% ORF & QR + $\chi(d)$ scaling per block & $O(d^2 D/d)$ & lower \\
+% SORF & FWHT + Rademacher signs per block & $O(d \log d \cdot D/d)$ & lower (approx.\ ORF) \\
+% \bottomrule
+% \end{tabular}
+% \end{center}
+% Downstream GP math---$\Ph$, Woodbury MLL, and multitask $\Om$---is unchanged across all three modes.
+% TOA experiment scripts (\texttt{S1\_toa\_SORF.py}, \texttt{S1\_toa\_MTGPR.py}, etc.) exercise these
+% samplers at full dataset scale.
+% [FILL IN: Internal notes completed (Woodbury derivation, multitask plan, predictive uncertainty,
+%  PCA pipeline). Key design decisions verified: $K_x \otimes B$ ordering, $\Om = \Ph \otimes \RB$,
+%  full-$B$ PSD factor via eigendecomposition.]
+
+% \subsection{Implementation}
+% \label{sec:progress-code}
+
+% [FILL IN: Status of \texttt{RFFMTGPR}, Woodbury MLL, eval hooks, TOA experiment scripts
+%  (\texttt{S1\_toa\_MTGPR.py}, etc.). Unit / regression tests vs.\ dense \texttt{MTGPR}.]
+
+\subsection{Evaluation metrics}
+\label{sec:metrics}
+
+The primary benchmark metric (per task $t$) for evaluating the model on validation and test data before plotting the posterior distributions:
+% \begin{equation}
+%   \label{eq:rrmse}
+%   \mathrm{RRMSE}_t
+%   = \frac{\mathrm{RMSE}_t}{\mathrm{std}(y_{\mathrm{test},t})}.
+  
+% \end{equation}
+
+\begin{equation}
+  \mathrm{RRMSE}_t
+  = \frac{1}{\mathrm{std}(y_{\mathrm{test},t})} \sqrt{\frac{1}{N_{test}} \sum_{i=1}^{N_{test}} (y_{i,t} - \hat{y}_{i,t})^2}.
+  \label{eq:rrmse}
+\end{equation}
+
+Afterward, the posterior distributions on some samples are plotted and these plots include the aggregate results for each task. Evaluation of the models is done by assessing the average percent error and maximum percent error on each prediction and then calculating what percentage of the predictions had under $1\%$ error.
+% [FILL IN: Runs completed, hyperparameters, RRMSE / NLL numbers, plots.
+%  Comparison with independent \texttt{RFFGPR}, \texttt{MTGPR} at small $n$, PCA-GP, TabPFN.]
+
+
+\subsection{Experiments and preliminary results}
+\label{sec:progress-experiments}
+%=============================================================================
+
+
+
+\begin{figure*}[H]
+    \centering
+    % \captionsetup{font=footnotesize}
+    \begin{minipage}[b]{0.9\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Results/tabpfn_example_0006_cos0.466_grain75.0.png}
+        \subcaption{TabPFN: $N_{train}=16,000$}
+        \label{fig tabpfn}
+    \end{minipage}
+    
+    \vspace{0.5em}
+    
+    \begin{minipage}[b]{0.9\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Results/rff_example_0003_cos0.991_grain1400.0.png}
+        \subcaption{RFF GP: $N_{train}=49,000$}
+        \label{fig rff}
+    \end{minipage}
+    
+    \vspace{0.5em}
+    
+    \begin{minipage}[b]{0.9\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Results/orf_example_0012_cos0.121_grain95.0.png}
+        \subcaption{ORF GP: $N_{train}=49,000$}
+        \label{fig orf}
+    \end{minipage}
+    
+    \vspace{0.5em}
+    
+    \begin{minipage}[b]{0.9\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{Results/sorf_example_0001_cos0.872_grain245.0.png}
+        \subcaption{SORF GP: $N_{train}=49,000$}
+        \label{fig sorf}
+    \end{minipage}
+
+    \vspace{-0.5em}
+     
+    \caption{\textbf{Visualization of the 4 different benchmark single task models:} TabPFN was trained on $16,000$ samples because its cost became too high when the training dataset was larger. This contradicts the literature, because TabPFN should handle up to $50,000$ training samples with less cost than training a GP. All three versions of the random feature GPs finish training 4 initializations within two hours using $D=1600$ and $N_{train}=49,000$, while TabPFN couldn't finish prediction within $19$ hours.}
+
+    \label{fig results}
+\end{figure*}
+
+We examine the posterior distributions and percent errors learned from each of the models in \ref{fig results}. The models tested are TabPFN v$2.5$, RFF GP, ORF GP, and SORF GP, each learning a single task at a time.
+
+The left subplot in each subfigure shows the simulated radiance of the spectra that EMIT captures from surfaces. The middle and right subplots display the posterior distribution of the $\cos{i}$ and grain size, respectively. Additional information in the legends of the posterior distribution plots includes the mean relative error, the maximum relative error, and the percentage of prediction within $1\%$ error.
+
+TabPFN v$2.5$ shows the power of a zero-shot FM in \ref{fig tabpfn}. With limited data it is able to surpass the performance of RFF GP and ORF GP. Both RFF GP and ORF GP are not able to predict more than $7\%$ of the training data within $1\%$ of the true value. 
+
+\ref{fig rff} and \ref{fig orf} highlight the problem with approximating the covariance matrix and the additional variance that can be added due to random features. The confidence intervals are too wide to be useful for decision making processes downstream. These models may be able to perform better with additional tuning and more random features $D$, but these studies will have to be done at a later time.
+
+\ref{fig sorf} shows the narrowest confidence intervals for the posterior distribution of $\cos{i}$. This could be worrisome since it is desirable to have a wide enough confidence interval to account for potential outliers. This method performs the best all around with $100\%$ of its predictions being within $1\%$ error and the mean of the error was very low at $0.02\%$. It must be compared to TabPFN when $N_{train}=16,000$ to have a better idea of how much data the methods need to reach the required performance.
+
+\section{Anticipated and Encountered Challenges}
+\label{sec:challenges}
+%=============================================================================
+
+% \subsection{Anticipated and Encountered Challenges}
+% \label{sec:challenges-past}
+
+I anticipate that the biggest challenge will be the compute available on my laptops. I anticipate that it will take at least a day to train a model on a more complex dataset. I will need to setup an account so I can use the High-Perforamnce Computing (HPC) clusters. The hyperparameters I choose to control accuracy vs speed is something that I will need to assess through ablation tests.
+
+It has also been challenging to combine the many matrix theorems that are required to make the RFFMTGPR work. I have taken steps to reduce the time it takes to train the model by generating the random features more efficiently. Careful consideration was used to develop the plots for the posterior distributions and there was a lot of debugging needed to make sure the TabPFN plots were visualized correctly.
+% [FILL IN: Examples to draw from:
+%  - Kronecker ordering ($K_x \otimes B$ vs.\ $B \otimes K_x$) and vec layout.
+%  - Task matrix factorization: \texttt{covar\_factor} $\neq$ square root of full $B$.
+%  - RFF truncation bias in hyperparameter learning \citep{potapczynski2021rfftrunc}.
+%  - Predictive variance fragility: cancellation in \Cref{eq:fvar}, float32, $f_{\mathrm{var}} \to 0$
+%    causing NLL spikes while RRMSE remains good.
+%  - Numerical cost when $mT$ is large (e.g.\ $D=1600$, $T=2$ $\Rightarrow$ $mT=6400$).
+%  - Debugging parity between dense and Woodbury paths.]
+
+% \subsection{Anticipated challenges}
+% \label{sec:challenges-future}
+
+% [FILL IN: Examples:
+%  - Phase~2: correlated task noise ($r_\ell > 0$) and full $T \times T$ predictive blocks.
+%  - Choosing $D$ / ORF vs.\ SORF for accuracy--speed trade-off.
+%  - Scaling to full TOA $n=49{,}000$ with stable uncertainty quantification.
+%  - Integration with PCA preprocessing or other input pipelines.
+%  - Writing and defending the interim / final report.]
+
+\subsection{Next steps}
+\label{sec:next-steps}
+
+I will finish implementing the RFFMTGPR with the Woodbury matrix identity for inversion and use output warping to ensure the model's confidence bounds are scientifically reliable. Then, I will test the multi-task method on the TOA dataset over the weekend. I will assess the model's performance against the baseline methods. With some hyperparameter tuning and evaluating Maximum a Posteriori (MAP) estimation, I will get the multi-task GP to perform near the baselines and then move to a more complex dataset (15 tasks). Once the model is tuned on the 15-task dataset, then I will start developing a pipeline to compare the GP model against the LUT baselines for speed and accuracy.
+% [FILL IN: Concrete timeline for the next reporting period — implementation milestones,
+%  experiment matrix, validation criteria (match \texttt{MTGPR} at small $n$, beat independent RFF on
+%  multitask metrics, etc.).]
+
+%=============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+%=============================================================================
+
+Overall, RFF are useful tools to approximate the covariance matrix. This cost of inverting the covariance matrix is notorious for being very expensive and combining this approximation with the Woodbury matrix identity allows the model to complete that inversion cheaper than the Cholesky inverse. RFF was developed further to reduce the amount of variance in the features with ORF and SORF. The results show that the RFF and ORF methods required more tuning on the TOA dataset. They may benefit from using a stronger prior and adjustment of hyperparameter priors. 
+
+Implementing SORF with GPs reduced the drawback of increased variance with RFF and the cost of generating the features with ORF while also having a significant performance increase over the other benchmark models. Combining SORF with MTGPR and Woodbury to invert the covariance matrix shows promise as a framework to build scalable kernels that perform well in both high-dimensional and large data regimes.
+% [FILL IN: Short summary of motivation, approach, progress, and planned work.]
+
+%=============================================================================
+% References: add new entries to ref.bib, then cite with \citep{key} or \citet{key}.
+% Only cited entries appear in the bibliography (natbib + BibTeX).
+%=============================================================================
+\bibliographystyle{plainnat}
+\bibliography{ref}
+
+\end{document}

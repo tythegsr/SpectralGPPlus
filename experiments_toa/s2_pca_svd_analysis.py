@@ -465,8 +465,11 @@ def run_pca_svd_analysis(
         cfg_path = config_dir / _config_name(sel, mode)
         band_meta = dict(shared_meta)
         if mode == "full":
+            # Prefer the repo-wide all-bands config when present (custom
+            # --config-dir may not contain a copy of s2_task_bands_all.json).
+            all_bands = _DEFAULT_CONFIG_DIR / "s2_task_bands_all.json"
             band_meta["task_band_config"] = str(
-                config_dir / "s2_task_bands_all.json"
+                all_bands if all_bands.is_file() else (_ROOT / "experiments_toa" / "configs" / "s2_task_bands_all.json")
             )
         _write_components_config(
             cfg_path,

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 _ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from gpplus.utils.fs_path import ensure_dir, ensure_parent, fs_path
+
 DEFAULT_ASD = _ROOT / "experiments_toa" / "data 11 QoI" / "asd_validation_set.nc"
 DEFAULT_SIM = (
     _ROOT / "experiments_toa" / "data 11 QoI" / "snow_toa_fsnow_90to100_flat_Sep03.nc"
@@ -83,6 +89,14 @@ plt.rcParams.update(
         "axes.spines.right": False,
     }
 )
+
+
+def _savefig(fig: plt.Figure, path: str | Path, **kwargs: Any) -> Path:
+    """``fig.savefig`` with Windows long-path support (MAX_PATH / 260)."""
+    ensure_parent(path)
+    p = Path(path)
+    fig.savefig(fs_path(p), **kwargs)
+    return p.resolve()
 
 
 def mean_normalized_rmse(query: np.ndarray, gallery: np.ndarray) -> np.ndarray:
@@ -318,7 +332,7 @@ def write_neighbors_excel(result: dict[str, Any], xlsx_path: str | Path) -> Path
         raise ImportError("pandas is required to write the neighbors Excel file") from exc
 
     xlsx_path = Path(xlsx_path)
-    xlsx_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_parent(xlsx_path)
 
     id_cols = ["row_type", "date", "sim_index", "mean_normalized_rmse"]
     value_cols = list(QOI_COLS) + list(AUX_COLS) + list(STD_COLS)
@@ -350,7 +364,7 @@ def write_neighbors_excel(result: dict[str, Any], xlsx_path: str | Path) -> Path
             "openpyxl is required to write .xlsx files. Install with: pip install openpyxl"
         ) from exc
 
-    with pd.ExcelWriter(xlsx_path, **writer_kwargs) as writer:
+    with pd.ExcelWriter(fs_path(xlsx_path), **writer_kwargs) as writer:
         summary_df.to_excel(writer, sheet_name="summary", index=False)
         for sc in result["scenes"]:
             rows = [sc["asd_row"], *sc["sim_rows"]]
@@ -361,7 +375,7 @@ def write_neighbors_excel(result: dict[str, Any], xlsx_path: str | Path) -> Path
             df = df[cols]
             df.to_excel(writer, sheet_name=_sheet_name(sc["sample"], sc["date"]), index=False)
 
-    return xlsx_path
+    return xlsx_path.resolve()
 
 
 def summary_for_json(result: dict[str, Any]) -> dict[str, Any]:
@@ -400,8 +414,7 @@ def plot_spectra_overlays(
     max_overlay: int = 8,
 ) -> list[Path]:
     """ASD vs neighbor spectra overlays (same style as ``asd_sim_nn_compare``)."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = ensure_dir(out_dir)
     thr = float(result["thr_mean_normalized_rmse"])
     scenes = result["scenes"]
     dates = result["dates"]
@@ -489,7 +502,7 @@ def plot_spectra_overlays(
     )
     fig.tight_layout()
     p_spec = out_dir / "00_spectra_neighbors_mnRMSE.png"
-    fig.savefig(p_spec, bbox_inches="tight")
+    _savefig(fig, p_spec, bbox_inches="tight")
     plt.close(fig)
     paths.append(p_spec)
 
@@ -526,7 +539,7 @@ def plot_spectra_overlays(
     )
     fig.tight_layout()
     p_res = out_dir / "00b_nn1_spectral_residuals.png"
-    fig.savefig(p_res, bbox_inches="tight")
+    _savefig(fig, p_res, bbox_inches="tight")
     plt.close(fig)
     paths.append(p_res)
     return paths
@@ -824,10 +837,9 @@ def plot_grain_y_pair_panels(
     )
     fig.subplots_adjust(left=0.07, right=0.90, top=0.90, bottom=0.08)
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, bbox_inches="tight")
+    _savefig(fig, out_path, bbox_inches="tight")
     plt.close(fig)
-    return out_path
+    return out_path.resolve()
 
 
 def plot_neighbor_overview(
@@ -837,8 +849,7 @@ def plot_neighbor_overview(
     model_preds: dict[str, np.ndarray] | None = None,
 ) -> list[Path]:
     """Write readable neighbor overview plots; labels use mean-normalized RMSE."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = ensure_dir(out_dir)
     thr = float(result["thr_mean_normalized_rmse"])
     scenes = result["scenes"]
     dates = result["dates"]
@@ -878,7 +889,7 @@ def plot_neighbor_overview(
         )
     fig.tight_layout()
     p1 = out_dir / "01_match_counts.png"
-    fig.savefig(p1, bbox_inches="tight")
+    _savefig(fig, p1, bbox_inches="tight")
     plt.close(fig)
     paths.append(p1)
 
@@ -999,7 +1010,7 @@ def plot_neighbor_overview(
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     p3 = out_dir / "03_qoi_spans.png"
-    fig.savefig(p3, bbox_inches="tight")
+    _savefig(fig, p3, bbox_inches="tight")
     plt.close(fig)
     paths.append(p3)
 
@@ -1019,8 +1030,7 @@ def run_asd_spectral_neighbors(
     preds_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """End-to-end: find neighbors, write Excel / plots / JSON under ``out_dir``."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = ensure_dir(out_dir)
 
     print(
         f"ASD spectral neighbors: thr_mean_normalized_rmse={thr:g}  "
@@ -1059,7 +1069,9 @@ def run_asd_spectral_neighbors(
         if model_preds:
             summary["model_pred_tasks"] = sorted(model_preds)
         jpath = out_dir / "asd_sim_neighbors_summary.json"
-        jpath.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        ensure_parent(jpath)
+        with open(fs_path(jpath), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
         artifacts["summary_json"] = str(jpath)
         print(f"Wrote summary JSON: {jpath}")
 

@@ -1,0 +1,156 @@
+{
+  "eval_dir": "C:\\Users\\forty\\tyler_gpplus\\SpectralGPPlus\\experiments_SORF\\results\\Sept03_log_final\\s4_emit_aotbelow02_sorf_1inits_numrff1000_lr0.04_nigp_freezeepochnigp200_sloperefreshes10_dtypefloat32\\asd_validation_eval",
+  "sim_path": "C:\\Users\\forty\\tyler_gpplus\\SpectralGPPlus\\experiments_toa\\data 11 QoI\\snow_toa_fsnow_90to100_flat_Sep03.nc",
+  "checkpoint_title": "S4_EMIT_ST_nTrain10000_nVal5000_nTest25000_sorfD1000_T2_correctSorfTrue",
+  "slope_min_max": [
+    0.0,
+    0.0
+  ],
+  "sim_attrs": {
+    "ele_km_range": "[0, 5]",
+    "RAA_TRUE_range": "[0, 0]",
+    "sza_range": "[0, 70]",
+    "slope_range": "[0, 0]",
+    "flat_slope_weight": [
+      0.0
+    ],
+    "flat_slope_range": "[0, 2]",
+    "saa_minus_aspect_range": "[0, 360]",
+    "cos_i_range": "[0.06, 1]",
+    "aot_range": "[0.01, 0.07]",
+    "cwv_range": "[0.05, 1]",
+    "sampling": "Sobol(19); mixture decode for liquid_water,dust,algae (P(log)=0.2, floors 0.01,0.01,0.01); linear-uniform for grain_size,cwv,aot,ele_km,RAA_TRUE,sza,saa_minus_aspect; slope mix: P([0,2])=0, else [2,0]; cos_i=sin(sza)*sin(slope)*cos(saa-aspect)+cos(sza)*cos(slope); coszen=cos(sza); when grain_size<400: dust log-uniform [1,200], algae log-uniform [1,100]; cwv kept under ATM_MIDLAT_WINTER(ele_km); cos_i kept in [0.06,1]",
+    "fine_dust_range": "[1, 200]",
+    "fine_algae_range": "[1, 100]",
+    "n_forced_dust": [
+      18510
+    ]
+  },
+  "synth_holdout_rrmse": {
+    "cos_i": 0.0006120600353618495,
+    "grain_size": 0.018205188288110512
+  },
+  "asd_model_rrmse": {
+    "cos_i": 0.06665808240701734,
+    "grain_size": 1.1190770356328712
+  },
+  "grain": {
+    "synth_rrmse": 0.018205188288110512,
+    "model_rrmse": 1.1190770356328712,
+    "nn1_label_rrmse": 0.7607088081215179,
+    "nn_med_label_rrmse": 0.6433695464480278,
+    "corr_model_nn1": 0.9818132467633929,
+    "frac_pred_inside_asd_1sigma": 0.16666666666666666,
+    "nn_span_median": 375.4428397770971
+  },
+  "cos_i": {
+    "synth_rrmse": 0.0006120600353618495,
+    "model_rrmse": 0.06665808240701734,
+    "nn1_label_rrmse": 0.7828264889330874,
+    "corr_model_nn1": 0.8938333935943104,
+    "cov95": 0.5
+  },
+  "mean_nn1_spectral_rel_rmse": 0.041295420774165655,
+  "per_sample": [
+    {
+      "sample": 1,
+      "date": "20250323",
+      "nn1_spectral_rel_rmse": 0.035429045639633235,
+      "asd_grain": 1081.7618408203125,
+      "nn1_grain": 839.4331785757095,
+      "pred_grain": 784.7758178710938,
+      "asd_cos_i": 0.7802863121032715,
+      "nn1_cos_i": 0.818369642363578,
+      "pred_cos_i": 0.7777929306030273,
+      "nn1_dust": 31.796939768977467,
+      "nn1_algae": 10.135625841757282,
+      "asd_dust": 49.32072830200195,
+      "asd_algae": 19.975757598876953
+    },
+    {
+      "sample": 2,
+      "date": "20250327",
+      "nn1_spectral_rel_rmse": 0.027724483261292884,
+      "asd_grain": 1211.06201171875,
+      "nn1_grain": 899.7003928665072,
+      "pred_grain": 756.5047607421875,
+      "asd_cos_i": 0.7972206473350525,
+      "nn1_cos_i": 0.7901468445504928,
+      "pred_cos_i": 0.7968387603759766,
+      "nn1_dust": 1.2897302955351653,
+      "nn1_algae": 81.20031101857282,
+      "asd_dust": 320.6102600097656,
+      "asd_algae": 21.414304733276367
+    },
+    {
+      "sample": 3,
+      "date": "20260113",
+      "nn1_spectral_rel_rmse": 0.06267290632970597,
+      "asd_grain": 459.270263671875,
+      "nn1_grain": 304.643825199455,
+      "pred_grain": 217.877197265625,
+      "asd_cos_i": 0.49036601185798645,
+      "nn1_cos_i": 0.6433533354265706,
+      "pred_cos_i": 0.5038681030273438,
+      "nn1_dust": 1.805459586827195,
+      "nn1_algae": 2.037078878559659,
+      "asd_dust": 243.48455810546875,
+      "asd_algae": 21.071561813354492
+    },
+    {
+      "sample": 4,
+      "date": "20260124",
+      "nn1_spectral_rel_rmse": 0.056969073358436734,
+      "asd_grain": 1032.4783935546875,
+      "nn1_grain": 627.2245750855654,
+      "pred_grain": 349.9542541503906,
+      "asd_cos_i": 0.5208756327629089,
+      "nn1_cos_i": 0.6484433737803843,
+      "pred_cos_i": 0.5285161733627319,
+      "nn1_dust": 2.018282637694017,
+      "nn1_algae": 79.18658586855047,
+      "asd_dust": 411.4883728027344,
+      "asd_algae": 21.82708168029785
+    },
+    {
+      "sample": 5,
+      "date": "20260213",
+      "nn1_spectral_rel_rmse": 0.03771575599947309,
+      "asd_grain": 171.5511016845703,
+      "nn1_grain": 117.1562140993774,
+      "pred_grain": 151.3009033203125,
+      "asd_cos_i": 0.6006031632423401,
+      "nn1_cos_i": 0.6987823953735733,
+      "pred_cos_i": 0.6116297245025635,
+      "nn1_dust": 12.370637246597376,
+      "nn1_algae": 11.673725841354468,
+      "asd_dust": 109.6766586303711,
+      "asd_algae": 20.455028533935547
+    },
+    {
+      "sample": 6,
+      "date": "20260226",
+      "nn1_spectral_rel_rmse": 0.02726126005645203,
+      "asd_grain": 1426.38671875,
+      "nn1_grain": 862.2207013517618,
+      "pred_grain": 639.0407104492188,
+      "asd_cos_i": 0.6620160341262817,
+      "nn1_cos_i": 0.6685324279183996,
+      "pred_cos_i": 0.6623884439468384,
+      "nn1_dust": 0.10194776593123904,
+      "nn1_algae": 0.2623593310694283,
+      "asd_dust": 701.1842041015625,
+      "asd_algae": 23.593788146972656
+    }
+  ],
+  "plots": [
+    "plots\\00_scorecard_synth_vs_asd.png",
+    "plots\\01_cos_i_asd_vs_pred.png",
+    "plots\\02_grain_asd_vs_pred.png",
+    "plots\\03_spectra_asd_vs_flat_nn.png",
+    "plots\\04_labels_of_closest_flat_spectra.png",
+    "plots\\05_model_error_follows_sim_label_gap.png",
+    "plots\\06_spectral_residuals_flat_nn1.png",
+    "plots\\07_takeaways.png"
+  ]
+}

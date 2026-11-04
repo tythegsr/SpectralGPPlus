@@ -60,6 +60,7 @@ def nigp_woodbury_mll_class(
     *,
     nigp_slope_refreshes: int | None = None,
     nigp_active_epochs: int | None = None,
+    nigp_slope_manual: bool = False,
 ) -> type[NIGPWoodburyMarginalLogLikelihood]:
     """Bind Woodbury form + optional paper-style slope refresh for :class:`GPTrainer`."""
 
@@ -78,6 +79,7 @@ def nigp_woodbury_mll_class(
                 woodbury_form=woodbury_form,
                 nigp_slope_refreshes=nigp_slope_refreshes,
                 nigp_active_epochs=nigp_active_epochs,
+                nigp_slope_manual=nigp_slope_manual,
             )
 
     BoundNIGPWoodburyMLL.__name__ = f"NIGPWoodburyMarginalLogLikelihood_{woodbury_form}"
@@ -98,18 +100,15 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
     and ``∇μ`` detached when forming ``d``. Requires ``model.nigp`` and
     ``model.raw_input_noise``.
 
-    When ``model.nigp_correction_enabled`` is ``False`` (freeze window), falls
-    back to the parent homoskedastic Woodbury MLL (paper step 1).
+    When ``model.use_hetero_noise`` is True, ``σ_y`` is the per-point Noise-SORF
+    ``σ_{y,het}²(x)`` (MAP mean). With NIGP off that is hetero-only; with NIGP on,
+    ``d = σ_{y,het}² + σ_nigp²``.
 
-    ``nigp_slope_refreshes`` (optional): paper-style outer-loop slopes. After the
-    correction enables, recompute ``∇μ`` this many times (including the unlock
-    step), spaced evenly over ``nigp_active_epochs`` Adam steps; reuse the cached
-    slopes between refreshes. ``None`` recomputes every step (legacy).
+    When both hetero and NIGP correction are off, falls back to the parent
+    homoskedastic Woodbury MLL.
 
-    For ``woodbury_form="dual"`` + :class:`~gpplus.models.RFFGPR`, the diag-noise
-    MLL uses fused RFF featurize VJP (same family as the freeze path) unless
-    disabled via ``GPPLUS_WOODBURY_FUSE_FEATURIZE=0`` /
-    ``GPPLUS_WOODBURY_AUTOGRAD=reference``.
+    ``nigp_slope_manual`` / ``model.hetero_nigp_manual_slopes``: refresh ``∇μ`` only
+    when the cache is empty or ``model.nigp_force_slope_refresh`` is set.
     """
 
     def __init__(
@@ -121,6 +120,7 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
         *,
         nigp_slope_refreshes: int | None = None,
         nigp_active_epochs: int | None = None,
+        nigp_slope_manual: bool = False,
     ):
         if not getattr(model, "nigp", False):
             raise ValueError(
@@ -128,7 +128,10 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
             )
         if not hasattr(model, "raw_input_noise"):
             raise ValueError("NIGP model is missing raw_input_noise parameter.")
-        if nigp_slope_refreshes is not None:
+        self.nigp_slope_manual = bool(nigp_slope_manual) or bool(
+            getattr(model, "hetero_nigp_manual_slopes", False)
+        )
+        if nigp_slope_refreshes is not None and not self.nigp_slope_manual:
             refreshes = int(nigp_slope_refreshes)
             if refreshes < 1:
                 raise ValueError(
@@ -174,6 +177,15 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
         self._slope_phase_active = True
 
     def _should_refresh_grad_mu(self) -> bool:
+        model = self.model
+        if getattr(model, "nigp_force_slope_refresh", False):
+            model.nigp_force_slope_refresh = False
+            return True
+        manual = self.nigp_slope_manual or bool(
+            getattr(model, "hetero_nigp_manual_slopes", False)
+        )
+        if manual:
+            return self._cached_grad_mu is None
         if self.nigp_slope_refreshes is None:
             return True
         if self._cached_grad_mu is None:
@@ -206,6 +218,15 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
         self._active_step += 1
         return grad_mu
 
+    def _base_observation_noise(self, model, train_x: torch.Tensor) -> torch.Tensor:
+        """Scalar ``σ_{y,hom}²`` or per-point ``σ_{y,het}²(x)``."""
+        if getattr(model, "use_hetero_noise", False) and hasattr(model, "sigma_y_het"):
+            return model.sigma_y_het(train_x)
+        noise = model.likelihood.noise
+        if noise.dim() > 1:
+            noise = noise.reshape(noise.shape[0])
+        return noise
+
     @profile
     def forward(
         self,
@@ -217,17 +238,17 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
         from ..models.rff_gpr import _drop_singleton_batch
 
         model = self.model
-        if not nigp_correction_enabled(model):
-            # Leaving the freeze window: next enable starts a fresh outer loop.
+        use_hetero = bool(getattr(model, "use_hetero_noise", False))
+        nigp_on = nigp_correction_enabled(model)
+
+        if not nigp_on and not use_hetero:
             self._slope_phase_active = False
             return super().forward(function_samples, target, *args, **kwargs)
 
         train_x = _drop_singleton_batch(model.train_inputs[0])
         mean = model.mean_module(train_x)
         target_1d = _drop_singleton_batch(target)
-        noise = model.likelihood.noise
-        if noise.dim() > 1:
-            noise = noise.reshape(noise.shape[0])
+        noise = self._base_observation_noise(model, train_x)
 
         if mean.dim() > 1 and mean.shape[0] == 1:
             mean_for_y = mean.squeeze(0)
@@ -238,9 +259,18 @@ class NIGPWoodburyMarginalLogLikelihood(RFFWoodburyMarginalLogLikelihood):
         else:
             y_centered = target_1d - mean_for_y
 
-        # Slopes from homoskedastic μ (σ_y only); detached — not from NIGP-corrected μ.
-        grad_mu = self._grad_mu_for_correction(model, train_x, y_centered, noise)
-        d = effective_noise_variance(noise, model.input_noise_var, grad_mu)
+        if nigp_on:
+            slope_noise = model.likelihood.noise
+            if slope_noise.dim() > 1:
+                slope_noise = slope_noise.reshape(slope_noise.shape[0])
+            slope_noise = slope_noise.detach()
+            grad_mu = self._grad_mu_for_correction(
+                model, train_x, y_centered, slope_noise
+            )
+            d = effective_noise_variance(noise, model.input_noise_var, grad_mu)
+        else:
+            d = noise.clamp_min(1e-12)
+            self._slope_phase_active = False
 
         if self.woodbury_form == "dual":
             fused = _try_fused_dual_rff_diag_mll(

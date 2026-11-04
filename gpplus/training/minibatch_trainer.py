@@ -33,6 +33,7 @@ from .trainer_utils import (
     SingleRunResult,
     check_early_stop,
     configure_woodbury_matmul_precision,
+    _callbacks_want_endpoint_slope_refresh,
 )
 from .svgp_elbo import SVGPELBO
 from .vi_rff_elbo import VIRFFELBO
@@ -335,6 +336,46 @@ class MinibatchGPTrainerSingleProcess:
             if check_early_stop(
                 self.stop_conditions, stop_context, epoch, best_loss, min_epochs=self.min_epochs
             ):
+                if _callbacks_want_endpoint_slope_refresh(self.callbacks):
+                    self._emit_callbacks(
+                        "on_epoch_start",
+                        {
+                            "epoch": epoch,
+                            "model": self.model,
+                            "trainer": self,
+                            "device": self.device,
+                            "endpoint_slope_refresh": True,
+                        },
+                    )
+                    try:
+                        loss = self._train_epoch(optimizer, elbo, generator)
+                    except Exception as exc:
+                        if best_state_dict is not None:
+                            abort_error = str(exc)
+                            abort_epoch = epoch
+                            logger.exception(
+                                "Endpoint slope-refresh epoch aborted; recovering best "
+                                "checkpoint (best_loss=%.6f). Error: %s",
+                                best_loss,
+                                exc,
+                            )
+                            break
+                        raise
+                    self._emit_callbacks(
+                        "on_epoch_end",
+                        {
+                            "epoch": epoch,
+                            "model": self.model,
+                            "trainer": self,
+                            "loss": loss,
+                            "device": self.device,
+                            "endpoint_slope_refresh": True,
+                        },
+                    )
+                    if loss < best_loss:
+                        best_loss = loss
+                        best_state_dict = copy.deepcopy(self.model.state_dict())
+                    epochs_trained = epoch + 1
                 break
             previous_loss = loss
 

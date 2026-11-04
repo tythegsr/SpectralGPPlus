@@ -98,6 +98,39 @@ def parse_example_indices(raw: str | None) -> list[int] | None:
     return [int(x.strip()) for x in str(raw).split(",") if x.strip()]
 
 
+def parse_n_pca_components(raw: str | int | None) -> int | str | None:
+    """Parse shared-int or per-QoI JSON path for ``n_pca_components``.
+
+    ``None`` / ``\"none\"`` → no PCA. Integers must be >= 1. Any other string is
+    treated as a path to a task PCA components JSON.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        if raw < 1:
+            raise ValueError(f"n_pca_components must be >= 1, got {raw}")
+        return int(raw)
+    s = str(raw).strip()
+    if not s or s.lower() in {"none", "null"}:
+        return None
+    try:
+        value = int(s)
+    except ValueError:
+        return s
+    if value < 1:
+        raise ValueError(f"n_pca_components must be >= 1, got {value}")
+    return value
+
+
+def pca_components_path_tag(n_pca_components: int | str | None) -> str:
+    """Short save-path token for a PCA components spec."""
+    if n_pca_components is None:
+        return ""
+    if isinstance(n_pca_components, int):
+        return f"_pca{n_pca_components}"
+    return "_pcaperQoI"
+
+
 def ensure_parent_dir(path: str | Path) -> Path:
     from gpplus.utils.fs_path import ensure_dir
 

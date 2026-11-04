@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
+import numpy as np
 import torch
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,93 @@ def asd_tasks_from_trained(
         return None
     kept = [t for t in task_names if t in ASD_TASK_NAMES]
     return kept or None
+
+
+def write_asd_eval_artifacts(
+    results: Mapping[str, Any],
+    *,
+    eval_dir: str | Path,
+    asd_path: str | Path,
+    prediction_arrays: Mapping[str, np.ndarray],
+    plot: bool = True,
+    sim_path: str | Path | None = None,
+    neighbor_thr: float = 0.04,
+    run_neighbors: bool = True,
+) -> Path:
+    """Persist ASD metrics/predictions and optionally write plots + neighbors.
+
+    Used by checkpoint-based post-train eval and in-process backends (TabPFN, GP).
+    ``prediction_arrays`` must include at least:
+    ``task_names``, ``y_true``, ``y_pred``, ``y_std``, ``lower_95``, ``upper_95``,
+    ``x_spectral``. Optional: ``y_pred_mean``, ``y_pred_mode``, ``log_mu``, ``log_sigma``.
+    """
+    eval_dir = Path(eval_dir)
+    asd_path = Path(asd_path)
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = eval_dir / "asd_validation_metrics.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(
+            dict(results),
+            f,
+            indent=2,
+            default=lambda o: float(o) if hasattr(o, "item") else o,
+        )
+    npz_path = eval_dir / "asd_validation_predictions.npz"
+    np.savez_compressed(npz_path, **{k: np.asarray(v) for k, v in prediction_arrays.items()})
+    print(f"Saved ASD metrics: {json_path}")
+    print(f"Saved ASD predictions: {npz_path}")
+
+    if plot:
+        print("\nGenerating ASD validation plots...")
+        from experiments_SORF._plot_s4_asd_validation import (
+            generate_asd_validation_plots,
+        )
+
+        plot_paths = generate_asd_validation_plots(
+            eval_dir,
+            asd_path=asd_path,
+            out_dir=eval_dir / "plots",
+        )
+        print(f"Saved {len(plot_paths)} ASD plots under {eval_dir / 'plots'}")
+
+    if run_neighbors:
+        from experiments_toa.asd_spectral_neighbors import (
+            resolve_sim_path_from_ckpt,
+            run_asd_spectral_neighbors,
+        )
+
+        resolved_sim: Path | None = None
+        if sim_path is not None:
+            candidate = Path(sim_path)
+            if candidate.is_file():
+                resolved_sim = candidate
+            else:
+                print(f"ASD neighbor analysis: sim_path not found: {candidate}")
+        if resolved_sim is None:
+            resolved_sim = resolve_sim_path_from_ckpt(eval_dir.parent)
+        if resolved_sim is None:
+            print(
+                "ASD neighbor analysis skipped: could not resolve synthetic "
+                "NetCDF (pass sim_path=training DATA_PATH or ensure gp_S4_*.json "
+                "has data_meta.emit_path)"
+            )
+        else:
+            try:
+                print("\nRunning ASD spectral-neighbor analysis...")
+                run_asd_spectral_neighbors(
+                    asd_path,
+                    resolved_sim,
+                    eval_dir,
+                    thr=neighbor_thr,
+                    write_excel=True,
+                    write_plots=True,
+                    write_json=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — keep ASD eval usable
+                print(f"ASD neighbor analysis failed: {exc!r}")
+
+    return eval_dir
 
 
 def run_s4_asd_eval_and_plots(

@@ -5,6 +5,9 @@
 
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,mathtools}
+\usepackage{amsthm}
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
 \usepackage{booktabs}
 \usepackage{colortbl}
 \usepackage{xcolor}
@@ -121,6 +124,7 @@ $\Om = \Ph \otimes \RB$ Woodbury), but each ingredient and the natural combinati
 in prior work.
 
 \subsection{Multitask and coregionalized GPs}
+\label{sec:lit-icm}
 
 The probabilistic target is the intrinsic coregionalization model (ICM): a learnable task
 covariance $B$ multiplies a shared spatial kernel,
@@ -255,6 +259,65 @@ Training uses \texttt{ExactMarginalLogLikelihood}, which materializes this covar
 with $\tilde{Y} = Y - \mu(X)$ and $\Sig$ the \textbf{joint} $(nT)\times(nT)$ training covariance
 (spatial kernel $\otimes$ task kernel, plus noise).
 
+\subsection{What is ICM?}
+\label{sec:what-is-icm}
+
+\textbf{ICM} = \textbf{Intrinsic Coregionalization Model}.
+It is the standard multitask GP prior that GPyTorch's \texttt{MultitaskKernel} implements
+(see also Section~\ref{sec:lit-icm} for literature context).
+
+\paragraph{Idea.}
+You have $T$ tasks and inputs $x \in \mathbb{R}^d$.
+Instead of fitting $T$ independent GPs, ICM separates \textbf{how inputs vary in space} from
+\textbf{how tasks correlate}:
+\begin{itemize}[nosep]
+  \item $k(x_i,x_j)$ --- one \textbf{shared spatial kernel} (same across tasks);
+  \item $B_{t,t'}$ --- \textbf{task covariance} (learned cross-task correlation);
+  \item $B \in \mathbb{R}^{T \times T}$ PSD.
+\end{itemize}
+One scalar entry of the prior is
+$\mathrm{Cov}[f_t(x_i), f_{t'}(x_j)] = B_{t,t'}\, k(x_i,x_j)$
+(Equation~\eqref{eq:icm-element} below).
+Distance in $x$ is handled by $k$; coupling between tasks is handled by~$B$.
+
+\paragraph{Joint covariance.}
+Stacking all $n \times T$ latent outputs gives the Kronecker form
+$\Sig_{\mathrm{latent}} = K_x \otimes B$ (Equation~\eqref{eq:kron-gpytorch}),
+with $(K_x)_{ij} = k(x_i,x_j)$.
+This is the \textbf{ICM prior} that dense \texttt{MTGPR} uses exactly and that
+\texttt{RFFMTGPR} approximates via $K_x \approx \Ph\Ph^\top$ and Woodbury on
+$\Om\Om^\top$ with $\Om = \Ph \otimes \RB$.
+
+\paragraph{GPPlus mapping.}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{ICM concept} & \textbf{GPPlus / GPyTorch} \\
+\midrule
+ICM prior & \texttt{MultitaskKernel} \\
+Spatial part $k$ & \texttt{covar\_module.data\_covar\_module} (e.g.\ \texttt{RFFKernel}) \\
+Task matrix $B$ & \texttt{covar\_module.task\_covar\_module} (\texttt{IndexKernel}) \\
+Dense reference model & \texttt{MTGPR} \\
+RFF + Woodbury approximation & \texttt{RFFMTGPR} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Why ``coregionalization''?}
+Tasks are \textbf{coregionalized}: they share information through~$B$.
+Large $B_{t,t'}$ means outputs for tasks $t$ and $t'$ tend to move together at the same~$x$;
+a nearly diagonal $B$ means tasks are mostly independent in the prior.
+
+\paragraph{ICM vs.\ LMC.}
+ICM is a \textbf{special case} of the Linear Model of Coregionalization (LMC).
+In the full LMC one can combine several spatial kernels with task mixing matrices;
+ICM uses \textbf{one} spatial kernel multiplied by a single task matrix~$B$---exactly
+\texttt{MultitaskKernel}.
+When this document says ``ICM,'' it means: \emph{one shared spatial GP kernel, times a learnable
+task correlation matrix $B$}---the multitask prior behind \texttt{MTGPR} and the target
+\texttt{RFFMTGPR} must reproduce.
+
 \subsection{ICM kernel (what \texttt{MultitaskKernel} encodes)}
 
 For spatial base kernel $k(\cdot,\cdot)$ (default \texttt{LogScaleKernel(GaussianKernel)},
@@ -292,15 +355,294 @@ $\Sig_{\mathrm{latent}} = K_x \otimes B$ matches \texttt{MultitaskKernel.evaluat
 Equivalently, block $(i,j)$ of $\Sig_{\mathrm{latent}}$ is the $T\times T$ matrix $k(x_i,x_j)\,B$.
 \end{samebox}
 
+\subsection{Kronecker order: why $K_x \otimes B$, not $B \otimes K_x$?}
+\label{sec:kron-order}
+
+Two questions are easy to conflate:
+\begin{enumerate}[nosep]
+  \item \textbf{Elementwise ICM} (Equation~\eqref{eq:icm-element}):
+        $\mathrm{Cov}(f_t(x_i), f_{t'}(x_j)) = B_{t,t'}\,k(x_i,x_j)$---here $B_{t,t'}$ is written
+        \emph{before} $k(x_i,x_j)$.
+  \item \textbf{Full joint matrix} $\Sig_{\mathrm{latent}} \in \mathbb{R}^{(nT)\times(nT)}$:
+        how you stack $Y \in \mathbb{R}^{n \times T}$ into $\mathrm{vec}(Y)$ fixes whether the
+        big matrix is $K_x \otimes B$ or $B \otimes K_x$.
+\end{enumerate}
+The scalar product order in \eqref{eq:icm-element} does \textbf{not} dictate the Kronecker order.
+What matters is the \textbf{vectorization convention}.
+
+\paragraph{GPyTorch / GPPlus \texttt{vec} order.}
+\texttt{train\_y.reshape(-1)} is row-major flatten: task index varies \textbf{fastest}, spatial
+index slowest. With 0-based indices $i=0,\ldots,n{-}1$ and $t=0,\ldots,T{-}1$,
+\begin{equation}
+  \label{eq:vec-gpytorch}
+  \mathrm{vec}(Y)_{\,iT + t} = Y_{i,t}.
+\end{equation}
+(1-based formulas in the literature often write $p = t + T(i-1)$; it is the same convention.)
+
+\paragraph{Why $\Sig_{\mathrm{latent}} = K_x \otimes B$.}
+For $A \in \mathbb{R}^{n \times n}$ and $B_{\mathrm{task}} \in \mathbb{R}^{T \times T}$, the
+standard Kronecker product $(A \otimes B_{\mathrm{task}})$ has blocks $A_{ij}\,B_{\mathrm{task}}$,
+each block $T \times T$, with linear index $iT + t$ for row/column $(i,t)$.
+Hence
+\begin{equation}
+  (K_x \otimes B)_{\,iT+t,\; jT+t'}
+  = (K_x)_{ij}\, B_{tt'}
+  = k(x_i,x_j)\, B_{tt'},
+\end{equation}
+which matches $\mathrm{Cov}(Y_{i,t}, Y_{j,t'})$ under \eqref{eq:vec-gpytorch}.
+So for GPyTorch: \textbf{spatial factor left, task factor right} in $\otimes$.
+
+\paragraph{What $B \otimes K_x$ would mean.}
+Swapping factors gives $(B \otimes K_x)_{\,t n + i,\; t' n + j} = B_{tt'}\,(K_x)_{ij}$---blocks are
+task-indexed, with spatial $n \times n$ matrices inside.
+That is the correct joint covariance for a \textbf{different} stacking of $Y$
+(e.g.\ spatial index fastest: $(y_{0,0}, y_{1,0}, y_{0,1}, y_{1,1}, \ldots)$).
+It is \emph{not} a permutation-free rename: $K_x \otimes B \neq B \otimes K_x$ unless $n=T=1$.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{$\mathrm{vec}(Y)$ order} & \textbf{Latent covariance} & \textbf{Joint RFF features} \\
+\midrule
+Tasks fastest (GPyTorch \texttt{reshape(-1)}) & $K_x \otimes B$ & $\Om = \Ph \otimes \RB$ \\
+Spatial fastest / other texts & $B \otimes K_x$ & $\Om = \RB \otimes \Ph$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Why $(\Ph\Ph^\top) \otimes B$ and $\Om = \Ph \otimes \RB$.}
+With $B = \RB\RB^\top$, the RFF approximation $K_x \approx \Ph\Ph^\top$ is packaged into joint
+features by the \textbf{same} Kronecker order (spatial $\otimes$ task):
+\begin{equation}
+  \label{eq:kron-feature-identity}
+  (\Ph \otimes \RB)\,(\Ph \otimes \RB)^\top
+  = (\Ph \otimes \RB)\,(\Ph^\top \otimes \RB^\top)
+  = (\Ph\Ph^\top) \otimes (\RB\RB^\top)
+  = (\Ph\Ph^\top) \otimes B,
+\end{equation}
+using $(A \otimes B)(C \otimes D) = (AC) \otimes (BD)$ and $(A \otimes B)^\top = A^\top \otimes B^\top$.
+Thus $(\Ph\Ph^\top) \otimes B$ is \textbf{not} an ad hoc choice of ``putting $B$ second''---it is
+$\Om\Om^\top$ for $\Om = \Ph \otimes \RB$.
+If you used $\RB \otimes \Ph$ instead, you would obtain $B \otimes (\Ph\Ph^\top)$, i.e.\ the
+\textbf{swapped} Kronecker order.
+
+\paragraph{What ``$\Ph$ first, $\RB$ second'' means in code.}
+PyTorch defines \texttt{torch.kron(A, B)} entrywise by
+$(A \otimes B)_{\,ip+k,\; jq+\ell} = A_{ij}\,B_{k\ell}$
+for $A \in \mathbb{R}^{n \times m}$, $B \in \mathbb{R}^{T \times T}$.
+With $\Ph \in \mathbb{R}^{n \times m}$ and $\RB \in \mathbb{R}^{T \times T}$,
+\begin{equation}
+  \label{eq:kron-torch-index}
+  \Om_{\,iT + t,\; jT + t'}
+  = (\Ph \otimes \RB)_{\,iT + t,\; jT + t'}
+  = \Ph_{i,j}\,\RB_{t,t'}.
+\end{equation}
+Row/column index $iT + t$ is exactly GPyTorch's $\mathrm{vec}(Y)$ layout
+(Equation~\eqref{eq:vec-gpytorch}): spatial $i$ slow, task $t$ fast.
+So ``spatial $\otimes$ task'' in $\Om = \Ph \otimes \RB$ is \textbf{not} the scalar order
+$B_{t,t'}\,k(x_i,x_j)$ from Equation~\eqref{eq:icm-element}; it is dictated entirely by
+how $Y$ is flattened. The left Kronecker factor must match the slow index (space),
+the right factor the fast index (tasks). That is why the code calls
+\texttt{torch.kron(phi, r\_b)} and \textbf{not} \texttt{torch.kron(r\_b, phi)}.
+
+\paragraph{Worked example: scalar writes $B$ first, Kronecker puts $B$ second.}
+\label{par:kron-worked-example}
+Take $n=2$ locations, $T=2$ tasks, and \emph{numeric} matrices (stand in for $k(x_i,x_j)$ and $B_{t,t'}$):
+\begin{equation*}
+  Y = \begin{pmatrix} y_{00} & y_{01} \\ y_{10} & y_{11} \end{pmatrix},
+  \quad
+  K_x = \begin{pmatrix} 1 & 0.5 \\ 0.2 & 1 \end{pmatrix},
+  \quad
+  B = \begin{pmatrix} 2 & 0 \\ 1 & 3 \end{pmatrix}.
+\end{equation*}
+
+\medskip
+\textbf{Step 1: how GPyTorch labels the four entries.}
+Row-major \texttt{reshape(-1)} gives tasks fastest, space slowest:
+\begin{center}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}cccl@{}}
+\toprule
+\textbf{Linear index} & \textbf{$(i,t)$} & \textbf{Variable} & \\
+\midrule
+$0$ & $(0,0)$ & $y_{00}$ & first row of $Y$, task~0 \\
+$1$ & $(0,1)$ & $y_{01}$ & first row of $Y$, task~1 \\
+$2$ & $(1,0)$ & $y_{10}$ & second row of $Y$, task~0 \\
+$3$ & $(1,1)$ & $y_{11}$ & second row of $Y$, task~1 \\
+\bottomrule
+\end{tabular}
+\end{center}
+So $\mathrm{vec}(Y) = (y_{00},\, y_{01},\, y_{10},\, y_{11})$ and index $p = iT + t$.
+
+\medskip
+\textbf{Step 2: two covariances from the ICM \emph{scalar} formula.}
+Equation~\eqref{eq:icm-element} writes $B_{t,t'}$ \emph{before} $k(x_i,x_j)$:
+\begin{align*}
+  \mathrm{Cov}(y_{00},\, y_{01})
+  &= B_{0,1}\, k(x_0,x_0) = 0 \times 1 = \mathbf{0}
+  &&\text{(same location $i{=}0$, different tasks),} \\
+  \mathrm{Cov}(y_{00},\, y_{10})
+  &= B_{0,0}\, k(x_0,x_1) = 2 \times 0.5 = \mathbf{1}
+  &&\text{(same task $t{=}0$, different locations).}
+\end{align*}
+These are the numbers that must appear at matrix positions $(0,1)$ and $(0,2)$ once we build the
+$4 \times 4$ joint covariance under GPyTorch indexing.
+
+\medskip
+\textbf{Step 3: expanded $K_x \otimes B$ ($B$ \emph{second} --- correct for GPyTorch).}
+
+\smallskip\noindent
+\textit{Block rule.} $K_x \otimes B$ is a $(2T)\times(2T)$ matrix of $T\times T$ blocks.
+Block rows/columns are indexed by spatial pair $(i,j)$; \emph{inside} each block, rows/columns are
+indexed by task pair $(t,t')$:
+\begin{equation*}
+  \boxed{
+    (K_x \otimes B)_{\,iT+t,\; jT+t'}
+    = (K_x)_{ij}\, B_{t,t'}.
+  }
+\end{equation*}
+Multiply every entry of $B$ by the scalar $(K_x)_{ij}$:
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}c|c|c@{}}
+  & $j=0$ & $j=1$ \\
+\midrule
+$i=0$
+& $(K_x)_{00}\,B = 1 \cdot \begin{pmatrix}2&0\\1&3\end{pmatrix}$
+& $(K_x)_{01}\,B = 0.5 \cdot \begin{pmatrix}2&0\\1&3\end{pmatrix}$ \\[8pt]
+$i=1$
+& $(K_x)_{10}\,B = 0.2 \cdot \begin{pmatrix}2&0\\1&3\end{pmatrix}$
+& $(K_x)_{11}\,B = 1 \cdot \begin{pmatrix}2&0\\1&3\end{pmatrix}$ \\
+\end{tabular}
+\end{center}
+Writing all $16$ entries with GPyTorch row/column labels ($y_{00}, y_{01}, y_{10}, y_{11}$):
+\begin{equation*}
+  K_x \otimes B
+  = \begin{array}{c|cccc}
+      & y_{00} & y_{01} & y_{10} & y_{11} \\ \hline
+    y_{00} & 2   & \mathbf{0} & \mathbf{1} & 0 \\
+    y_{01} & 1   & 3   & 0.5 & 1.5 \\
+    y_{10} & 0.4 & 0   & 2   & 0 \\
+    y_{11} & 0.2 & 0.6 & 1   & 3
+    \end{array}
+\end{equation*}
+\emph{How to read one cell.} Position $(0,1)$ is $i{=}0,\,t{=}0$ vs.\ $j{=}0,\,t'{=}1$:
+$(K_x)_{00}\,B_{01} = 1 \times 0 = \mathbf{0} = \mathrm{Cov}(y_{00},y_{01})$ \checkmark.
+Position $(0,2)$ is $i{=}0,\,t{=}0$ vs.\ $j{=}1,\,t'{=}0$:
+$(K_x)_{01}\,B_{00} = 0.5 \times 2 = \mathbf{1} = \mathrm{Cov}(y_{00},y_{10})$ \checkmark.
+
+\smallskip\noindent
+\textit{Pattern.} Fix a spatial pair $(i,j)$: the $T \times T$ block is $(K_x)_{ij}\,B$---a \textbf{scaled copy of the whole task matrix $B$}.
+Different locations share the same task-correlation \emph{shape}; distance only scales the block.
+
+\medskip
+\textbf{Step 4: expanded $B \otimes K_x$ ($B$ \emph{first} --- wrong layout for GPyTorch).}
+
+\smallskip\noindent
+\textit{Block rule.} $B \otimes K_x$ also has $4 \times 4$ entries, but blocks are indexed by
+\textbf{task} pair $(t,t')$; inside each block, indices are \textbf{spatial} $(i,j)$:
+\begin{equation*}
+  (B \otimes K_x)_{\,t n + i,\; t' n + j}
+  = B_{t,t'}\, (K_x)_{ij}.
+\end{equation*}
+Blocks (multiply every entry of $K_x$ by scalar $B_{tt'}$):
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}c|c|c@{}}
+  & $t'=0$ & $t'=1$ \\
+\midrule
+$t=0$
+& $B_{00}\,K_x = 2 \cdot \begin{pmatrix}1&0.5\\0.2&1\end{pmatrix}$
+& $B_{01}\,K_x = 0 \cdot \begin{pmatrix}1&0.5\\0.2&1\end{pmatrix}$ \\[8pt]
+$t=1$
+& $B_{10}\,K_x = 1 \cdot \begin{pmatrix}1&0.5\\0.2&1\end{pmatrix}$
+& $B_{11}\,K_x = 3 \cdot \begin{pmatrix}1&0.5\\0.2&1\end{pmatrix}$ \\
+\end{tabular}
+\end{center}
+The \textbf{full} $4 \times 4$ matrix (algebraically expanded) is
+\begin{equation*}
+  B \otimes K_x
+  = \begin{pmatrix}
+      2   & 1   & 0   & 0 \\
+      0.4 & 2   & 0   & 0 \\
+      1   & 0.5 & 3   & 1.5 \\
+      0.2 & 1   & 0.6 & 3
+    \end{pmatrix}.
+\end{equation*}
+But this matrix's \textbf{native} row/column order is \emph{not} GPyTorch's!
+Under $(B \otimes K_x)_{tn+i}$, linear index maps to variables as:
+\begin{center}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}cccl@{}}
+\toprule
+\textbf{Linear index} & \textbf{$(t,i)$} & \textbf{Variable} & \textbf{vs.\ GPyTorch} \\
+\midrule
+$0$ & $(0,0)$ & $y_{00}$ & same \\
+$1$ & $(0,1)$ & $y_{10}$ & GPyTorch index~$1$ is $y_{01}$ \\
+$2$ & $(1,0)$ & $y_{01}$ & GPyTorch index~$2$ is $y_{10}$ \\
+$3$ & $(1,1)$ & $y_{11}$ & same \\
+\bottomrule
+\end{tabular}
+\end{center}
+So $B \otimes K_x$ is the correct joint covariance for
+$\mathrm{vec}_\text{alt}(Y) = (y_{00}, y_{10}, y_{01}, y_{11})$ (space fastest within each task),
+\textbf{not} for GPyTorch's $(y_{00}, y_{01}, y_{10}, y_{11})$.
+
+\smallskip\noindent
+\textit{The mismatch, made explicit.} If we \textbf{mislabel} $B \otimes K_x$ with GPyTorch indices
+and read position $(0,1)$ as $\mathrm{Cov}(y_{00}, y_{01})$, we get
+$B_{00}(K_x)_{01} = 2 \times 0.5 = \mathbf{1}$, but Step~2 says the answer must be $\mathbf{0}$.
+If we read $(0,2)$ as $\mathrm{Cov}(y_{00}, y_{10})$, we get
+$B_{01}(K_x)_{00} = 0 \times 1 = \mathbf{0}$, but Step~2 says $\mathbf{1}$.
+The matrix is not ``wrong'' in isolation---it is the right matrix for a \textbf{different stacking} of $Y$.
+
+\smallskip\noindent
+\textit{Pattern.} Fix a task pair $(t,t')$: the $n \times n$ block is $B_{tt'}\,K_x$---a \textbf{scaled copy of the spatial kernel}.
+That is the block layout you want when tasks are the slow index, not when tasks are fast.
+
+\medskip
+\textbf{Step 5: side-by-side --- same two entries, two orderings.}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llcc@{}}
+\toprule
+\textbf{Question} & \textbf{Index in GPyTorch $\mathrm{vec}(Y)$} & $K_x \otimes B$ & $B \otimes K_x$ \\
+\midrule
+$\mathrm{Cov}(y_{00}, y_{01})$ & $(0,1)$ &
+$(K_x)_{00} B_{01} = 0$ \checkmark &
+$B_{00}(K_x)_{01} = 1$ $\times$ \\
+$\mathrm{Cov}(y_{00}, y_{10})$ & $(0,2)$ &
+$(K_x)_{01} B_{00} = 1$ \checkmark &
+$B_{01}(K_x)_{00} = 0$ $\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+Only $K_x \otimes B$ agrees with both the ICM scalar formula \emph{and} GPyTorch \texttt{reshape(-1)}.
+
+\medskip
+\textbf{Step 6: RFF features mirror Step~3, not Step~4.}
+With $\Ph \in \mathbb{R}^{2 \times m}$ and $\RB \in \mathbb{R}^{2 \times 2}$ ($\RB\RB^\top = B$),
+\texttt{torch.kron(Phi, R\_B)} builds $\Om$ with the \textbf{same} index law as $K_x \otimes B$:
+$\Om_{iT+t,\, jT+t'} = \Ph_{i,j}\,\RB_{t,t'}$, hence $\Om\Om^\top \approx K_x \otimes B$.
+\texttt{torch.kron(R\_B, Phi)} would build the Step~4 layout instead.
+
+\begin{samebox}
+\textbf{Takeaway.} In the scalar ICM formula, $B_{t,t'}$ is written before $k(x_i,x_j)$---that is just
+how we name one entry. The \textbf{joint matrix} is not ``$B$ then $K_x$'' or ``$K_x$ then $B$'' by
+that naming; it is determined by which index is \textbf{fast} in $\mathrm{vec}(Y)$.
+GPyTorch: tasks fast $\Rightarrow$ blocks are spatial $\Rightarrow$ $K_x \otimes B$ and $\Om = \Ph \otimes \RB$.
+\end{samebox}
+
 \begin{diffbox}
-\textbf{Common pitfall (Kronecker order).} $K_x \otimes B$ is \emph{not} the same as $B \otimes K_x$.
-The joint feature identity below uses $\Ph \otimes \RB$, not $\RB \otimes \Ph$.
-Always regression-test vector ordering against dense \texttt{MTGPR}.
+\textbf{Implementation.} Use \texttt{torch.kron(Phi, R\_B)} (\texttt{build\_icm\_joint\_features});
+\textbf{not} \texttt{torch.kron(R\_B, Phi)} unless you also change $\mathrm{vec}(Y)$.
+Always regression-test against dense \texttt{MTGPR}.
 
 \textbf{Common pitfall (task factor).} \texttt{covar\_factor} alone does \emph{not} satisfy
 $\LB\LB^\top = B$ in GPyTorch; do not set $\Om = \Ph \otimes \LB$ unless you have verified
-$\LB\LB^\top = B$ numerically. Use a PSD factor of the full $B$ (Cholesky or symmetric
-eigendecomposition square root).
+$\LB\LB^\top = B$ numerically. Use a PSD factor of the full $B$ via
+\texttt{task\_psd\_factor()} (Section~\ref{sec:rb-construction}).
 \end{diffbox}
 
 \subsection{Likelihood (what \texttt{MultitaskGaussianLikelihood} adds)}
@@ -402,22 +744,115 @@ GPyTorch uses \textbf{row-wise} stacking into $\mathrm{vec}(Y) \in \mathbb{R}^{n
   t = 1,\ldots,T,\;\; i = 1,\ldots,n,
 \end{equation}
 so task index $t$ varies \textbf{fastest} and spatial index $i$ varies slowest.
-Under this convention $\Sig_{\mathrm{latent}} = K_x \otimes B$ (Equation~\eqref{eq:kron-gpytorch}).
+Under this convention $\Sig_{\mathrm{latent}} = K_x \otimes B$ (Equation~\eqref{eq:kron-gpytorch});
+see Section~\ref{sec:kron-order} for why this is $K_x \otimes B$ and not $B \otimes K_x$.
 \textbf{All Kronecker constructions must use this ordering} (regression test vs dense \texttt{MTGPR}).
 
 %=============================================================================
 \section{Kronecker Woodbury factorization}
 %=============================================================================
 
+\subsection{Constructing $\RB$ from GPyTorch's task matrix}
+\label{sec:rb-construction}
+
+Woodbury needs $\RB \in \mathbb{R}^{T \times T}$ with $B = \RB\RB^\top$.
+GPyTorch stores the \textbf{full} task matrix $B$ in
+\texttt{covar\_module.task\_covar\_module.covar\_matrix} (low-rank plus diagonal:
+$B = \LB\LB^\top + \mathrm{diag}(\mathbf{v})$).
+The low-rank Cholesky factor \texttt{covar\_factor} ($\LB$) is \textbf{not} a square root of $B$ by itself.
+
+\begin{theorem}[Symmetric PSD square root]
+\label{thm:psd-square-root}
+Let $B \in \mathbb{R}^{T \times T}$ be symmetric positive semidefinite (PSD), i.e.\
+$\mathbf{v}^\top B \mathbf{v} \ge 0$ for all $\mathbf{v} \in \mathbb{R}^T$.
+Then there exists $\RB \in \mathbb{R}^{T \times T}$ such that
+\begin{equation}
+  \label{eq:psd-sqrt-existence}
+  B = \RB \RB^\top.
+\end{equation}
+If $B = Q \Lambda Q^\top$ is an eigendecomposition with $Q$ orthogonal and
+$\Lambda = \mathrm{diag}(\lambda_1,\ldots,\lambda_T)$, $\lambda_t \ge 0$, then one choice is
+\begin{equation}
+  \label{eq:psd-sqrt-construct}
+  \RB = Q\,\Lambda^{1/2}\,Q^\top,
+  \qquad
+  \Lambda^{1/2} := \mathrm{diag}(\sqrt{\lambda_1},\ldots,\sqrt{\lambda_T}),
+\end{equation}
+so that $\RB\RB^\top = Q\Lambda Q^\top = B$.
+The factor $\RB$ is \textbf{not unique} (unlike the lower-triangular Cholesky factor of a strictly
+PD matrix); any $\RB$ satisfying \eqref{eq:psd-sqrt-existence} is valid for building
+$\Om = \Ph \otimes \RB$ and $\Om\Om^\top$.
+\end{theorem}
+
+\begin{proof}[Sketch]
+Direct computation: $\RB\RB^\top = Q\Lambda^{1/2}Q^\top Q\Lambda^{1/2}Q^\top = Q\Lambda Q^\top = B$.
+Existence follows from the spectral theorem for real symmetric matrices.
+\end{proof}
+
+\paragraph{Not Cholesky, not QR.}
+\eqref{eq:psd-sqrt-existence} is a \textbf{Gram factorization} $B = \RB\RB^\top$ (same structural
+role as $\Ph\Ph^\top \approx K_x$ for Woodbury).
+Cholesky gives $B = LL^\top$ with $L$ \emph{lower triangular} (unique when $B$ is strictly PD);
+\eqref{eq:psd-sqrt-construct} produces a \emph{symmetric} $\RB$.
+QR factorization ($A=QR$) is a different decomposition and is not used here.
+GPyTorch's \texttt{covar\_factor} $\LB$ satisfies only $\LB\LB^\top \ne B$ in general because
+$B = \LB\LB^\top + \mathrm{diag}(\mathbf{v})$; Theorem~\ref{thm:psd-square-root} applies to the
+\textbf{full} dense $B$ from \texttt{covar\_matrix}.
+
+\paragraph{Algorithm (implemented in \texttt{task\_psd\_factor}).}
+\begin{enumerate}[nosep]
+  \item $B \leftarrow \texttt{covar\_matrix.to\_dense()}$.
+  \item Symmetrize: $B \leftarrow \tfrac{1}{2}(B + B^\top)$.
+  \item Eigendecomposition: $B = Q\,\mathrm{diag}(\lambda_1,\ldots,\lambda_T)\,Q^\top$
+        with $Q$ orthogonal and $\lambda_t \ge 0$.
+  \item Clamp: $\tilde{\lambda}_t = \max(\lambda_t, \varepsilon)$ (default $\varepsilon = 10^{-8}$).
+  \item Symmetric PSD square root:
+        \begin{equation}
+          \label{eq:rb-eigh}
+          \RB = Q\,\mathrm{diag}(\sqrt{\tilde{\lambda}_1},\ldots,\sqrt{\tilde{\lambda}_T})\,Q^\top
+          \quad\Rightarrow\quad \RB\RB^\top = B \ \text{(up to clamping)}.
+        \end{equation}
+\end{enumerate}
+This is the constructive form \eqref{eq:psd-sqrt-construct} from Theorem~\ref{thm:psd-square-root}
+with clamped eigenvalues.
+Any equivalent factor works (Cholesky of $B$ when $B$ is numerically PD); GPPlus uses
+\eqref{eq:rb-eigh} because it handles semidefinite $B$ and matches \texttt{torch.linalg.eigh}.
+
+\paragraph{Code path.}
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Step} & \textbf{Location} \\
+\midrule
+Read $B$ & \texttt{RFFMTGPR.task\_psd\_factor()} \\
+         & $\leftarrow$ \texttt{covar\_module.task\_covar\_module.covar\_matrix} \\
+Build $\RB$ & \texttt{gpplus/utils/rff\_utils.py::task\_psd\_factor()} \\
+$\Ph$ (scaled spatial RFF) & \texttt{RFFMTGPR.scaled\_spatial\_features(x)} \\
+$\Om = \Ph \otimes \RB$ & \texttt{RFFMTGPR.joint\_features(x)} \\
+         & $\rightarrow$ \texttt{build\_icm\_joint\_features(phi, r\_b)} \\
+         & $\rightarrow$ \texttt{torch.kron(phi, r\_b)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{samebox}
+\textbf{Shapes.} $\Ph \in \mathbb{R}^{n \times m}$, $\RB \in \mathbb{R}^{T \times T}$,
+$\Om \in \mathbb{R}^{(nT) \times (mT)}$.
+Each row of $\Om$ is one $(x_i, t)$ pair in GPyTorch vec order (Equation~\eqref{eq:kron-torch-index}).
+\end{samebox}
+
 \subsection{Key identity}
 
-Let $\RB \in \mathbb{R}^{T \times T}$ satisfy $B = \RB\RB^\top$ (any PSD square root of the
-\textbf{full} task matrix $B$).
-For $K_x = \Ph\Ph^\top$ and GPyTorch vec order (Section~\ref{sec:mtgpr}):
+Let $\RB \in \mathbb{R}^{T \times T}$ satisfy $B = \RB\RB^\top$ (Theorem~\ref{thm:psd-square-root};
+any symmetric PSD square root of the \textbf{full} task matrix $B$).
+For $K_x = \Ph\Ph^\top$ and GPyTorch vec order (Sections~\ref{sec:mtgpr}, \ref{sec:kron-order}):
 \begin{equation}
   \label{eq:kronecker-gram}
   K_x \otimes B
-  = (\Ph \otimes \RB)\,(\Ph \otimes \RB)^\top.
+  = (\Ph \otimes \RB)\,(\Ph \otimes \RB)^\top
+  = (\Ph\Ph^\top) \otimes B
+  \qquad\text{(Equation~\eqref{eq:kron-feature-identity}).}
 \end{equation}
 
 Define the \textbf{joint feature matrix} (note order: spatial $\otimes$ task)
@@ -433,14 +868,14 @@ Columns are $mT$ in general (not $m r_k$), because $B$ is $T \times T$ even when
 \texttt{rank\_kernel} is small.
 
 \begin{diffbox}
-\textbf{Not} $\Om = \RB \otimes \Ph$. That factorization yields $B \otimes K_x$, which is the
-wrong Kronecker order for GPyTorch \texttt{MTGPR}. Implementation and unit tests must use
-\texttt{torch.kron(Phi, R\_B)} with $\Ph \in \mathbb{R}^{n \times m}$, $\RB \in \mathbb{R}^{T \times T}$
+\textbf{Not} $\Om = \RB \otimes \Ph$ (Section~\ref{sec:kron-order}): that yields $B \otimes K_x$,
+the wrong order for GPyTorch \texttt{MTGPR}. Use \texttt{torch.kron(Phi, R\_B)} with
+$\Ph \in \mathbb{R}^{n \times m}$, $\RB \in \mathbb{R}^{T \times T}$
 (\texttt{.contiguous()} on both factors before \texttt{kron}).
 
 \textbf{Do not} use \texttt{covar\_factor} as $\RB$ unless $\LB\LB^\top = B$ has been verified;
 in standard GPyTorch \texttt{IndexKernel} it does not (diagonal task variance is separate).
-Build $\RB$ from \texttt{covar\_matrix} via Cholesky or symmetric eigendecomposition.
+Use \texttt{task\_psd\_factor()} (Section~\ref{sec:rb-construction}).
 \end{diffbox}
 
 \begin{samebox}
@@ -603,7 +1038,7 @@ Implement Phase~1 (diagonal $\Lambda$) first; defer full $r_\ell > 0$ parity to 
 \textbf{Math} & \textbf{GPPlus (new)} \\
 \midrule
 $\Ph(x)$ & \texttt{RFFMTGPR.scaled\_spatial\_features(x)} \\
-$\RB$ (PSD factor of $B$) & \texttt{task\_psd\_factor()} from \texttt{covar\_module.task\_covar.covar\_matrix} \\
+$\RB$ (PSD factor of $B$) & \texttt{task\_psd\_factor()} $\leftarrow$ \texttt{covar\_matrix} (Section~\ref{sec:rb-construction}) \\
 $\Om = \Ph \otimes \RB$ & \texttt{RFFMTGPR.joint\_features(x)} \\
 Woodbury MLL & \texttt{RFFMTWoodburyMarginalLogLikelihood} \\
 Predict $(n_\ast, T)$ & \texttt{evaluate\_rff\_mt\_gp\_model} \\

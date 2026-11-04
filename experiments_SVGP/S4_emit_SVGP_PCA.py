@@ -23,15 +23,15 @@ _RFF_DIR = _ROOT / "experiments_RFF"
 # ---------------------------------------------------------------------------
 # IDE RUN CONFIGURATION — edit these, then press Run.
 # ---------------------------------------------------------------------------
-QOI: list[str] | None = ["cos_i", "grain_size"]  # subset; None = all 11 S4 tasks
-N_TRAIN = 20000
+QOI: list[str] | None = ["cos_i", "grain_size", "dust", "algae", "cwv", "lwc", "aot"]  # subset; None = all 11 S4 tasks
+N_TRAIN = 10000
 N_VAL = 5000
 NUM_INDUCING = 512
 LEARN_INDUCING_LOCATIONS = True
 BATCH_SIZE = 1024
 VARIATIONAL_LR: float | None = None
 KL_BETA = 1.0
-NUM_INITS = 1
+NUM_INITS = 4
 NUM_EPOCHS = 300
 LR = 0.05
 ADAM_STOP_PATIENCE = 50
@@ -57,12 +57,18 @@ ASD_PATH: str | None = str(
 RESPONSE_NOISE_PRIOR = False
 NOISE_VAR_FRACTION = 0.01
 NOISE_PRIOR_LOG_SCALE = 0.5
-LOG_SCALE_QOI: list[str] | None = []
+LOG_SCALE_QOI: list[str] | None = ["dust", "algae"]
 LOGIT_SCALE_QOI: list[str] | None = []
-LOG_OFFSETS: dict[str, float] | None = None
+LOG_OFFSETS: dict[str, float] | None = {"dust": 10.0, "algae": 10.0}
 # PCA only — do not enable NIGP in this entry.
 NIGP = False
-N_PCA_COMPONENTS: int = 12
+# Per-QoI PCA dims from s2_pca_svd_analysis.py on pure_flat_Sep04 (supervised / full).
+N_PCA_COMPONENTS: int | str = str(
+    _ROOT
+    / "experiments_toa"
+    / "configs"
+    / "s4_task_pca_components_ridge_full_pure_flat_Sep04.json"
+)
 PCA_SVD_SOLVER = "randomized"
 FILTER_VALID_LABELS = False
 OFF_FLOOR_TRAIN_TASKS: list[str] | None = []
@@ -70,15 +76,15 @@ TASK_BAND_CONFIG: str | None = None
 LOG_LEVEL = "INFO"
 LOG_FILE: str | None = None
 PARALLEL_VERBOSE = 10
-LOG_EVERY_N_EPOCHS = 10
-VAL_LOG_EVERY_N_EPOCHS = 10
+LOG_EVERY_N_EPOCHS = 50
+VAL_LOG_EVERY_N_EPOCHS = 50
 TRAINING_LOG = True
 # EMIT processed or snow-TOA simulation NetCDF (schema auto-detected).
 DATA_PATH: str | None = str(
     _ROOT
     / "experiments_toa"
     / "data 11 QoI"
-    / "snow_toa_fsnow_90to100_low_part_Sep03.nc"
+    / "snow_toa_fsnow_pure_flat_Sep04.nc"
 )
 # ---------------------------------------------------------------------------
 
@@ -90,7 +96,11 @@ from experiments_toa.paths import pin_toa_import_paths
 pin_toa_import_paths(_MTGPR_DIR, _RFF_DIR, _GP_DIR, _SVGP_DIR)
 
 import gpplus
-from experiments_toa.s2_cli import parse_example_indices
+from experiments_toa.s2_cli import (
+    parse_example_indices,
+    parse_n_pca_components,
+    pca_components_path_tag,
+)
 from experiments_toa.s2_constants import S4_LOGIT_BOUNDS
 from experiments_toa.s4_asd_posttrain import run_s4_asd_eval_and_plots
 from emit_s4_svgp_base import parse_s4_task_names, run_s4_emit_svgp
@@ -141,9 +151,12 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--n-pca-components",
-        type=int,
-        default=N_PCA_COMPONENTS,
-        help="PCA dimensionality (required for this entry; default 12)",
+        type=str,
+        default=str(N_PCA_COMPONENTS),
+        help=(
+            "Shared PCA dim (int) or path to per-QoI JSON from "
+            "s2_pca_svd_analysis.py (default: Sep04 ridge_full config)"
+        ),
     )
     parser.add_argument(
         "--filter-valid-labels",
@@ -165,14 +178,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.n_pca_components is None or int(args.n_pca_components) <= 0:
-        parser.error("This PCA entry requires --n-pca-components > 0")
+    try:
+        n_pca_components = parse_n_pca_components(args.n_pca_components)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if n_pca_components is None:
+        parser.error(
+            "This PCA entry requires --n-pca-components (int >= 1 or JSON path)"
+        )
 
-    pca_str = f"_pca{args.n_pca_components}"
+    pca_str = pca_components_path_tag(n_pca_components)
     band_str = "_taskbandconfig" if TASK_BAND_CONFIG else ""
     of_str = "_offfloor" if OFF_FLOOR_TRAIN_TASKS else ""
     save_path = args.save_path or (
-        f"experiments_SVGP/results/Sept03/s4_emit_svgp_pca_{args.num_inits}inits_"
+        f"experiments_SVGP/results/Sept08/s4_emit_svgp_pca_{args.num_inits}inits_"
         f"M{args.num_inducing}_batch{args.batch_size}_lr{args.lr}"
         f"{pca_str}{band_str}{of_str}_dtype{args.dtype}"
     )
@@ -195,7 +214,7 @@ if __name__ == "__main__":
     qoi = parse_s4_task_names(args.qoi if args.qoi is not None else QOI)
     print(
         f"S4 EMIT independent SVGP+PCA  M={args.num_inducing}  batch={args.batch_size}  "
-        f"nigp=False  pca={args.n_pca_components}  qoi={qoi}  n_train={args.n_train}  "
+        f"nigp=False  pca={n_pca_components}  qoi={qoi}  n_train={args.n_train}  "
         f"n_val={args.n_val}  log_qoi={LOG_SCALE_QOI}  logit_qoi={LOGIT_SCALE_QOI}  "
         f"device={device}  dtype={args.dtype}"
     )
@@ -241,7 +260,7 @@ if __name__ == "__main__":
         task_names=qoi,
         nigp=False,
         freeze_epoch_nigp=0,
-        n_pca_components=args.n_pca_components,
+        n_pca_components=n_pca_components,
         pca_svd_solver=PCA_SVD_SOLVER,
         filter_valid_labels=args.filter_valid_labels,
         task_band_config=TASK_BAND_CONFIG,

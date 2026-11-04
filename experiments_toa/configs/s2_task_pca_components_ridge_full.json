@@ -8,18 +8,18 @@
   "n_train": 16000,
   "x_transform": "none",
   "seed": 42,
-  "default": 132,
+  "default": 199,
   "tasks": {
-    "algae": 14,
-    "aot": 132,
-    "cos_i": 17,
-    "cwv": 24,
-    "dust": 28,
-    "fNPV": 9,
-    "fPV": 18,
-    "fsnow": 33,
-    "fsoil": 13,
-    "grain_size": 20,
-    "liquid_water": 16
+    "algae": 12,
+    "aot": 4,
+    "cos_i": 4,
+    "cwv": 81,
+    "dust": 37,
+    "fNPV": 37,
+    "fPV": 199,
+    "fsnow": 113,
+    "fsoil": 162,
+    "grain_size": 161,
+    "liquid_water": 161
   }
 }

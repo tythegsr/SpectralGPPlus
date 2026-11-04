@@ -209,6 +209,34 @@ def main() -> None:
             cmd.extend(["--band-config", str(band_cfg)])
         jobs.append(("s2_per_qoi_band_selection", cmd))
 
+    pca_script = _ROOT / "experiments_toa" / "s2_pca_svd_analysis.py"
+    if pca_script.is_file():
+        jobs.append(
+            (
+                "s2_pca_svd_analysis",
+                [
+                    PY,
+                    str(pca_script),
+                    "--data-path",
+                    str(SIM),
+                    "--out-dir",
+                    str(OUT_ROOT / "pca_svd"),
+                    "--config-dir",
+                    str(OUT_ROOT / "pca_svd" / "configs"),
+                    "--band-mode",
+                    "full",
+                    "--selection",
+                    "both",
+                    "--task-band-config",
+                    str(_ROOT / "experiments_toa" / "configs" / "s2_task_bands_all.json"),
+                    "--n-train",
+                    "16000",
+                    "--input-variable",
+                    "toa_radiance",
+                ],
+            )
+        )
+
     results = []
     for name, cmd in jobs:
         results.append(run(name, cmd))

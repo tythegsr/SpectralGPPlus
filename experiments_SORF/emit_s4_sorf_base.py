@@ -7,10 +7,12 @@ Uses radiance + geometry aux (coszen, ele_km) and S4 QoI labels from
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -65,6 +67,7 @@ from gpplus.models import RFFGPR
 from gpplus.training import (
     ConvergencePatienceStopCondition,
     GPTrainer,
+    HeteroNIGPScheduleCallback,
     MinLossChangeStopCondition,
     NIGPInputNoiseFreezeCallback,
     RFFParameterInitializer,
@@ -115,6 +118,196 @@ from rff_experiment_utils import extract_learned_likelihood_noise
 from toa_stgp_checkpoint import checkpoint_path_for_run, save_toa_stgp_checkpoint
 
 RFF_SAMPLING_CHOICES = ("rff", "orf", "sorf")
+SPECTRAL_KERNEL_CHOICES = ("rbf", "matern32")
+
+
+def resolve_num_epochs_by_task(
+    task_names: Sequence[str],
+    num_epochs: int,
+    num_epochs_by_task: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    """Default ``num_epochs`` for every QoI, with optional per-QoI overrides."""
+    default = int(num_epochs)
+    if default < 1:
+        raise ValueError(f"num_epochs must be >= 1, got {num_epochs}")
+    overrides = {str(k): int(v) for k, v in dict(num_epochs_by_task or {}).items()}
+    unknown = sorted(set(overrides) - set(task_names))
+    if unknown:
+        raise ValueError(f"num_epochs_by_task keys not in run QoIs: {unknown}")
+    for name, epochs in overrides.items():
+        if epochs < 1:
+            raise ValueError(f"num_epochs_by_task[{name!r}] must be >= 1, got {epochs}")
+    return {str(name): overrides.get(str(name), default) for name in task_names}
+
+
+def resolve_predict_n_jobs(
+    device: str,
+    n_tasks: int,
+    predict_n_jobs: int | None = None,
+) -> int:
+    """Default predict parallelism: all QoIs on CPU; 1 on single GPU; n_gpus if multi-GPU."""
+    n_tasks = max(1, int(n_tasks))
+    if predict_n_jobs is not None:
+        return max(1, int(predict_n_jobs))
+    if str(device).startswith("cuda"):
+        if torch.cuda.is_available():
+            n_gpus = int(torch.cuda.device_count())
+            if n_gpus > 1:
+                return min(n_tasks, n_gpus)
+        return 1
+    return min(n_tasks, int(os.cpu_count() or 1))
+
+
+def _predict_worker_device(base_device: str, worker_index: int, n_jobs: int) -> str:
+    """Round-robin CUDA devices when multi-GPU predict is enabled."""
+    base = str(base_device)
+    if base.startswith("cuda") and torch.cuda.is_available():
+        n_gpus = int(torch.cuda.device_count())
+        if n_gpus > 1 and int(n_jobs) > 1:
+            return f"cuda:{int(worker_index) % n_gpus}"
+        if ":" in base:
+            return base
+        return "cuda:0" if base == "cuda" else base
+    return "cpu" if base == "cpu" else base
+
+
+def _predict_s4_qoi_pack(
+    pack: dict[str, Any],
+    *,
+    worker_device: str,
+    dtype: torch.dtype,
+    predict_chunk_size: int,
+    warps,
+    standardize_y: bool,
+    rel_tolerance: float,
+) -> dict[str, Any]:
+    """Run NIGP/SORF predict + inverse-y metrics for one stashed QoI pack."""
+    task_name = str(pack["task_name"])
+    model = pack["model"]
+    x_te = pack["x_te"]
+    y_te = pack["y_te"]
+    y_scaler = pack["y_scaler"]
+    train_time = float(pack["train_time"])
+
+    model = model.to(device=worker_device)
+    x_te_dev = x_te.to(device=worker_device, dtype=dtype)
+    model.eval()
+    model.invalidate_feature_cache()
+    t_pred = time.time()
+    pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
+        model, x_te_dev, chunk_size=predict_chunk_size, **rff_eval_kwargs(dtype)
+    )
+    if str(worker_device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    prediction_time = time.time() - t_pred
+
+    inv = inverse_y_s2(
+        pred_mean.detach().cpu(),
+        pred_std.detach().cpu(),
+        lower.detach().cpu(),
+        upper.detach().cpu(),
+        task_name=task_name,
+        y_scaler=y_scaler,
+        standardize_y=standardize_y,
+        warps=warps,
+        extended=True,
+    )
+    pred_mean_p, pred_std_p, lower_p, upper_p = inv.as_tuple()
+    computed = compute_metrics(
+        y_te.cpu(),
+        pred_mean_p,
+        output_std=pred_std_p,
+        lower_95=lower_p,
+        upper_95=upper_p,
+        training_time=train_time,
+        prediction_time=prediction_time,
+    )
+    rel_m = compute_relative_error_metrics(
+        y_te.cpu().numpy(),
+        pred_mean_p.numpy(),
+        rel_tolerance=rel_tolerance,
+    )
+    cov_m = compute_prediction_coverage_metrics(
+        y_te.cpu().numpy(),
+        pred_mean_p.numpy(),
+        pred_std_p.numpy(),
+    )
+
+    model.cpu()
+    if str(worker_device).startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return {
+        "task_name": task_name,
+        "prediction_time": prediction_time,
+        "inv": inv,
+        "pred_mean": pred_mean_p,
+        "pred_std": pred_std_p,
+        "lower": lower_p,
+        "upper": upper_p,
+        "computed": computed,
+        "rel_m": rel_m,
+        "cov_m": cov_m,
+        "best_loss": pack["best_loss"],
+        "learned_noise": pack["learned_noise"],
+        "best_run": pack["best_run"],
+        "runs": pack["runs"],
+        "task_epochs": pack["task_epochs"],
+        "y_te": y_te,
+    }
+
+
+def run_s4_predict_phase(
+    packs: Sequence[dict[str, Any]],
+    *,
+    device: str,
+    dtype: torch.dtype,
+    predict_chunk_size: int,
+    warps,
+    standardize_y: bool,
+    rel_tolerance: float,
+    predict_n_jobs: int,
+) -> tuple[list[dict[str, Any]], float, float]:
+    """Parallel (or sequential) predict over stashed QoI packs.
+
+    Returns ``(results_in_pack_order, wall_s, sum_s)``.
+    """
+    n = len(packs)
+    if n == 0:
+        return [], 0.0, 0.0
+    jobs = max(1, int(predict_n_jobs))
+    results: list[dict[str, Any] | None] = [None] * n
+
+    def _one(i: int, pack: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        worker_device = _predict_worker_device(device, i, jobs)
+        out = _predict_s4_qoi_pack(
+            pack,
+            worker_device=worker_device,
+            dtype=dtype,
+            predict_chunk_size=predict_chunk_size,
+            warps=warps,
+            standardize_y=standardize_y,
+            rel_tolerance=rel_tolerance,
+        )
+        return i, out
+
+    t0 = time.time()
+    if jobs == 1:
+        for i, pack in enumerate(packs):
+            idx, out = _one(i, pack)
+            results[idx] = out
+    else:
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futs = [pool.submit(_one, i, pack) for i, pack in enumerate(packs)]
+            for fut in as_completed(futs):
+                idx, out = fut.result()
+                results[idx] = out
+    wall_s = time.time() - t0
+    ordered = [r for r in results if r is not None]
+    if len(ordered) != n:
+        raise RuntimeError("predict phase lost one or more QoI results")
+    sum_s = float(sum(float(r["prediction_time"]) for r in ordered))
+    return ordered, wall_s, sum_s
 
 
 def _task_input_columns(
@@ -147,9 +340,11 @@ def run_s4_emit_sorf(
     n_val: int = 5000,
     num_rff: int | None = None,
     rff_sampling: Literal["rff", "orf", "sorf"] = "sorf",
+    spectral_kernel: Literal["rbf", "matern32"] = "rbf",
     seed: int = 42,
     num_inits: int = 1,
     num_epochs: int = 2000,
+    num_epochs_by_task: Mapping[str, int] | None = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.float32,
     save_path: str | None = None,
@@ -158,6 +353,7 @@ def run_s4_emit_sorf(
     standardize_y: bool = True,
     ard: bool = True,
     predict_chunk_size: int = 2048,
+    predict_n_jobs: int | None = None,
     n_jobs: int | None = None,
     optimizer_kwargs: dict | None = None,
     monitor_validation: bool = True,
@@ -191,15 +387,29 @@ def run_s4_emit_sorf(
     task_band_config: str | None = None,
     off_floor_train_tasks: Sequence[str] | None = None,
     floor_thresholds: Mapping[str, float] | None = None,
+    # S5 Hetero-NIGP schedule (defaults off → S4 unchanged).
+    hetero_sorf: bool = False,
+    num_rff_het: int = 64,
+    hetero_mode: str = "additive",
+    epochs_hom: int = 0,
+    epochs_het: int = 0,
+    title_prefix: str | None = None,
 ) -> dict:
     """Train independent SORF RFFGPR + NIGP models on EMIT snow90 (Woodbury)."""
     if rff_sampling not in RFF_SAMPLING_CHOICES:
         raise ValueError(
             f"rff_sampling must be one of {RFF_SAMPLING_CHOICES}, got {rff_sampling!r}"
         )
+    if spectral_kernel not in SPECTRAL_KERNEL_CHOICES:
+        raise ValueError(
+            f"spectral_kernel must be one of {SPECTRAL_KERNEL_CHOICES}, "
+            f"got {spectral_kernel!r}"
+        )
     correct_sorf = bool(correct_sorf) if rff_sampling == "sorf" else False
     names = parse_s4_task_names(task_names)
     num_tasks = len(names)
+    epochs_by_task = resolve_num_epochs_by_task(names, num_epochs, num_epochs_by_task)
+    max_epochs = max(epochs_by_task.values())
     emit_path = Path(data_path) if data_path is not None else _DEFAULT_EMIT_PATH
     wl_path = Path(wl_src) if wl_src is not None else _DEFAULT_WL_SRC
 
@@ -210,7 +420,16 @@ def run_s4_emit_sorf(
     if num_rff is None:
         num_rff = min(512, max(64, n_train // 3))
 
-    if num_epochs <= 1:
+    hetero_sorf = bool(hetero_sorf)
+    if hetero_sorf:
+        nigp = True
+        if int(epochs_hom) + int(epochs_het) >= int(max_epochs):
+            raise ValueError(
+                f"epochs_hom ({epochs_hom}) + epochs_het ({epochs_het}) "
+                f"must be < num_epochs (max over tasks={max_epochs})"
+            )
+
+    if max_epochs <= 1:
         optimizer_class = LBFGSScipy
         default_optimizer_kwargs = DEFAULT_LBFGS_KWARGS
         stop_conditions = [
@@ -295,22 +514,38 @@ def run_s4_emit_sorf(
     )
 
     title = (
-        f"S4_EMIT_ST_nTrain{n_train}_nVal{n_val_eff}_nTest{n_test}_"
+        f"{title_prefix or 'S4_EMIT'}_ST_nTrain{n_train}_nVal{n_val_eff}_nTest{n_test}_"
         f"{rff_sampling}D{num_rff}_T{num_tasks}"
     )
     if rff_sampling == "sorf":
         title = f"{title}_correctSorf{correct_sorf}"
+    if spectral_kernel != "rbf":
+        title = f"{title}_{spectral_kernel}"
+    if hetero_sorf:
+        from gpplus.utils.hetero_noise import hetero_folder_tag
+
+        title = f"{title}{hetero_folder_tag(hetero_mode=hetero_mode, epochs_hom=epochs_hom, epochs_het=epochs_het, num_rff_het=num_rff_het)}"
     feature_dim = 2 * num_rff
     sampling_label = rff_sampling.upper()
 
+    epoch_overrides = {
+        k: v for k, v in epochs_by_task.items() if v != int(num_epochs)
+    }
     print("=" * 60)
     print(title)
     print(
         f"Independent {sampling_label}-GP (Woodbury), D={num_rff}, m={feature_dim}, "
-        f"ARD={ard}, dtype={dtype}, inits={num_inits}, epochs={num_epochs}, tasks={names}, "
-        f"n_bands={S4_SPECTRAL_DIM}, input_dim={input_dim}, aux={aux_indices}, "
-        f"nigp={bool(nigp)}"
+        f"spectral_kernel={spectral_kernel}, ARD={ard}, dtype={dtype}, inits={num_inits}, "
+        f"epochs={num_epochs}"
+        + (f" (per-QoI {epoch_overrides})" if epoch_overrides else "")
+        + f", tasks={names}, n_bands={S4_SPECTRAL_DIM}, input_dim={input_dim}, "
+        f"aux={aux_indices}, nigp={bool(nigp)}"
         + (f", correct_sorf={correct_sorf}" if rff_sampling == "sorf" else "")
+        + (
+            f", hetero_sorf epohom={epochs_hom} epohet={epochs_het} rffhet={num_rff_het}"
+            if hetero_sorf
+            else ""
+        )
     )
     print(f"Optimizer: {getattr(optimizer_class, '__name__', optimizer_class)}, kwargs={optimizer_kwargs}")
     print(f"Device: {device}")
@@ -388,11 +623,13 @@ def run_s4_emit_sorf(
     cov_metrics_by_task: dict[str, dict] = {}
     off_floor_train_counts: dict[str, dict[str, int]] = {}
     total_train_time = 0.0
-    total_prediction_time = 0.0
     x_scaling_type = "None"
+    predict_packs: list[dict[str, Any]] = []
+    resolved_predict_n_jobs = resolve_predict_n_jobs(device, num_tasks, predict_n_jobs)
 
     for task_idx, task_name in enumerate(names):
-        print(f"\n--- Task: {task_name} ---")
+        task_epochs = int(epochs_by_task[task_name])
+        print(f"\n--- Task: {task_name} (epochs={task_epochs}) ---")
         band_indices = bands_by_task[task_name]
         task_cols = _task_input_columns(band_indices, aux_indices=aux_indices)
         x_tr = select_bands(x_train_full, task_cols)
@@ -473,14 +710,23 @@ def run_s4_emit_sorf(
                 y_val_scaled = y_va_model
 
         callbacks = []
-        if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1:
+        if hetero_sorf:
+            callbacks.append(
+                HeteroNIGPScheduleCallback(
+                    epochs_hom=int(epochs_hom),
+                    epochs_het=int(epochs_het),
+                    total_epochs=int(task_epochs),
+                    verbose=training_verbose,
+                )
+            )
+        elif nigp and int(freeze_epoch_nigp) > 0 and task_epochs > 1:
             callbacks.append(
                 NIGPInputNoiseFreezeCallback(
                     freeze_epochs=int(freeze_epoch_nigp),
                     verbose=training_verbose,
                 )
             )
-        if num_epochs > 1 and training_verbose:
+        if task_epochs > 1 and training_verbose:
             val_logs_train_loss = (
                 monitor_validation
                 and n_val_eff > 0
@@ -490,7 +736,7 @@ def run_s4_emit_sorf(
                 callbacks.append(
                     make_train_loss_callback(
                         num_inits,
-                        num_epochs,
+                        task_epochs,
                         verbose=training_verbose,
                         log_every_n_epochs=log_every_n_epochs,
                     )
@@ -544,18 +790,26 @@ def run_s4_emit_sorf(
             ard=ard,
             rff_sampling=rff_sampling,
             correct_sorf=correct_sorf,
+            spectral_kernel=spectral_kernel,
             nigp=bool(nigp),
+            hetero_sorf=bool(hetero_sorf),
+            num_rff_het=int(num_rff_het),
+            hetero_mode=str(hetero_mode),
+            hetero_seed=int(seed) + hash(task_name) % 10_000,
         )
         if nigp:
             nigp_mll_kwargs: dict = {}
-            slope_r = (
-                None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
-            )
-            if slope_r is not None:
-                nigp_mll_kwargs["nigp_slope_refreshes"] = slope_r
-                nigp_mll_kwargs["nigp_active_epochs"] = max(
-                    1, int(num_epochs) - max(0, int(freeze_epoch_nigp))
+            if hetero_sorf:
+                nigp_mll_kwargs["nigp_slope_manual"] = True
+            else:
+                slope_r = (
+                    None if nigp_slope_refreshes is None else int(nigp_slope_refreshes)
                 )
+                if slope_r is not None:
+                    nigp_mll_kwargs["nigp_slope_refreshes"] = slope_r
+                    nigp_mll_kwargs["nigp_active_epochs"] = max(
+                        1, int(task_epochs) - max(0, int(freeze_epoch_nigp))
+                    )
             task_mll_class = nigp_woodbury_mll_class(
                 DEFAULT_WOODBURY_FORM, **nigp_mll_kwargs
             )
@@ -565,7 +819,7 @@ def run_s4_emit_sorf(
         trainer = GPTrainer(
             model,
             mll_class=task_mll_class,
-            num_epochs=num_epochs,
+            num_epochs=task_epochs,
             num_inits=num_inits,
             seed=seed,
             device=device,
@@ -581,9 +835,13 @@ def run_s4_emit_sorf(
             stop_conditions=stop_conditions,
             parallel_verbose=parallel_verbose,
             min_epochs=(
-                int(freeze_epoch_nigp)
-                if nigp and int(freeze_epoch_nigp) > 0 and num_epochs > 1
-                else 0
+                int(epochs_hom) + int(epochs_het)
+                if hetero_sorf and task_epochs > 1
+                else (
+                    int(freeze_epoch_nigp)
+                    if nigp and int(freeze_epoch_nigp) > 0 and task_epochs > 1
+                    else 0
+                )
             ),
         )
         t_train = time.time()
@@ -602,6 +860,9 @@ def run_s4_emit_sorf(
         best_run = min(successful, key=lambda r: r["loss"])
         model.load_state_dict(best_run["state_dict"])
         best_loss = float(best_run["loss"])
+        if getattr(model, "hetero_sorf", False):
+            model.use_hetero_noise = True
+            model.nigp_correction_enabled = True
         y_std_for_noise = y_scaler.std.squeeze() if y_scaler is not None else None
         learned_noise = extract_learned_likelihood_noise(model, y_std=y_std_for_noise)
 
@@ -637,7 +898,15 @@ def run_s4_emit_sorf(
                     "ard": ard,
                     "rff_sampling": rff_sampling,
                     "correct_sorf": correct_sorf,
+                    "spectral_kernel": spectral_kernel,
                     "nigp": bool(nigp),
+                    "hetero_sorf": bool(hetero_sorf),
+                    "num_rff_het": int(num_rff_het),
+                    "hetero_mode": str(hetero_mode),
+                    "hetero_seed": int(seed) + hash(task_name) % 10_000,
+                    "num_epochs": task_epochs,
+                    "epochs_hom": int(epochs_hom) if hetero_sorf else None,
+                    "epochs_het": int(epochs_het) if hetero_sorf else None,
                     "nigp_slope_refreshes": (
                         None
                         if nigp_slope_refreshes is None
@@ -651,28 +920,70 @@ def run_s4_emit_sorf(
             learned_noise["checkpoint_path"] = str(ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
 
+        # Stash on CPU for the parallel predict phase (do not predict inline).
+        model = model.cpu()
         model.eval()
         model.invalidate_feature_cache()
-        t_pred = time.time()
-        pred_mean, lower, upper, pred_std = evaluate_rff_gp_model(
-            model, x_te, chunk_size=predict_chunk_size, **rff_eval_kwargs(dtype)
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        predict_packs.append(
+            {
+                "task_name": task_name,
+                "model": model,
+                "x_te": x_te.detach().cpu(),
+                "y_te": y_te.detach().cpu(),
+                "y_scaler": y_scaler,
+                "train_time": train_time,
+                "best_loss": best_loss,
+                "learned_noise": learned_noise,
+                "best_run": best_run,
+                "runs": runs,
+                "task_epochs": task_epochs,
+            }
         )
-        prediction_time = time.time() - t_pred
-        total_prediction_time += prediction_time
+        print(
+            f"Stashed {task_name} for predict phase "
+            f"(predict_n_jobs={resolved_predict_n_jobs})"
+        )
 
-        inv = inverse_y_s2(
-            pred_mean.detach().cpu(),
-            pred_std.detach().cpu(),
-            lower.detach().cpu(),
-            upper.detach().cpu(),
-            task_name=task_name,
-            y_scaler=y_scaler,
-            standardize_y=standardize_y,
-            warps=warps,
-            extended=True,
-        )
-        pred_mean, pred_std, lower, upper = inv.as_tuple()
-        n_te = int(y_te.shape[0])
+    print(
+        f"\n=== Predict phase: {len(predict_packs)} QoIs, "
+        f"predict_n_jobs={resolved_predict_n_jobs}, device={device} ==="
+    )
+    predict_results, total_prediction_time, prediction_time_sum = run_s4_predict_phase(
+        predict_packs,
+        device=device,
+        dtype=dtype,
+        predict_chunk_size=predict_chunk_size,
+        warps=warps,
+        standardize_y=standardize_y,
+        rel_tolerance=rel_tolerance,
+        predict_n_jobs=resolved_predict_n_jobs,
+    )
+    print(
+        f"Predict wall: {total_prediction_time:.2f}s  "
+        f"sum: {prediction_time_sum:.2f}s"
+    )
+
+    for pred, pack in zip(predict_results, predict_packs):
+        task_name = str(pred["task_name"])
+        inv = pred["inv"]
+        pred_mean = pred["pred_mean"]
+        pred_std = pred["pred_std"]
+        lower = pred["lower"]
+        upper = pred["upper"]
+        prediction_time = float(pred["prediction_time"])
+        train_time = float(pack["train_time"])
+        best_loss = float(pred["best_loss"])
+        learned_noise = pred["learned_noise"]
+        best_run = pred["best_run"]
+        runs = pred["runs"]
+        task_epochs = int(pred["task_epochs"])
+        rel_m = pred["rel_m"]
+        cov_m = pred["cov_m"]
+        computed = pred["computed"]
+
+        n_te = int(pred["y_te"].shape[0])
         nan_col = np.full(n_te, np.nan, dtype=np.float64)
         y_pred_mean_all.append(
             inv.point_mean.detach().cpu().numpy()
@@ -698,29 +1009,11 @@ def run_s4_emit_sorf(
             if inv.logit_sigma is not None
             else nan_col
         )
-        computed = compute_metrics(
-            y_te.cpu(),
-            pred_mean,
-            output_std=pred_std,
-            lower_95=lower,
-            upper_95=upper,
-            training_time=train_time,
-            prediction_time=prediction_time,
-        )
-        rel_m = compute_relative_error_metrics(
-            y_te.cpu().numpy(),
-            pred_mean.numpy(),
-            rel_tolerance=rel_tolerance,
-        )
-        cov_m = compute_prediction_coverage_metrics(
-            y_te.cpu().numpy(),
-            pred_mean.numpy(),
-            pred_std.numpy(),
-        )
         rel_metrics_by_task[task_name] = rel_m
         cov_metrics_by_task[task_name] = cov_m
         tm = {
             "best_train_loss": best_loss,
+            "num_epochs": task_epochs,
             **learned_noise,
             **computed,
             f"{task_name}_max_rel_error": float(rel_m["max_rel_error"]),
@@ -746,6 +1039,10 @@ def run_s4_emit_sorf(
         y_std_all.append(pred_std.numpy())
         lower_all.append(lower.numpy())
         upper_all.append(upper.numpy())
+        print(
+            f"{task_name} predict {prediction_time:.2f}s  "
+            f"(train {train_time:.1f}s)"
+        )
         print(format_relative_error_summary(task_name, rel_m, rel_tolerance=rel_tolerance))
         print(format_coverage_summary(task_name, cov_m))
 
@@ -800,6 +1097,11 @@ def run_s4_emit_sorf(
         if summary:
             print(summary)
     print(f"Total training time: {total_train_time:.1f}s")
+    print(
+        f"Prediction wall: {total_prediction_time:.1f}s  "
+        f"sum: {prediction_time_sum:.1f}s  "
+        f"predict_n_jobs={resolved_predict_n_jobs}"
+    )
 
     metrics: dict = {
         "title": title,
@@ -827,6 +1129,7 @@ def run_s4_emit_sorf(
         "num_rff": num_rff,
         "rff_sampling": rff_sampling,
         "correct_sorf": correct_sorf,
+        "spectral_kernel": spectral_kernel,
         "feature_dim": feature_dim,
         "nigp": bool(nigp),
         "freeze_epoch_nigp": int(freeze_epoch_nigp),
@@ -836,7 +1139,8 @@ def run_s4_emit_sorf(
         "ard": ard,
         "model_class": "RFFGPR",
         "train_mode": "independent",
-        "num_epochs": num_epochs,
+        "num_epochs": int(num_epochs),
+        "num_epochs_by_task": dict(epochs_by_task),
         "optimizer": getattr(optimizer_class, "__name__", str(optimizer_class)),
         "optimizer_kwargs": json_safe_optimizer_kwargs(optimizer_kwargs),
         "standardize_x": standardize_x,
@@ -853,6 +1157,8 @@ def run_s4_emit_sorf(
         "data_meta": data_meta,
         "Training_Time": total_train_time,
         "Prediction_Time": total_prediction_time,
+        "Prediction_Time_Sum": prediction_time_sum,
+        "predict_n_jobs": int(resolved_predict_n_jobs),
         "Total_Time": total_train_time + total_prediction_time,
         "RMSE": aggregate_rmse,
         "aggregate_RRMSE": aggregate_rrmse,

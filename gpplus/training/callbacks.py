@@ -170,6 +170,197 @@ class NIGPInputNoiseFreezeCallback(Callback):
             self._unfrozen_logged = True
 
 
+class HeteroNIGPScheduleCallback(Callback):
+    """
+    Three-phase noise schedule (0-based epochs, same index as other callbacks):
+
+    - Hom ``[0, epochs_hom)``: scalar ``σ_{y,hom}²``; freeze Noise SORF; NIGP off.
+    - NIGP ``[epochs_hom, epochs_hom+epochs_het)``: ``σ_eff = σ_{y,hom}² + σ_nigp²``;
+      freeze likelihood ``raw_noise`` and Noise SORF; unlock ``Σ_x``. First
+      ``σ_nigp`` slope refresh at this unlock.
+    - Het refinement ``[epochs_hom+epochs_het, total_epochs)``: unlock Noise SORF
+      (warm-started from scalar ``σ_{y,hom}²``); ``σ_eff = σ_{y,het}² + σ_nigp²``;
+      ``Σ_x`` stays trainable. Endpoint ``σ_nigp`` slope refresh at last train epoch
+      (scheduled ``E-1`` or a patience early-stop extra epoch).
+
+    ``epochs_het`` is the length of the NIGP-only window before hetero unlock
+    (CLI / folder tag name kept for compatibility).
+    """
+
+    def __init__(
+        self,
+        epochs_hom: int,
+        epochs_het: int,
+        total_epochs: int,
+        *,
+        verbose: bool = True,
+    ):
+        self.epochs_hom = max(0, int(epochs_hom))
+        self.epochs_het = max(0, int(epochs_het))
+        self.total_epochs = max(1, int(total_epochs))
+        self.verbose = bool(verbose)
+        # NIGP unlocks after Hom; hetero unlocks after the NIGP-only window.
+        self._nigp_unlock = self.epochs_hom
+        self._het_unlock = self.epochs_hom + self.epochs_het
+        if self._het_unlock >= self.total_epochs:
+            raise ValueError(
+                f"epochs_hom ({self.epochs_hom}) + epochs_het ({self.epochs_het}) "
+                f"must be < total_epochs ({self.total_epochs})"
+            )
+        self._phase: str | None = None
+        self._het_warmstarted = False
+        self._unlock_refresh_done = False
+        self._endpoint_refresh_done = False
+
+    @staticmethod
+    def _raw_likelihood_noise(model):
+        lik = getattr(model, "likelihood", None)
+        if lik is None:
+            return None
+        covar = getattr(lik, "noise_covar", None)
+        if covar is None:
+            return getattr(lik, "raw_noise", None)
+        return getattr(covar, "raw_noise", None)
+
+    @staticmethod
+    def _raw_input_noise(model):
+        if not bool(getattr(model, "nigp", False)):
+            return None
+        return getattr(model, "raw_input_noise", None)
+
+    def _warmstart_noise_sorf_from_scalar(self, model) -> None:
+        noise_sorf = getattr(model, "noise_sorf", None)
+        if noise_sorf is None or self._het_warmstarted:
+            return
+        lik = getattr(model, "likelihood", None)
+        if lik is None or not hasattr(lik, "noise"):
+            return
+        noise_sorf.init_from_homoscedastic_noise(lik.noise.detach())
+        self._het_warmstarted = True
+        if self.verbose:
+            from ..config import logger
+
+            logger.info(
+                "Hetero-NIGP schedule: Noise SORF warm-started from scalar "
+                "sigma_y,hom^2=%.6g.",
+                float(lik.noise.detach().reshape(-1)[0].item()),
+            )
+
+    def _apply_phase(self, model, phase: str) -> None:
+        noise_sorf = getattr(model, "noise_sorf", None)
+        raw_y = self._raw_likelihood_noise(model)
+        raw_x = self._raw_input_noise(model)
+
+        if phase == "hom":
+            model.use_hetero_noise = False
+            model.nigp_correction_enabled = False
+            if raw_y is not None:
+                raw_y.requires_grad_(True)
+            if noise_sorf is not None:
+                noise_sorf.set_trainable(False)
+            if raw_x is not None:
+                raw_x.requires_grad_(False)
+        elif phase == "nigp":
+            # Structured NIGP first; free hetero still frozen.
+            model.use_hetero_noise = False
+            model.nigp_correction_enabled = True
+            if raw_y is not None:
+                raw_y.requires_grad_(False)
+            if noise_sorf is not None:
+                noise_sorf.set_trainable(False)
+            if raw_x is not None:
+                raw_x.requires_grad_(True)
+        elif phase == "het":
+            # Refine with Noise SORF on top of NIGP.
+            self._warmstart_noise_sorf_from_scalar(model)
+            model.use_hetero_noise = True
+            model.nigp_correction_enabled = True
+            if raw_y is not None:
+                raw_y.requires_grad_(False)
+            if noise_sorf is not None:
+                noise_sorf.set_trainable(True)
+            if raw_x is not None:
+                raw_x.requires_grad_(True)
+        else:
+            raise ValueError(f"Unknown phase {phase!r}")
+
+    def _phase_for_epoch(self, epoch: int) -> str:
+        if epoch < self._nigp_unlock:
+            return "hom"
+        if epoch < self._het_unlock:
+            return "nigp"
+        return "het"
+
+    def _nigp_active(self, phase: str | None = None) -> bool:
+        p = self._phase if phase is None else phase
+        return p in ("nigp", "het")
+
+    def wants_endpoint_slope_refresh_epoch(self) -> bool:
+        """True when patience stop should run one extra epoch with a second slope refresh."""
+        return (
+            self._nigp_active()
+            and self._unlock_refresh_done
+            and not self._endpoint_refresh_done
+        )
+
+    def on_train_start(self, context: dict) -> None:
+        model = context.get("model")
+        if model is None or not getattr(model, "hetero_sorf", False):
+            return
+        model.hetero_nigp_manual_slopes = True
+        self._het_warmstarted = False
+        self._unlock_refresh_done = False
+        self._endpoint_refresh_done = False
+        self._apply_phase(model, "hom")
+        self._phase = "hom"
+        if self.verbose:
+            from ..config import logger
+
+            logger.info(
+                "Hetero-NIGP schedule: hom=[0,%s) nigp=[%s,%s) het=[%s,%s) "
+                "(NIGP before hetero unlock; endpoint slope refresh at last "
+                "train epoch / early-stop).",
+                self.epochs_hom,
+                self._nigp_unlock,
+                self._het_unlock,
+                self._het_unlock,
+                self.total_epochs,
+            )
+
+    def on_epoch_start(self, context: dict) -> None:
+        model = context.get("model")
+        if model is None or not getattr(model, "hetero_sorf", False):
+            return
+        epoch = int(context.get("epoch", 0))
+        phase = self._phase_for_epoch(epoch)
+        if phase != self._phase:
+            self._apply_phase(model, phase)
+            if self.verbose:
+                from ..config import logger
+
+                logger.info("Hetero-NIGP schedule: entering phase %s at epoch %s.", phase, epoch)
+            self._phase = phase
+            if phase == "nigp" or (phase == "het" and not self._unlock_refresh_done):
+                # First sigma_nigp compute (Hom->NIGP, or Hom->Het if epochs_het==0).
+                model.nigp_force_slope_refresh = True
+                self._unlock_refresh_done = True
+
+        endpoint = bool(context.get("endpoint_slope_refresh", False)) or (
+            self._nigp_active(phase) and epoch == self.total_epochs - 1
+        )
+        if self._nigp_active(phase) and endpoint and not self._endpoint_refresh_done:
+            model.nigp_force_slope_refresh = True
+            self._endpoint_refresh_done = True
+            if self.verbose:
+                from ..config import logger
+
+                logger.info(
+                    "Hetero-NIGP schedule: forcing sigma_nigp slope refresh at epoch %s%s.",
+                    epoch,
+                    " (early-stop endpoint)" if context.get("endpoint_slope_refresh") else "",
+                )
+
+
 class LikelihoodNoiseFreezeCallback(Callback):
     """
     Freeze observation noise for the first ``freeze_epochs`` Adam epochs.
@@ -4228,7 +4419,7 @@ class ValidationMetricsCallback(Callback):
         woodbury_mt_method: Optional[str] = None,
         checkpoint_on_val_rrmse: bool = True,
         checkpoint_every_n_epochs: int | None = None,
-        divergence_rel_tolerance: float = 0.01,
+        divergence_rel_tolerance: float = 0.1,
     ):
         self.val_x = val_x
         self.val_y = val_y

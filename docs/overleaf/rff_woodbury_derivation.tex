@@ -7,7 +7,9 @@
 \usepackage{booktabs}
 \usepackage{colortbl}
 \usepackage{xcolor}
+\usepackage{enumitem}
 \usepackage{tcolorbox}
+\tcbuselibrary{skins}
 \usepackage{hyperref}
 
 \hypersetup{colorlinks=true, linkcolor=blue!60!black, citecolor=blue!60!black}
@@ -46,9 +48,11 @@ It also explains \textbf{where the $(\noise I)^{-1}$ factors go} in code (they a
 and \textbf{why only the $m\times m$ middle matrix $M$} gets a Cholesky decomposition in the solve and MLL.
 Green boxes mark \emph{identical} mathematics; orange boxes mark \emph{different} layout or symbols.
 
-A final section summarizes \textbf{Orthogonal Random Features (ORF)} as implemented in GPPlus when
-\texttt{RFFKernel(orthogonal=True)}: full Yu et al.\ sampling $\mathbf S\mathbf Q$ with $\chi(d)$ scaling,
-independent blocks when $D>d$, and the same cos/sin featurization and Woodbury pipeline as standard RFF.
+A final section explains \textbf{how frequency weights are drawn} for the three GPPlus modes
+\texttt{rff\_sampling $\in \{$\texttt{"rff"}, \texttt{"orf"}, \texttt{"sorf"}$\}$}:
+standard i\,\&\!F (i.i.d.\ Gaussians), full ORF (Yu et al.\ Eq.~2: QR + $\chi(d)$ scaling), and
+SORF (Yu et al.\ Eq.~5: Walsh--Hadamard + Rademacher signs).
+All three share the same cos/sin featurization and Woodbury MLL pipeline; only the draw of $W$ differs.
 \end{abstract}
 
 \tableofcontents
@@ -67,15 +71,16 @@ After subtracting the GP mean, the marginal covariance of $y\in\mathbb{R}^n$ is
 \end{equation}
 with homoskedastic noise variance $\noise$ (GPPlus: \texttt{likelihood.noise}).
 
-For RFF, the low-rank term is a Gram matrix of scaled features.
-The fork is only \textbf{matrix layout}: features-as-rows ($\Ph$) vs features-as-columns ($\Zmat$).
+For RFF, the low-rank term is the $n\times n$ Gram matrix $\Ph\Ph^{\top}$ (equivalently $\Zmat^{\top}\Zmat$ when $\Ph=\Zmat^{\top}$), with rank at most $\min(n,m)$.
+The fork is only \textbf{matrix layout}: points-as-rows ($\Ph$) vs features-as-rows ($\Zmat$).
+See Section~\ref{sec:notation-zZ} for how $\mathbf z(x)$, $\Ph$, and $\Zmat$ relate.
 
 %=============================================================================
 \section{Two writings of $\Sig^{-1}$ (side by side)}
 %=============================================================================
 
 \begin{diffbox}
-\textbf{Your equation} ($\Zmat\in\mathbb{R}^{m\times n}$ so the middle factor is $m\times m$):
+\textbf{Your equation} ($\Zmat\in\mathbb{R}^{m\times n}$, features $\times$ points --- \textbf{not} the same object as $\mathbf z(x)$; see Section~\ref{sec:notation-zZ}):
 \begin{equation}
   \label{eq:user}
   \Sig^{-1}
@@ -105,8 +110,8 @@ The fork is only \textbf{matrix layout}: features-as-rows ($\Ph$) vs features-as
 \begin{samebox}
 \textbf{Similarities}
 \begin{itemize}
-  \item Same $\Sig$: Woodbury inverse of $\noise I_n$ plus a rank-$\le m$ term.
-  \item Same middle matrix $M\in\mathbb{R}^{m\times m}$ (Section~\ref{sec:link}).
+  \item Same $\Sig$: $\noise I_n$ plus an $n\times n$ Gram term of rank $\le \min(n,m)$ (typically $\le m$ when $n\gg m$).
+  \item Same middle matrix $M\in\mathbb{R}^{m\times m}$ (Section~\ref{sec:link})---built from the $m\times m$ matrix $\Ph^{\top}\Ph=\Zmat\Zmat^{\top}$, \emph{not} from the $n\times n$ kernel Gram.
   \item Same work: Cholesky $M$ in $O(m^3)$, not Cholesky $\Sig$ in $O(n^3)$.
   \item Same MLL log-determinant: $\log|\Sig| = n\log\noise + \log|M|$ --- noise term explicit, $\log|M|$ from Cholesky of $M$ (Section~\ref{sec:logdet}).
 \end{itemize}
@@ -121,15 +126,26 @@ The fork is only \textbf{matrix layout}: features-as-rows ($\Ph$) vs features-as
  & \textbf{Your $\Zmat$} ($m\times n$) & \textbf{Code $\Ph$} ($n\times m$) \\
 \midrule
 Layout & features $\times$ points & points $\times$ features \\
+Rows index & feature $1{:}m$ (cos $1{:}D$, sin $D{+}1{:}2D$) & training point $1{:}n$ \\
+Columns index & training point $1{:}n$ & feature $1{:}m$ (cos $1{:}D$, sin $D{+}1{:}2D$) \\
+One point's data & column $k$ is $\mathbf z(x_k)$ & row $i$ is $\mathbf z(x_i)^{\top}$ \\
 Link & $\Ph = \Zmat^{\top}$ & $\Zmat = \Ph^{\top}$ \\
-Low-rank part in $\Sig$ & $\Zmat^{\top}\Zmat$ & $\Ph\Ph^{\top}$ \\
+\midrule
+\multicolumn{3}{@{}l@{}}{\textbf{$n\times n$ kernel / low-rank part in $\Sig=\noise I_n+(\cdots)$}} \\
+Rank & $\le \min(n,m)$ & $\le \min(n,m)$ \\
+Gram in $\Sig$ & $\Zmat^{\top}\Zmat$ ($n\times n$) & $\Ph\Ph^{\top}$ ($n\times n$) \\
+\midrule
+\multicolumn{3}{@{}l@{}}{\textbf{$m\times m$ Woodbury middle $M$ (not the kernel Gram)}} \\
+Built from & $\Zmat\Zmat^{\top}$ ($m\times m$) & $\Ph^{\top}\Ph$ ($m\times m$) \\
 Factor after $(\noise I)^{-1}$ (left) & $\Zmat^{\top}$ & $\Ph$ \\
 Factor before $(\noise I)^{-1}$ (right) & $\Zmat$ & $\Ph^{\top}$ \\
 Middle matrix & $I + \Zmat(\noise I)^{-1}\Zmat^{\top}$ & $I + \Ph^{\top}(\noise I)^{-1}\Ph$ \\
 \bottomrule
 \end{tabular}
 \end{center}
-Each orange row is a transpose pair; the last row is the \emph{same} $M$.
+\textbf{Do not swap the two Grams:} $\Zmat^{\top}\Zmat$ is $n\times n$ (kernel); $\Zmat\Zmat^{\top}$ is $m\times m$ (middle $M$).
+Each orange row is a transpose pair within the same block; the last middle-matrix row is the \emph{same} $M$.
+See Section~\ref{sec:notation-zZ} for full column-by-column indexing of $\mathbf z$, $\Ph$, and $\Zmat$.
 \end{diffbox}
 
 %=============================================================================
@@ -142,29 +158,32 @@ Define
   \Ph \;:=\; \Zmat^{\top} \in \mathbb{R}^{n\times m}.
 \end{equation}
 
-\subsection{Covariance}
+\subsection{Covariance ($n\times n$ kernel Gram)}
 
 \begin{samebox}
+With $\Ph=\Zmat^{\top}$,
 \[
-  \noise I_n + \Ph\Ph^{\top}
-  \;=\; \noise I_n + \Zmat^{\top}\Zmat
-  \;=\; \Sig.
+  \Sig
+  = \noise I_n + \Ph\Ph^{\top}
+  = \noise I_n + \Zmat^{\top}\Zmat
+  \qquad\text{(both $n\times n$, rank of Gram $\le \min(n,m)$).}
 \]
+\textbf{Not} $\Zmat\Zmat^{\top}$---that matrix is $m\times m$ and enters the Woodbury middle $M$ below.
 \end{samebox}
 
-\subsection{Middle matrix $M$}
+\subsection{Middle matrix $M$ ($m\times m$)}
 
-Your middle:
+Your middle (uses $\Zmat\Zmat^{\top}$, not $\Zmat^{\top}\Zmat$):
 \[
   I_m + \Zmat\,(\noise I_n)^{-1}\,\Zmat^{\top}
   = I_m + \frac{1}{\noise}\,\Zmat\Zmat^{\top}.
 \]
-Code middle:
+Code middle (uses $\Ph^{\top}\Ph$):
 \[
   I_m + \Ph^{\top}\,(\noise I_n)^{-1}\,\Ph
   = I_m + \frac{1}{\noise}\,\Ph^{\top}\Ph.
 \]
-Since $\Ph^{\top}\Ph = \Zmat\Zmat^{\top}$,
+Since $\Ph=\Zmat^{\top}$ implies $\Ph^{\top}\Ph = \Zmat\Zmat^{\top}$,
 \begin{samebox}
 \[
   \boxed{M \;=\; I_m + \frac{\Zmat\Zmat^{\top}}{\noise}
@@ -172,6 +191,7 @@ Since $\Ph^{\top}\Ph = \Zmat\Zmat^{\top}$,
        \;=\; I_m + \Ph^{\top}(\noise I_n)^{-1}\Ph.}
 \]
 Note $I_m^{-1}=I_m$, so your $I^{-1}+\cdots$ equals the code's $I+\cdots$.
+The $n\times n$ kernel Gram $\Ph\Ph^{\top}=\Zmat^{\top}\Zmat$ and the $m\times m$ factor $\Ph^{\top}\Ph=\Zmat\Zmat^{\top}$ are \textbf{transposes} of each other---same data, different shape.
 \end{samebox}
 
 \subsection{Correction term}
@@ -216,7 +236,9 @@ Take $A=\noise I_n$, $U=\Ph$, $C=I_m$, $V=\Ph^{\top}$. Then \eqref{eq:woodbury} 
 
 \subsection{Your convention: $\Sig = \noise I_n + \Zmat^{\top}\Zmat$}
 
-With $\Ph=\Zmat^{\top}$, the same choice of $A,U,C,V$ yields \eqref{eq:user}.
+Here $\Zmat^{\top}\Zmat$ is $n\times n$ (because $\Zmat$ is $m\times n$).
+With $\Ph=\Zmat^{\top}$, this is $\Sig=\noise I_n+\Ph\Ph^{\top}$.
+Woodbury with $A=\noise I_n$, $U=\Zmat^{\top}(=\Ph)$, $C=I_m$, $V=\Zmat(=\Ph^{\top})$ yields \eqref{eq:user}; the middle factor uses $\Zmat\Zmat^{\top}$ ($m\times m$).
 
 %=============================================================================
 \section{Where each part of $\Sig^{-1}$ goes}
@@ -276,7 +298,7 @@ is applied only to $M$} ($m\times m$), not that $(\noise I)^{-1}$ disappears fro
 \[
   \Sig
   = \underbrace{\noise I_n}_{\text{diagonal (noise)}}
-  + \underbrace{\Ph\Ph^{\top}}_{\text{rank $\le m$ (RFF features)}}.
+  + \underbrace{\Ph\Ph^{\top}}_{\text{$n\times n$ Gram; rank $\le \min(n,m)$}}.
 \]
 
 Woodbury inverts this sum by:
@@ -390,22 +412,97 @@ $\log|\Sig|$ & yes ($n\log\noise$ term) & only $\log|M|$ from \texttt{chol} \\
 \end{samebox}
 
 %=============================================================================
-\section{Orthogonal Random Features (ORF)}
-\label{sec:orf}
+\section{Primal $M$ vs.\ dual $\Lambda$ (numerical stability)}
+\label{sec:primal-dual}
+%=============================================================================
+
+The Woodbury identity admits two algebraically equivalent $m\times m$ factorizations.
+GPPlus now defaults to the \textbf{dual} form for single-task RFF / LRNN MLL and predict.
+
+\subsection{Primal middle matrix}
+
+\[
+  M \;=\; I_m + \Ph^{\top}\Ph/\noise,
+  \qquad
+  \Sig^{-1}
+  = (\noise I)^{-1}
+  - (\noise I)^{-1}\,\Ph\,M^{-1}\,\Ph^{\top}\,(\noise I)^{-1}.
+\]
+Cholesky of $M$ is the historical GPPlus path. When learned $\noise$ is tiny,
+$\Ph^{\top}\Ph/\noise$ inflates and $M$ can fail Cholesky on float32.
+
+\subsection{Dual matrix}
+
+\[
+  \Lambda \;=\; \Ph^{\top}\Ph + \noise\,I_m
+  \;=\; \noise\,M.
+\]
+Then
+\[
+  \Sig^{-1}
+  = \noise^{-1}\bigl(I_n - \Ph\,\Lambda^{-1}\,\Ph^{\top}\bigr),
+\]
+\[
+  \log|\Sig|
+  = (n-m)\log\noise + \log|\Lambda|,
+\]
+and the predictive formulae become
+$\hat\mu_* = \boldsymbol{\phi}_*^{\top}\Lambda^{-1}\Ph^{\top}y$,
+$\hat\sigma_*^2 = \noise\,\boldsymbol{\phi}_*^{\top}\Lambda^{-1}\boldsymbol{\phi}_*$.
+
+\begin{samebox}
+\textbf{Same math.}
+$\Lambda=\noise M$ so $\Lambda^{-1}=M^{-1}/\noise$. Dual and primal agree up to floating-point
+and jitter. Dual avoids dividing the Gram by $\noise$ before factorization.
+\end{samebox}
+
+\begin{diffbox}
+\textbf{GPPlus defaults (\texttt{rff\_utils.py}).}
+\begin{itemize}[nosep]
+  \item Single-task: \texttt{woodbury\_form="dual"} in MLL / \texttt{woodbury\_predict} /
+        \texttt{evaluate\_rff\_gp\_model}. Use \texttt{"primal"} for regression checks.
+  \item Multitask: \texttt{method="dual\_eigen"} (alias \texttt{"eigen"}) factors
+        $\Lambda = G\otimes(R_B^{\top}R_B)$ with eigenvalues
+        $\lambda_g^{(i)}\mu_b^{(j)}+\sigma_t^{2}$; \texttt{"primal\_eigen"} keeps
+        $M=I+G\otimes(R_B^{\top}D^{-1}R_B)$.
+  \item Noise floor: likelihood SoftClamp $\sigma^2\ge 10^{-6}$; float32 jitter $10^{-4}$;
+        Cholesky helper has an \texttt{eigh} PSD fallback.
+\end{itemize}
+\end{diffbox}
+
+%=============================================================================
+\section{Random feature weight sampling: RFF, ORF, and SORF}
+\label{sec:rff-sampling}
 %=============================================================================
 
 Woodbury (Sections~\ref{sec:split}--\ref{sec:logdet}) applies to \emph{any} feature matrix $\Ph\in\mathbb{R}^{n\times m}$
-with $m=2D$. This section describes how GPPlus \emph{draws} the underlying RFF frequencies when
-\texttt{orthogonal=True} on \texttt{RFFKernel} / \texttt{RFFGPR}.
-Implementation: \texttt{\_sample\_orf\_weights} and \texttt{init\_rbf\_weights} in
-\texttt{gpplus/utils/rff\_utils.py}.
+with $m=2D$. This section explains \textbf{how GPPlus draws the frequency matrix $W$} before featurization.
+Implementation: \texttt{init\_rbf\_weights}, \texttt{\_sample\_orf\_weights}, \texttt{\_sample\_sorf\_weights}
+in \texttt{gpplus/utils/rff\_utils.py}; selected by \texttt{rff\_sampling} on \texttt{RFFKernel} / \texttt{RFFGPR}.
 Reference: Yu, Suresh, Choromanski et al., ``Orthogonal Random Features'',
 \href{https://arxiv.org/abs/1610.09072}{arXiv:1610.09072}.
 
-\subsection{Standard RFF (i.i.d.\ frequencies)}
+\subsection{Shared pipeline (all three modes)}
 
-For input dimension $d$ and $D$ frequencies, GPPlus stores a weight matrix
-$W\in\mathbb{R}^{d\times D}$ whose \textbf{columns} are $\mathbf w_j\in\mathbb{R}^d$.
+Every mode follows the same two-stage recipe:
+\begin{enumerate}
+  \item \textbf{Draw frequencies} $W\in\mathbb{R}^{d\times D}$ (column $j$ is $\mathbf w_j$).
+        This is the \emph{only} step that differs across \texttt{"rff"}, \texttt{"orf"}, \texttt{"sorf"}.
+  \item \textbf{Featurize} inputs with cos/sin pairs (Sutherland--Schneider), then build $\Ph$.
+\end{enumerate}
+
+\begin{equation}
+  \label{eq:pipeline}
+  \boxed{
+  W \;\xrightarrow{\;\text{draw (RFF / ORF / SORF)}\;}\;
+  \mathbf z(x) \;\xrightarrow{\;\text{featurize}\;}\;
+  \Ph \;\xrightarrow{\;\text{Woodbury}\;}\;
+  \text{MLL / predictions}.
+  }
+\end{equation}
+
+For input dimension $d$ and $D$ frequencies, GPPlus stores $W\in\mathbb{R}^{d\times D}$ in \texttt{randn\_weights}
+(Section~\ref{sec:W-to-Ph-Z} for ORF/SORF: $d\times d$ QR blocks concatenated to $d\times D$, then featurize to $\Ph$).
 Standard RFF draws
 \begin{equation}
   \label{eq:rff-iid}
@@ -426,52 +523,1227 @@ Scaled features (before outputscale in \texttt{RFFGPR}) are
     \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x})
   \end{bmatrix}
   \in \mathbb{R}^{2D},
+  \qquad m := 2D \text{ (total feature count)}.
 \end{equation}
-where $\tilde{\mathbf x}$ applies GPPlus lengthscale scaling ($10^{\ell/2}$ per dimension in
-\texttt{featurize\_rbf}) and $\tilde{\mathbf w}_j$ may include optional ARD scaling on $W$
-when \texttt{resample\_weights(spectral=True)}.
+Row $j$ ($1\le j\le D$) uses frequency $\mathbf w_j$ (column $j$ of $W$) via cos; row $D+j$ uses the same $\mathbf w_j$ via sin.
+
+\subsection{Gaussian kernel and its Fourier (RFF) equivalent}
+\label{sec:gaussian-fourier}
+
+This subsection states the \textbf{target kernel} GPPlus approximates and how RFF replaces an integral over frequencies by a finite sum.
+See Section~\ref{sec:lengthscale-proj} for $\omega$ scaling and Section~\ref{sec:notation-zZ} for $\Ph$ layout.
+
+\paragraph{Step 1 --- GPPlus Gaussian (RBF) kernel.}
+After scaling inputs by $10^{\omega/2}$ per dimension (Section~\ref{sec:lengthscale-proj}), the exact
+\texttt{GaussianKernel} between $\mathbf x$ and $\mathbf x'$ is
+\begin{equation}
+  \label{eq:gpplus-rbf}
+  \boxed{
+  k(\mathbf x,\mathbf x')
+  = \exp\!\Bigl(-\sum_{a=1}^{d} 10^{\omega_a}\,(x_a-x'_a)^2\Bigr).
+  }
+\end{equation}
+(If all $\omega_a=\omega$, this is $\exp(-10^{\omega}\|\mathbf x-\mathbf x'\|^2)$.)
+Output scale from \texttt{LogScaleKernel} multiplies $k$ by an overall amplitude factor; we omit it below.
+
+\paragraph{Step 2 --- Bochner: stationary kernel = average over random frequencies.}
+A (real, stationary) kernel depends only on the separation $\mathbf r=\mathbf x-\mathbf x'$ and admits a Fourier representation
+\begin{equation}
+  \label{eq:bochner}
+  k(\mathbf r)
+  = \int_{\mathbb{R}^d} \cos\!\bigl(\mathbf w^{\top}\mathbf r\bigr)\,p(\mathbf w)\,d\mathbf w,
+\end{equation}
+where $p(\mathbf w)\ge 0$ is a \textbf{spectral density} (probability measure over frequency vectors $\mathbf w$).
+Intuition: $k$ is a weighted average of cosine ``plane waves'' $\cos(\mathbf w^{\top}(\mathbf x-\mathbf x'))$ at all frequencies~$\mathbf w$.
+
+\paragraph{Step 3 --- Gaussian kernel $\Leftrightarrow$ Gaussian spectral density.}
+For the isotropic RBF above (one shared $\omega$), the matching spectral density is Gaussian:
+\begin{equation}
+  \label{eq:rbf-spectral}
+  p(\mathbf w)
+  \;\propto\;
+  \exp\!\Bigl(-\frac{\|\mathbf w\|^2}{4\cdot 10^{\omega}}\Bigr),
+  \qquad\text{equivalently}\qquad
+  \mathbf w \sim \mathcal N\!\bigl(\mathbf 0,\; 2\cdot 10^{\omega}\,I_d\bigr).
+\end{equation}
+In GPPlus, $\omega$ enters through $10^{\omega/2}$ scaling on $\mathbf x$ before projection; the base draw
+\eqref{eq:rff-iid} uses $\mathbf w_j\sim\mathcal N(0,I_d)$ on \emph{scaled} coordinates (and optional spectral rescale of $W$).
+
+\paragraph{Step 4 --- RFF: replace the integral by a Monte Carlo sum.}
+Draw $\mathbf w_1,\ldots,\mathbf w_D$ from $p(\mathbf w)$ and approximate \eqref{eq:bochner} by
+\begin{equation}
+  \label{eq:rff-kernel-approx}
+  \boxed{
+  k(\mathbf x,\mathbf x')
+  \;\approx\;
+  \frac{1}{D}\sum_{j=1}^{D}
+  \Bigl[
+    \cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x})\,\cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}')
+    +
+    \sin(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x})\,\sin(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}')
+  \Bigr].
+  }
+\end{equation}
+The cos/sin pair is needed so the approximation is \textbf{real} and \textbf{unbiased}; either alone would not match \eqref{eq:bochner}.
+
+\paragraph{Step 5 --- Trig identity $\Rightarrow$ dependence on $\mathbf x-\mathbf x'$ only.}
+For each $j$, this is an exact identity (not an approximation):
+\begin{equation}
+  \label{eq:cos-sin-id}
+  \cos a\,\cos b + \sin a\,\sin b = \cos(a-b),
+  \qquad
+  a=\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x},\;
+  b=\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}'.
+\end{equation}
+So one frequency contributes
+\[
+  \frac{1}{D}\cos\!\bigl(\tilde{\mathbf w}_j^{\top}(\tilde{\mathbf x}-\tilde{\mathbf x}')\bigr),
+\]
+and the full RFF estimate is $\frac{1}{D}\sum_j \cos(\tilde{\mathbf w}_j^{\top}(\tilde{\mathbf x}-\tilde{\mathbf x}'))$---a sum of cosines of \textbf{separations}, matching the stationary form of \eqref{eq:bochner}.
+
+\paragraph{Step 6 --- Same formula as $\mathbf z(\mathbf x)^{\top}\mathbf z(\mathbf x')$.}
+Define $\mathbf z(\mathbf x)$ as in \eqref{eq:featurize}. Then \eqref{eq:rff-kernel-approx} is exactly
+\begin{equation}
+  \label{eq:rff-inner-product}
+  \boxed{
+  k(\mathbf x,\mathbf x') \approx \mathbf z(\mathbf x)^{\top}\mathbf z(\mathbf x')
+  \;\;\Longleftrightarrow\;\;
+  (\Ph\Ph^{\top})_{i,i'} = \mathbf z(\mathbf x_i)^{\top}\mathbf z(\mathbf x_{i'}),
+  }
+\end{equation}
+which is the low-rank Gram matrix Woodbury uses (Sections~\ref{sec:split}--\ref{sec:logdet}).
+\textbf{Features} store $\cos/\sin$ of single-point projections; \textbf{the kernel} appears only when two feature vectors are multiplied.
+
+\begin{samebox}
+\textbf{Reading map (keep these distinct)}
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.68\textwidth}@{}}
+\toprule
+\textbf{Object} & \textbf{Role} \\
+\midrule
+$k(\mathbf x,\mathbf x')$ in \eqref{eq:gpplus-rbf} & exact Gaussian kernel (target) \\
+$p(\mathbf w)$ in \eqref{eq:rbf-spectral} & Fourier/spectral density of that kernel \\
+$\mathbf w_j\sim\mathcal N(0,I_d)$ in \eqref{eq:rff-iid} & Monte Carlo draw of one frequency \\
+$\mathbf z(\mathbf x)$, $\Ph$ & finite features built from cos/sin of projections \\
+$\mathbf z(\mathbf x)^{\top}\mathbf z(\mathbf x')$ & RFF approximation to $k(\mathbf x,\mathbf x')$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{samebox}
+
+\subsection{Lengthscale scaling ($\omega$) and where $\mathbf x_i-\mathbf x_{i'}$ enters}
+\label{sec:lengthscale-proj}
+
+\paragraph{GPPlus notation.}
+The kernel parameter \texttt{lengthscale} is the log10 quantity $\omega$ (same convention as
+\texttt{GaussianKernel} and \texttt{PeriodicKernel} in GPPlus).
+We write $\ell\equiv\omega$ in the formulas below.
+Input scaling in \texttt{featurize\_rbf} is
+\begin{equation}
+  \label{eq:x-tilde}
+  (\tilde{\mathbf x}_i)_a = 10^{\omega_a/2}\,(\mathbf x_i)_a.
+\end{equation}
+Optional spectral rescale of $W$ (\texttt{resample\_weights(spectral=True)}) gives $\tilde{\mathbf w}_j$;
+if omitted, $\tilde{\mathbf w}_j=\mathbf w_j$.
+\textbf{Output scale} from \texttt{LogScaleKernel} ($10^{\text{outputscale}/2}$) is applied
+\emph{after} cos/sin in \texttt{RFFGPR.featurize}---separate from $\omega$.
+
+\paragraph{Per-point featurization: no subtraction yet.}
+When building one row of $\Ph$, GPPlus computes only
+\[
+  \mathrm{proj}_{i,j}=\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i,
+  \qquad
+  \Ph_{i,j}\propto \cos(\mathrm{proj}_{i,j}),\ \Ph_{i,D+j}\propto \sin(\mathrm{proj}_{i,j}),
+\]
+for each training point $\mathbf x_i$ \emph{alone}.
+There is no explicit $\mathbf x_i-\mathbf x_{i'}$ at this stage---that is normal.
+
+\begin{diffbox}
+\textbf{Common confusion:} $\Ph_{i,j}=\cos(\mathrm{proj}_{i,j})$ is a \textbf{feature}, not an entry of the
+$n\times n$ covariance matrix. Lengthscale does \textbf{not} mean ``multiply each cos by $10^{\omega/2}$ after projection.''
+\end{diffbox}
+
+\paragraph{Pairwise kernel: subtraction appears in the inner product.}
+The RFF target is \eqref{eq:rff-kernel-approx}--\eqref{eq:rff-inner-product}.
+The RFF kernel approximation between two points uses the feature inner product
+\[
+  K(\mathbf x_i,\mathbf x_{i'}) \approx \mathbf z(\mathbf x_i)^{\top}\mathbf z(\mathbf x_{i'})
+  = (\Ph\Ph^{\top})_{i,i'}.
+\]
+For one frequency $j$, the cos/sin pair satisfies identity \eqref{eq:cos-sin-id}, i.e.\
+\[
+  \cos(\mathrm{proj}_{i,j})\cos(\mathrm{proj}_{i',j})
+  + \sin(\mathrm{proj}_{i,j})\sin(\mathrm{proj}_{i',j})
+  = \cos(\mathrm{proj}_{i,j}-\mathrm{proj}_{i',j}).
+\]
+The difference of projections is a scaled input difference:
+\begin{equation}
+  \label{eq:proj-diff}
+  \boxed{
+  \mathrm{proj}_{i,j}-\mathrm{proj}_{i',j}
+  = \tilde{\mathbf w}_j^{\top}(\tilde{\mathbf x}_i-\tilde{\mathbf x}_{i'})
+  = \tilde{\mathbf w}_j^{\top}\!\Bigl(10^{\omega/2}\odot(\mathbf x_i-\mathbf x_{i'})\Bigr),
+  }
+\end{equation}
+where $10^{\omega/2}\odot(\cdot)$ applies $10^{\omega_a/2}$ per coordinate $a$.
+Summing \eqref{eq:cos-sin-id} over $j=1,\ldots,D$ (with the $1/D$ scaling) approximates a lengthscale-aware
+stationary kernel whose decay depends on \emph{separation} $\mathbf x_i-\mathbf x_{i'}$, not on single-point projections alone.
+
+\paragraph{Why $10^{\omega/2}$ scales $\mathbf x$ \emph{before} cos/sin (not after).}
+Scaling \textbf{after} projection would give $10^{\omega/2}\cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i)$; scaling \textbf{before} gives
+$\cos(\tilde{\mathbf w}_j^{\top}(10^{\omega/2}\odot\mathbf x_i))$.
+Only the latter yields \eqref{eq:proj-diff} and the correct dependence on $\mathbf x_i-\mathbf x_{i'}$ when features from two points are combined.
+The RBF uses squared separations in exponent ($\exp(-10^{\omega}\|\mathbf x_i-\mathbf x_{i'}\|^2)$ in GPPlus log10 form); putting $10^{\omega/2}$ on inputs before the Fourier features implements that through \eqref{eq:cos-sin-id}--\eqref{eq:proj-diff}.
+
+\begin{samebox}
+\textbf{Pipeline (where each piece lives)}
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Stage} & \textbf{Formula} & \textbf{Subtraction?} \\
+\midrule
+Scale input & $\tilde{\mathbf x}_i = 10^{\omega/2}\odot \mathbf x_i$ & no \\
+Project & $\mathrm{proj}_{i,j}=\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i$ & no \\
+Features & $\Ph_{i,j}\propto\cos(\mathrm{proj}_{i,j})$, $\Ph_{i,D+j}\propto\sin(\mathrm{proj}_{i,j})$ & no \\
+Output scale & $\Ph \leftarrow 10^{\text{outputscale}/2}\,\Ph$ (\texttt{RFFGPR}) & no \\
+Kernel / cov. & $(\Ph\Ph^{\top})_{i,i'}=\mathbf z(\mathbf x_i)^{\top}\mathbf z(\mathbf x_{i'})$ & \textbf{yes}, via \eqref{eq:cos-sin-id} \\
+Woodbury & $M=I+\Ph^{\top}\Ph/\noise$ ($m\times m$) & uses $\Ph$ already built \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{samebox}
+
+\paragraph{Learning $\omega$.}
+The parameters $\omega$ (\texttt{raw\_lengthscale}) are \textbf{learned} by default (MLL gradients through cos/sin into $\tilde{\mathbf x}_i$).
+The frequency matrix $W$ is \textbf{fixed} after initialization unless \texttt{resample\_weights} is called.
+When $\omega$ changes during training, $\Ph$ is recomputed each forward pass; the expensive factorization stays on $M$ ($m\times m$, $m=2D$), not on the $n\times n$ covariance.
+
+\subsection{Sizes and column structure of $\mathbf z$, $\Ph$, and $\Zmat$}
+\label{sec:notation-zZ}
+
+Fix $n$ training points, input dimension $d$, $D$ RFF frequencies, and feature count $m=2D$.
+See Section~\ref{sec:W-to-Ph-Z} for the full chain $d\times d$ block $\to$ $W\in\mathbb{R}^{d\times D}$ $\to$ $\Ph$ $\to$ $\Zmat$.
+Three symbols carry the \emph{same scalar values} in different layouts; they differ in shape and in what rows/columns index.
+
+\paragraph{What $\mathbf x$ and $\mathbf w$ are.}
+\begin{itemize}
+  \item $\mathbf x_i \in \mathbb{R}^d$: the $i$-th \textbf{input location} (one training point in original space).
+        Component $(\mathbf x_i)_a$ is coordinate $a$ of that point ($a=1,\ldots,d$).
+  \item $\mathbf w_j \in \mathbb{R}^d$: the $j$-th \textbf{random frequency} (column $j$ of $W$).
+        It is a direction in the \emph{same} $d$-dimensional input space as $\mathbf x$; RFF uses it to define
+        a linear functional $\mathbf w_j^{\top}\mathbf x$ before cos/sin (a random Fourier basis function).
+  \item GPPlus applies lengthscale scaling to inputs and (optionally) to weights (Section~\ref{sec:lengthscale-proj}):
+        $(\tilde{\mathbf x}_i)_a = 10^{\omega_a/2}\,(\mathbf x_i)_a$ and $(\tilde{\mathbf w}_j)_a$ may include ARD on $W$.
+        All formulas below use these scaled vectors; if unscaled, read $\tilde{\mathbf x}=\mathbf x$, $\tilde{\mathbf w}_j=\mathbf w_j$.
+\end{itemize}
+
+\paragraph{Element expansion: one scalar per $(i,j)$ pair.}
+Before cos/sin, each point--frequency pair gets one \textbf{projection} (inner product in $\mathbb{R}^d$):
+\begin{equation}
+  \label{eq:proj}
+  \boxed{
+  \mathrm{proj}_{i,j}
+  \;:=\;
+  \tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i
+  \;=\;
+  \sum_{a=1}^{d} (\tilde{\mathbf w}_j)_a\,(\tilde{\mathbf x}_i)_a.
+  }
+\end{equation}
+In code this is the $(i,j)$ entry of \texttt{x.mul(scale).matmul(W)} (matrix $\mathrm{proj}\in\mathbb{R}^{n\times D}$).
+Each entry is one dot product: frequency $\mathbf w_j$ applied to input $\mathbf x_i$.
+
+\paragraph{Element expansion: $\Ph$ ($n \times m$).}
+Every entry of $\Ph$ is a scaled cos or sin of one projection:
+\begin{equation}
+  \label{eq:Phi-elements}
+  \Ph_{i,j}
+  =
+  \begin{cases}
+    \dfrac{1}{\sqrt{D}}\,\cos(\mathrm{proj}_{i,j}),
+    & j = 1,\ldots,D, \\[6pt]
+    \dfrac{1}{\sqrt{D}}\,\sin(\mathrm{proj}_{i,j}),
+    & j = D+1,\ldots,2D.
+  \end{cases}
+  \qquad i=1,\ldots,n.
+\end{equation}
+Equivalently, row $i$ (all features for point $\mathbf x_i$) is
+\begin{equation}
+  \label{eq:Phi-row}
+  \Ph_{i,:}
+  = \frac{1}{\sqrt{D}}
+  \Bigl[
+    \cos(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}_i),
+    \ldots,
+    \cos(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}_i),
+    \sin(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}_i),
+    \ldots,
+    \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}_i)
+  \Bigr].
+\end{equation}
+\textbf{Read row-wise:} pick a point $\mathbf x_i$, loop over frequencies $\mathbf w_j$, emit cos then sin for each.
+
+\paragraph{Element expansion: $\Zmat$ ($m \times n$).}
+Since $\Zmat=\Ph^{\top}$, each entry is the transpose of \eqref{eq:Phi-elements}:
+\begin{equation}
+  \label{eq:Z-elements}
+  \Zmat_{r,k} = \Ph_{k,r},
+  \qquad
+  \Zmat_{j,k} = \frac{1}{\sqrt{D}}\cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_k),
+  \qquad
+  \Zmat_{D+j,k} = \frac{1}{\sqrt{D}}\sin(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_k).
+\end{equation}
+\textbf{Read column-wise:} column $k$ is the full feature vector for point $\mathbf x_k$,
+\[
+  \Zmat_{:,k}
+  = \mathbf z(\mathbf x_k)
+  = \frac{1}{\sqrt{D}}
+  \begin{bmatrix}
+    \cos(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}_k) \\
+    \vdots \\
+    \cos(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}_k) \\
+    \sin(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}_k) \\
+    \vdots \\
+    \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x}_k)
+  \end{bmatrix}.
+\]
+\textbf{Read row-wise:} row $j$ ($1\le j\le D$) holds $\frac{1}{\sqrt{D}}\cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_k)$ for all points $k$;
+row $D+j$ holds the sin version for the same frequency $\mathbf w_j$.
+
+\begin{samebox}
+\textbf{Tiny example} ($d=2$, $D=2$, $n=2$; omit scaling tildes for clarity).
+\[
+  W = \bigl[\,\mathbf w_1 \;\big|\; \mathbf w_2\,\bigr]
+  = \begin{bmatrix} w_{11} & w_{21} \\ w_{12} & w_{22} \end{bmatrix},
+  \qquad
+  \mathrm{proj}_{i,j} = w_{j1}\,x_{i1} + w_{j2}\,x_{i2}.
+\]
+\[
+  \Ph
+  = \frac{1}{\sqrt{2}}
+  \begin{bmatrix}
+    \cos(\mathbf w_1^{\top}\mathbf x_1) & \cos(\mathbf w_2^{\top}\mathbf x_1) &
+    \sin(\mathbf w_1^{\top}\mathbf x_1) & \sin(\mathbf w_2^{\top}\mathbf x_1) \\[4pt]
+    \cos(\mathbf w_1^{\top}\mathbf x_2) & \cos(\mathbf w_2^{\top}\mathbf x_2) &
+    \sin(\mathbf w_1^{\top}\mathbf x_2) & \sin(\mathbf w_2^{\top}\mathbf x_2)
+  \end{bmatrix},
+  \qquad
+  \Zmat = \Ph^{\top}.
+\]
+Row $i$ of $\Ph$ = features of $\mathbf x_i$; column $j$ of $\Ph$ = cos feature for $\mathbf w_j$ across all points.
+\end{samebox}
+
+\begin{samebox}
+\textbf{Sample example} ($d=10$, $D=5$, $n=12$; GPPlus-scale sizes; omit scaling tildes).
+
+\medskip
+\noindent\textbf{Step 1 --- inputs and frequencies.}
+\[
+  \mathbf x_i \in \mathbb{R}^{10}\ \text{for}\ i=1,\ldots,12,
+  \qquad
+  W = \bigl[\,\mathbf w_1 \;\big|\;\cdots\;\big|\;\mathbf w_5\,\bigr] \in \mathbb{R}^{10 \times 5},
+  \qquad
+  m = 2D = 10.
+\]
+Stack training inputs as $X\in\mathbb{R}^{12 \times 10}$ with row $i$ equal to $\mathbf x_i^{\top}$.
+Column $j$ of $W$ is $\mathbf w_j=(w_{j1},\ldots,w_{j10})^{\top}$.
+
+\medskip
+\noindent\textbf{Step 2 --- projections} (matrix $\mathrm{proj}\in\mathbb{R}^{12 \times 5}$, code: \texttt{x @ W} after scaling):
+\[
+  \mathrm{proj}_{i,j}
+  = \mathbf w_j^{\top}\mathbf x_i
+  = \sum_{a=1}^{10} w_{ja}\,x_{ia},
+  \qquad
+  \mathrm{proj} = X W.
+\]
+Entry $(i,j)$ is one dot product: frequency $\mathbf w_j$ applied to point $\mathbf x_i$.
+
+\medskip
+\noindent\textbf{Step 3 --- feature matrix $\Ph\in\mathbb{R}^{12 \times 10}$} (code: \texttt{z\_train}).
+Columns $1{:}5$ are cos features; columns $6{:}10$ are sin features for the same five frequencies:
+\[
+  \Ph
+  = \frac{1}{\sqrt{5}}
+  \begin{bmatrix}
+    \cos(\mathbf w_1^{\top}\mathbf x_1) & \cdots & \cos(\mathbf w_5^{\top}\mathbf x_1) &
+    \sin(\mathbf w_1^{\top}\mathbf x_1) & \cdots & \sin(\mathbf w_5^{\top}\mathbf x_1) \\[3pt]
+    \cos(\mathbf w_1^{\top}\mathbf x_2) & \cdots & \cos(\mathbf w_5^{\top}\mathbf x_2) &
+    \sin(\mathbf w_1^{\top}\mathbf x_2) & \cdots & \sin(\mathbf w_5^{\top}\mathbf x_2) \\
+    \vdots & & \vdots & \vdots & & \vdots \\
+    \cos(\mathbf w_1^{\top}\mathbf x_{12}) & \cdots & \cos(\mathbf w_5^{\top}\mathbf x_{12}) &
+    \sin(\mathbf w_1^{\top}\mathbf x_{12}) & \cdots & \sin(\mathbf w_5^{\top}\mathbf x_{12})
+  \end{bmatrix}.
+\]
+Equivalently: $\Ph_{i,j}=\frac{1}{\sqrt{5}}\cos(\mathrm{proj}_{i,j})$ for $j=1,\ldots,5$ and
+$\Ph_{i,\,6+j}=\frac{1}{\sqrt{5}}\sin(\mathrm{proj}_{i,j})$ for $j=1,\ldots,5$.
+Row $i$ has length $10$ and is $\mathbf z(\mathbf x_i)^{\top}$.
+
+\medskip
+\noindent\textbf{Step 4 --- Woodbury layout $\Zmat=\Ph^{\top}\in\mathbb{R}^{10 \times 12}$} (not stored in code).
+\[
+  \Zmat =
+  \bigl[\,
+    \mathbf z(\mathbf x_1)
+    \;\big|\;
+    \mathbf z(\mathbf x_2)
+    \;\big|\;
+    \cdots
+    \;\big|\;
+    \mathbf z(\mathbf x_{12})
+  \,\bigr],
+  \qquad
+  \Zmat_{j,k}=\Ph_{k,j},
+  \qquad
+  \Zmat_{6+j,k}=\Ph_{k,\,6+j}.
+\]
+Rows $1{:}5$ of $\Zmat$ are cos rows (one per $\mathbf w_j$, all $12$ points); rows $6{:}10$ are the matching sin rows.
+Column $k$ is the full $10$-vector $\mathbf z(\mathbf x_k)$.
+
+\medskip
+\noindent\textbf{Size summary for this example:}
+\begin{center}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}ll@{}}
+$X$ & $12 \times 10$ (points $\times$ input coords) \\
+$W$ & $10 \times 5$ (input coords $\times$ frequencies) \\
+$\mathrm{proj}=XW$ & $12 \times 5$ \\
+$\Ph$ & $12 \times 10$ \\
+$\Zmat=\Ph^{\top}$ & $10 \times 12$ \\
+Woodbury middle $M=I+\Ph^{\top}\Ph/\noise$ & $10 \times 10$ \\
+\end{tabular}
+\end{center}
+\end{samebox}
+
+\paragraph{Dimension cheat sheet.}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Quantity} & \textbf{Size / role} \\
+\midrule
+Training inputs & $x_i \in \mathbb{R}^d$, \quad $i=1,\ldots,n$ \\
+Frequency matrix & $W \in \mathbb{R}^{d \times D}$, \quad column $j$ is $\mathbf w_j$ \\
+Single-point features & $\mathbf z(x) \in \mathbb{R}^{m}$ (column), \quad $m=2D$ \\
+Training feature matrix (code) & $\Ph \in \mathbb{R}^{n \times m}$ \\
+Woodbury layout (transpose) & $\Zmat \in \mathbb{R}^{m \times n}$, \quad $\Zmat=\Ph^{\top}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{$\mathbf z(x)$ --- one point, one column ($m \times 1$).}
+Write $\mathbf z(x)$ as a \textbf{single column} with two stacked blocks (not two columns):
+\[
+  \mathbf z(x)
+  = \frac{1}{\sqrt{D}}
+  \underbrace{\begin{bmatrix}
+    \cos(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \cos(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x})
+  \end{bmatrix}}_{\text{rows } 1{:}D \;\text{(cos block)}}
+  \;\;\oplus\;\;
+  \underbrace{\begin{bmatrix}
+    \sin(\tilde{\mathbf w}_1^{\top}\tilde{\mathbf x}) \\
+    \vdots \\
+    \sin(\tilde{\mathbf w}_D^{\top}\tilde{\mathbf x})
+  \end{bmatrix}}_{\text{rows } D{+}1{:}2D \;\text{(sin block)}}
+  \;\in\; \mathbb{R}^{m}.
+\]
+Row $j$ ($1\le j\le D$) comes from frequency $\mathbf w_j$ via cos; row $D+j$ from the same $\mathbf w_j$ via sin.
+There is \textbf{one column only}; ``$2D$'' is the \textbf{length}, not the number of columns.
+
+\paragraph{$\Ph$ --- points as \textbf{rows}, features as \textbf{columns} ($n \times m$).}
+GPPlus stores training features as $\Ph$ (code name \texttt{z\_train}):
+\[
+  \Ph =
+  \begin{bmatrix}
+    \text{--- row 1: } \mathbf z(x_1)^{\top} \text{ ---} \\[2pt]
+    \text{--- row 2: } \mathbf z(x_2)^{\top} \text{ ---} \\
+    \vdots \\
+    \text{--- row } n \text{: } \mathbf z(x_n)^{\top} \text{ ---}
+  \end{bmatrix}
+  \;\in\; \mathbb{R}^{n \times m}.
+\]
+\textbf{Column structure} (which feature each column encodes):
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{Column index} & \textbf{Entries} & \textbf{Meaning} \\
+\midrule
+$1, \ldots, D$ &
+$\Ph_{i,j} = \frac{1}{\sqrt{D}}\cos(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i)$ &
+cos feature for frequency $j$, all points $i$ \\
+$D{+}1, \ldots, 2D$ &
+$\Ph_{i,\,D+j} = \frac{1}{\sqrt{D}}\sin(\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i)$ &
+sin feature for frequency $j$, all points $i$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+So $\Ph$ has $n$ rows (one per point) and $m=2D$ columns (two per frequency: cos then sin).
+Row $i$ is the \textbf{transpose} of the column vector $\mathbf z(x_i)$.
+
+\paragraph{$\Zmat$ --- features as \textbf{rows}, points as \textbf{columns} ($m \times n$).}
+In the Woodbury sections, $\Zmat$ is the transpose layout (not stored in code):
+\[
+  \Zmat = \Ph^{\top} \;\in\; \mathbb{R}^{m \times n}.
+\]
+\textbf{Column structure:}
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}cll@{}}
+\toprule
+\textbf{Column index} & \textbf{Contents} & \textbf{Meaning} \\
+\midrule
+$k$ ($1\le k\le n$) &
+$\Zmat_{:,k} = \mathbf z(x_k)$ &
+\textbf{entire} feature column for training point $k$ \\
+\midrule
+\textbf{Row index} & \textbf{Contents} & \textbf{Meaning} \\
+\midrule
+$1,\ldots,D$ &
+$\Zmat_{j,k} = \Ph_{k,j}$ &
+cos block (same row labels as $\mathbf z$) \\
+$D{+}1,\ldots,2D$ &
+$\Zmat_{D+j,k} = \Ph_{k,\,D+j}$ &
+sin block \\
+\bottomrule
+\end{tabular}
+\end{center}
+So $\Zmat$ has $m=2D$ rows (feature index) and $n$ columns (point index).
+Column $k$ of $\Zmat$ equals the column vector $\mathbf z(x_k)$; row $i$ of $\Ph$ equals $\mathbf z(x_i)^{\top}$.
+
+\begin{samebox}
+\textbf{Side-by-side layout (same numbers, different indexing)}
+\[
+  \underbrace{\Ph}_{n \times m}
+  =
+  \begin{bmatrix}
+    \mathbf z(x_1)^{\top} \\
+    \mathbf z(x_2)^{\top} \\
+    \vdots \\
+    \mathbf z(x_n)^{\top}
+  \end{bmatrix},
+  \qquad
+  \underbrace{\Zmat}_{m \times n}
+  =
+  \bigl[\,\mathbf z(x_1)\;\big|\;\mathbf z(x_2)\;\big|\;\cdots\;\big|\;\mathbf z(x_n)\,\bigr].
+\]
+Each \textbf{row} of $\Ph$ is one point; each \textbf{column} of $\Zmat$ is one point.
+\[
+  \Ph\Ph^{\top} = \Zmat^{\top}\Zmat \in \mathbb{R}^{n \times n},
+  \qquad
+  \Ph^{\top}\Ph = \Zmat\Zmat^{\top} \in \mathbb{R}^{m \times m} \;\text{(Woodbury middle uses this size)}.
+\]
+\end{samebox}
+
+\begin{diffbox}
+\textbf{Common confusion}
+\begin{itemize}
+  \item $\mathbf z(x)$ has \textbf{one column} and length $m=2D$; the ``2'' is cos$+$sin per frequency, not two matrix columns.
+  \item $\Ph$ is $(n \times m)$: \textbf{rows} = points, \textbf{columns} = features (cos cols $1{:}D$, sin cols $D{+}1{:}2D$).
+  \item $\Zmat$ is $(m \times n)$: \textbf{rows} = features, \textbf{columns} = points; column $k$ is $\mathbf z(x_k)$.
+  \item \texttt{z\_train} in code is $\Ph$, not $\mathbf z$ and not the Woodbury $\Zmat$.
+  \item Kernel for one pair: $\mathbf z(x)^{\top}\mathbf z(y)$; training Gram: $\Ph\Ph^{\top}$.
+\end{itemize}
+\end{diffbox}
+
 One training row is $\Ph_i = \mathbf z(x_i)^{\top}$ (with outputscale applied in \texttt{RFFGPR}).
 
-\subsection{Full ORF (Yu et al., Eq.~(2))}
+\begin{samebox}
+\textbf{What is \emph{identical} across RFF, ORF, and SORF}
+\begin{itemize}
+  \item Featurization \eqref{eq:featurize}: cos/sin pairs with $1/\sqrt{D}$ scaling.
+  \item Woodbury MLL, $\Sig$, $M$, and all formulas in Sections~\ref{sec:split}--\ref{sec:logdet}.
+  \item Block concatenation when $D>d$ (Sections~\ref{sec:W-to-Ph-Z}, \ref{sec:blocks}).
+  \item ARD on weights applied \textbf{after} the base draw: $W \leftarrow W \odot (1/\boldsymbol{\ell})$.
+\end{itemize}
+\end{samebox}
 
-Plain QR on a Gaussian matrix gives \emph{unit-norm} directions; Gaussian RFF rows have
-$\chi(d)$-distributed norms. Full ORF restores that distribution while keeping directions orthogonal
-within each block.
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.14\textwidth}p{0.28\textwidth}p{0.22\textwidth}p{0.26\textwidth}@{}}
+\toprule
+\textbf{Mode} & \textbf{How columns $\mathbf w_j$ are drawn} & \textbf{Key property} & \textbf{Cost to build $W$} \\
+\midrule
+\texttt{"rff"} &
+$\mathbf w_j \stackrel{\text{i.i.d.}}{\sim}\mathcal N(0,I_d)$ &
+Unbiased; highest Monte Carlo variance &
+$O(dD)$ \\
+\texttt{"orf"} &
+$\mathbf w_j = s_j\,\mathbf q_j$ from QR block (Eq.~\eqref{eq:orf-paper}) &
+Orthogonal directions within each $d\times d$ block; lower variance than RFF &
+$O(d^2 D)$ (QR per block) \\
+\texttt{"sorf"} &
+Columns of $\sqrt{d}\,H D_1 H D_2 H D_3$ (Eq.~\eqref{eq:sorf-paper}) &
+Structured orthogonality; approximates ORF without QR &
+$O(d\log d \cdot D)$ via FWHT \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Why ORF and SORF (vs.\ i.i.d.\ RFF)}
+\label{sec:why-orf-sorf}
+
+Plain RFF \eqref{eq:rff-iid} draws each $\mathbf w_j$ \textbf{independently}.
+That Monte Carlo scheme is \textbf{unbiased} for the kernel approximation \eqref{eq:rff-kernel-approx},
+but for fixed $D$ the variance of $\hat K(\mathbf x,\mathbf y)=\mathbf z(\mathbf x)^{\top}\mathbf z(\mathbf y)$
+is typically \textbf{highest} among the three modes (Table above).
+
+\textbf{ORF} and \textbf{SORF} (Yu et al.) keep the \textbf{same marginal distribution}
+$\mathbf w_j\sim\mathcal N(0,I_d)$ as RFF, but spread the \textbf{directions}
+$\mathbf w_j/\|\mathbf w_j\|$ more evenly (approximately orthogonal within each block of size~$d$).
+Theorem~1 in Yu et al.\ shows this reduces kernel-estimate variance without introducing bias.
+\textbf{Downstream GP math is unchanged:} once $W$ is fixed, featurization, $\Ph$, and Woodbury are identical.
+
+\subsection{Standard RFF (\texttt{rff\_sampling="rff"})}
+\label{sec:rff-iid}
+
+\textbf{Idea.} Section~\ref{sec:gaussian-fourier} shows why RFF draws random frequencies from the Gaussian (RBF) spectral density and approximates the kernel by $\mathbf z(\mathbf x)^{\top}\mathbf z(\mathbf x')$.
+Each column of $W$ is one Monte Carlo draw $\mathbf w_j$; \eqref{eq:rff-iid} is the isotropic draw before optional $\omega$/ARD scaling.
+
+\textbf{In code:} \texttt{torch.randn(d, D)} inside \texttt{init\_rbf\_weights}.
+Columns are independent; no orthogonality constraint.
+\textbf{Trade-off:} simplest and cheapest draw, but Monte Carlo variance of the kernel estimate
+$\hat K(x,y)=\mathbf z(x)^{\top}\mathbf z(y)$ is typically highest for fixed $D$.
+
+\subsection{Full ORF (\texttt{rff\_sampling="orf"})}
+\label{sec:orf}
+
+\textbf{Idea.} ORF keeps the \emph{same marginal distribution} $\mathbf w_j\sim\mathcal N(0,I_d)$ as RFF,
+but forces the \textbf{directions} $\mathbf w_j/\|\mathbf w_j\|$ to be mutually orthogonal within each
+block of size $d$. That reduces variance of $\hat K(x,y)$ without biasing the kernel approximation
+(Theorem~1 in Yu et al.).
+
+Plain QR on a Gaussian matrix gives \emph{unit-norm} directions only; Gaussian RFF norms are
+$\chi(d)$-distributed. \textbf{Full ORF} restores that distribution:
 
 \begin{equation}
   \label{eq:orf-paper}
   \boxed{
-  W_{\mathrm{ORF}} = \frac{1}{\sigma}\, S\, Q,
+  W_{\mathrm{ORF}} = S\, Q,
   \qquad
   \mathbf w_j = s_j\,\mathbf q_j,
   }
 \end{equation}
 where:
 \begin{itemize}
-  \item $Q\in\mathbb{R}^{d\times d}$ is a random orthogonal matrix from the QR decomposition of a
-        $d\times d$ Gaussian matrix (uniform on the Stiefel manifold);
-  \item $S=\mathrm{diag}(s_1,\ldots,s_D)$ with $s_j \sim \chi(d)$ i.i.d.;
-  \item $\mathbf q_j$ is the $j$-th \textbf{column} of $Q$ (orthonormal directions in $\mathbb{R}^d$).
+  \item $Q\in\mathbb{R}^{d\times d}$ is orthogonal, from QR on a $d\times d$ Gaussian matrix
+        (uniform on the Stiefel manifold);
+  \item $S=\mathrm{diag}(s_1,\ldots,s_D)$ with $s_j \sim \chi(d)$ i.i.d.\ ($\chi(d)=\|\mathcal N(0,I_d)\|$; Section~\ref{par:n-vs-chi});
+  \item $\mathbf q_j$ is the $j$-th \textbf{column} of $Q$.
 \end{itemize}
-Each $\mathbf w_j$ is marginally $\mathcal N(0,I_d)$, so kernel approximation remains unbiased;
-the variance of $\hat K(x,y)$ is lower than i.i.d.\ RFF for the same $D$ (Theorem~1 in the paper).
+GPPlus omits the paper's explicit $1/\sigma$ factor because input lengthscale scaling is handled in
+\texttt{featurize\_rbf} via $10^{\ell/2}$.
+
+\paragraph{QR decomposition: definition.}
+Any real matrix $G\in\mathbb{R}^{d\times d}$ admits a \textbf{QR factorization}
+\begin{equation}
+  \label{eq:qr-factorization}
+  \boxed{
+  G = Q R,
+  }
+\end{equation}
+where:
+\begin{itemize}
+  \item $Q\in\mathbb{R}^{d\times d}$ is \textbf{orthogonal}: $Q^{\top}Q = Q Q^{\top} = I_d$
+        (columns are orthonormal; rows are orthonormal);
+  \item $R\in\mathbb{R}^{d\times d}$ is \textbf{upper triangular} (entries below the diagonal are zero).
+\end{itemize}
+Think of QR as rewriting the \emph{same} random directions stored in $G$ as an orthogonal frame $Q$
+times a triangular ``stretch/shear'' $R$.
+ORF \textbf{discards $R$} and keeps only $Q$: we want orthonormal direction vectors, not the triangular
+rescaling that $R$ encodes.
+
+\paragraph{Column-wise meaning of $Q$.}
+Write $G=[\,\mathbf g_1 \mid \cdots \mid \mathbf g_d\,]$ and $Q=[\,\mathbf q_1 \mid \cdots \mid \mathbf q_d\,]$.
+The $j$-th column $\mathbf q_j\in\mathbb{R}^d$ is the \textbf{direction} used as frequency~$j$ (before length scaling $s_j$):
+\begin{equation}
+  \label{eq:orf-q-columns}
+  \|\mathbf q_j\|_2 = 1,
+  \qquad
+  \mathbf q_i^{\top}\mathbf q_j = 0 \;\;\text{for}\;\; i\ne j.
+\end{equation}
+So within one block, the unit vectors $\mathbf q_1,\ldots,\mathbf q_b$ point in \textbf{mutually perpendicular}
+directions in $\mathbb{R}^d$---they use the available angular directions without clustering.
+By contrast, i.i.d.\ RFF columns $\mathbf w_j\sim\mathcal N(0,I_d)$ have
+$\mathbb E\bigl[\mathbf w_i^{\top}\mathbf w_j / (\|\mathbf w_i\|\,\|\mathbf w_j\|)\bigr] = 0$ only \textbf{on average};
+for finite $D$ they are typically \emph{not} exactly orthogonal, which increases Monte Carlo variance in
+$\hat K(\mathbf x,\mathbf y)$.
+
+\paragraph{Why QR on a Gaussian matrix?}
+If $G$ has i.i.d.\ $\mathcal N(0,1)$ entries, the resulting $Q$ is \textbf{uniform} on the orthogonal group
+(up to sign flips of columns): every orthonormal frame is equally likely.
+Equivalently, each column $\mathbf q_j$ is uniform on the unit sphere in $\mathbb{R}^d$, \textbf{and} the columns
+are exactly orthogonal to each other---whereas $d$ independent Gaussian draws would not be.
+That is the core ORF variance reduction: same marginal for each direction as RFF, but \textbf{deterministic
+zero correlation} between directions within a block.
+
+\paragraph{What GPPlus computes (\texttt{torch.linalg.qr}).}
+For square $G\in\mathbb{R}^{d\times d}$, \texttt{q, r = torch.linalg.qr(g)} returns:
+\begin{itemize}
+  \item \texttt{q} $\equiv Q$ with orthonormal columns ($Q^{\top}Q=I_d$);
+  \item \texttt{r} $\equiv R$ upper triangular (not stored in \texttt{randn\_weights}).
+\end{itemize}
+ORF then takes the first $b$ columns of $Q$ and scales them:
+$\mathbf w_j = s_j\,\mathbf q_j$ for $j=1,\ldots,b$.
+\textbf{Sign convention:} QR is unique up to $\pm1$ per column; PyTorch picks one branch; any fixed convention
+is fine because cos/sin features are sign-symmetric in the paired cos$+$sin construction.
+
+\paragraph{Minimal QR picture ($d=2$, one block $b=2$).}
+Suppose (after QR, ignoring signs)
+\[
+  Q = \begin{bmatrix} q_{11} & q_{12} \\ q_{21} & q_{22} \end{bmatrix},
+  \quad
+  q_{11}^2+q_{21}^2=1,\;
+  q_{12}^2+q_{22}^2=1,\;
+  q_{11}q_{12}+q_{21}q_{22}=0.
+\]
+Then $\mathbf q_1=(q_{11},q_{21})^{\top}$ and $\mathbf q_2=(q_{12},q_{22})^{\top}$ are unit vectors at
+\textbf{right angles} in the input plane.
+Draw $s_1,s_2\sim\chi(2)$ and set $\mathbf w_j=s_j\mathbf q_j$.
+Projections for input $\tilde{\mathbf x}=(x_1,x_2)^{\top}$ are
+$\mathrm{proj}_{j}=\mathbf w_j^{\top}\tilde{\mathbf x}=s_j\,\mathbf q_j^{\top}\tilde{\mathbf x}$---same
+featurization as RFF, but the two frequencies probe \textbf{orthogonal} 2-D directions before $\cos/\sin$.
+
+\begin{samebox}
+\textbf{QR vs.\ what ORF keeps (one glance)}
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Factor} & \textbf{Shape} & \textbf{ORF uses it?} \\
+\midrule
+$G$ & $d\times d$ random Gaussian & input to QR only \\
+$Q$ & $d\times d$ orthogonal & \textbf{yes} --- columns $\mathbf q_j$ are directions \\
+$R$ & $d\times d$ upper triangular & \textbf{no} --- discarded \\
+$s_j$ & scalar $\sim\chi(d)$ & \textbf{yes} --- scales $\mathbf q_j$ to $\mathbf w_j$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{samebox}
+
+\textbf{Algorithm} (one block of $b_k\le d$ columns, block index~$k$):
+\begin{align}
+  G &\sim \mathcal N(0,I)^{d\times d}, \\
+  Q &\leftarrow \mathrm{qr}(G), \\
+  s_j &\sim \chi(d) \;\text{(drawn as $\|\mathcal N(0,I_d)\|$)}, \quad j=1,\ldots,b_k, \\
+  \mathbf w_j &\leftarrow s_j\,\mathbf q_j, \\
+  W^{(k)} &\leftarrow \bigl[\,s_1\mathbf q_1 \;\big|\; \cdots \;\big|\; s_{b_k}\mathbf q_{b_k}\,\bigr]
+  \in \mathbb{R}^{d\times b_k}.
+\end{align}
+How many blocks $K$ and each $b_k$ are chosen is the same loop for ORF and SORF (Section~\ref{par:sorf-block-k}); $k$ is not a hyperparameter.
+
+\paragraph{Step-by-step construction (one ORF block).}
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Step} & \textbf{Object} & \textbf{Size} & \textbf{Meaning} \\
+\midrule
+1 & $G$ & $d\times d$ & i.i.d.\ $\mathcal N(0,1)$ entries; raw material for QR \\
+2 & $Q$ & $d\times d$ & \textbf{Orthogonal}: $Q^{\top}Q=I$; column $\mathbf q_j$ is direction on unit sphere \\
+3 & $s_j$ & scalar & $s_j\sim\chi(d)=\|\mathcal N(0,I_d)\|$; random \textbf{length} of frequency~$j$ \\
+4 & $\mathbf w_j$ & $d\times 1$ & $s_j\mathbf q_j$; column $j$ of block matrix $W^{(k)}$ \\
+5 & $W^{(k)}$ & $d\times b_k$ & First $b_k$ columns $\mathbf w_1,\ldots,\mathbf w_{b_k}$ (block index~$k$; width $b_k$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{In code} (\texttt{\_sample\_orf\_weights}): loop \eqref{eq:block-loop} with ORF body:
+\texttt{G = torch.randn(d,d)} $\to$ \texttt{q,\_ = torch.linalg.qr(g)} $\to$
+\texttt{s = torch.randn(b\_k,d).norm(dim=1)} $\to$ \texttt{w = q[:,:b\_k] * s.unsqueeze(0)}.
+SORF uses the same loop with \texttt{\_sorf\_block(d, b\_k)} instead (Section~\ref{par:sorf-block-k}).
+
+\paragraph{Why both $Q$ and $s_j$?}
+QR alone yields \textbf{unit-norm} columns ($\|\mathbf q_j\|=1$).
+Gaussian RFF columns have $\|\mathbf w_j\|\sim\chi(d)$.
+Multiplying by $s_j\sim\chi(d)$ restores the correct \textbf{marginal norm} while keeping directions orthogonal within the block.
+GPPlus implements \textbf{full ORF} ($S$ included), not the simplified ORF$'$ variant $W=\sqrt{d}\,Q$ without $\chi(d)$ scaling.
+
+\paragraph{$\mathcal{N}(0,1)$ vs.\ $\chi(d)$: different objects, different roles.}
+\label{par:n-vs-chi}
+These symbols appear together in ORF but mean different things:
+\begin{itemize}[nosep]
+  \item \textbf{$\mathcal{N}(0,1)$} is a \textbf{single coordinate}: one real number $Z$ with mean $0$ and variance $1$.
+        It can be negative or positive.
+        In ORF, each entry of the QR input matrix satisfies $G_{ab}\stackrel{\text{i.i.d.}}{\sim}\mathcal N(0,1)$
+        (\texttt{torch.randn(d,d)}).
+  \item \textbf{$\chi(d)$} (chi with $d$ degrees of freedom) is a \textbf{positive scalar length} in $\mathbb{R}^d$,
+        \emph{not} another name for $\mathcal N(0,1)$.
+        GPPlus defines it as the Euclidean norm of a $d$-dimensional standard Gaussian vector
+        (Eq.~\eqref{eq:chi-d}).
+        Code: \texttt{torch.randn(d).norm()} or \texttt{torch.randn(b\_k,d).norm(dim=1)}.
+\end{itemize}
+\begin{equation}
+  \label{eq:chi-d}
+  \mathbf Z = (Z_1,\ldots,Z_d)^{\top},\quad
+  Z_a \stackrel{\text{i.i.d.}}{\sim} \mathcal N(0,1),
+  \qquad
+  s = \|\mathbf Z\|_2 = \sqrt{Z_1^2 + \cdots + Z_d^2}
+  \;\sim\; \chi(d).
+\end{equation}
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{$\mathcal{N}(0,1)$} & \textbf{$\chi(d)$} \\
+\midrule
+What it is & one coordinate & norm $\|\mathbf Z\|$ of $\mathbf Z\in\mathbb{R}^d$ \\
+Sign & can be $\pm$ & always $\ge 0$ \\
+Typical size & $\mathcal O(1)$ & $\mathcal O(\sqrt{d})$ (peaks near $\sqrt{d-1}$--$\sqrt{d+1}$ for large $d$) \\
+In ORF & fills entries of $G$ before QR & scales direction: $\mathbf w_j = s_j\,\mathbf q_j$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{Direction vs.\ length in ORF.} QR on $G$ yields unit directions $\mathbf q_j$ ($\|\mathbf q_j\|=1$): \emph{which way} the frequency points.
+Each $s_j\sim\chi(d)$ sets \emph{how long} $\mathbf w_j=s_j\mathbf q_j$ is.
+Plain RFF draws $\mathbf w_j\sim\mathcal N(0,I_d)$ in one step; then $\|\mathbf w_j\|\sim\chi(d)$ automatically.
+ORF separates the two: orthogonal $\mathbf q_j$ from QR, then independent $\chi(d)$ scales $s_j$, so each $\mathbf w_j$ has the
+\textbf{same marginal} as RFF while directions within a block are exactly orthogonal.
+\textbf{Not} $\chi^2(d)$: the chi-\emph{squared} law is $Z_1^2+\cdots+Z_d^2=s^2$; $\chi(d)=\sqrt{\chi^2(d)}$ is the norm, not the sum of squares.
+
+\paragraph{Minimal example ($d=3$, $D=3$, one block).}
+\begin{align*}
+  G &\sim \mathcal N(0,I)^{3\times 3}
+  \;\xrightarrow{\;\mathrm{qr}\;}\;
+  Q\in\mathbb{R}^{3\times 3},\ Q^{\top}Q=I, \\
+  s_j &\sim \|\mathcal N(0,I_3)\|,\quad j=1,2,3, \\
+  W^{(1)} &= \bigl[\,s_1\mathbf q_1 \;\big|\; s_2\mathbf q_2 \;\big|\; s_3\mathbf q_3\,\bigr] \in \mathbb{R}^{3\times 3}
+  \quad (K=1,\ b_1=3).
+\end{align*}
+Each column $\mathbf w_j$ enters $\cos(\mathbf w_j^{\top}\tilde{\mathbf x})$ and $\sin(\mathbf w_j^{\top}\tilde{\mathbf x})$ in \eqref{eq:featurize}.
+When $D \le d$, a \textbf{single} block suffices: $b_1=D$ and $W=W^{(1)}\in\mathbb{R}^{d\times D}$.
+When $D > d$, repeat the block construction and concatenate columns (Section~\ref{sec:W-to-Ph-Z}).
 
 \begin{diffbox}
 \textbf{ORF$'$ (simplified, not implemented):}
-$W=\frac{\sqrt{d}}{\sigma}\,Q$ without $\chi(d)$ scaling uses unit-norm rows/columns only.
+$W=\sqrt{d}\,Q$ without $\chi(d)$ scaling uses unit-norm columns only.
 GPPlus implements \textbf{full ORF} ($S$ included), not ORF$'$.
 \end{diffbox}
 
-\subsection{When $D > d$: independent blocks}
+\subsection{Structured ORF --- SORF (\texttt{rff\_sampling="sorf"})}
+\label{sec:sorf}
 
-When more than $d$ frequencies are needed, the paper repeats Eq.~\eqref{eq:orf-paper}
-\textbf{independently} for each block of size $d$ (Corollary~1).
-GPPlus concatenates columns:
+\textbf{Idea.} SORF targets the same goal as ORF---orthogonal-ish directions with lower variance than i.i.d.\
+RFF---but replaces the expensive QR step with a \textbf{Walsh--Hadamard} transform sandwiched between
+random sign flips. Yu et al.\ Eq.~(5):
+\begin{equation}
+  \label{eq:sorf-paper}
+  \boxed{
+  W_{\mathrm{SORF}} = \sqrt{d}\; H\, D_1\, H\, D_2\, H\, D_3,
+  }
+\end{equation}
+where:
+\begin{itemize}
+  \item $H\in\mathbb{R}^{d\times d}$ is the (normalized) Walsh--Hadamard matrix;
+  \item $D_1,D_2,D_3$ are independent diagonal Rademacher matrices ($\mathrm{diag}(\pm1)$ i.i.d.).
+\end{itemize}
+Column $j$ of $W_{\mathrm{SORF}}$ is $\sqrt{d}$ times the $j$-th column of the structured product.
+Applying $H$ costs $O(d\log d)$ via a fast Walsh--Hadamard transform (FWHT) instead of $O(d^2)$ for QR.
+
+\textbf{GPPlus implementation notes}
+\begin{itemize}
+  \item FWHT requires dimension $2^{p}$; GPPlus pads to \texttt{\_next\_pow2(d)} for the transform,
+        then keeps the first $d$ rows (actual input dimension).
+  \item The scale factor is $\sqrt{d}$ with $d=\texttt{num\_dims}$ (not the padded size).
+  \item \texttt{\_sample\_sorf\_weights} materializes explicit $W\in\mathbb{R}^{d\times D}$ by applying
+        the structured map to basis vectors (columns of $I$), same as storing ORF/RFF weights.
+        A materialization-free $O(d\log d)$ \emph{apply} without storing $W$ is \textbf{not} implemented.
+\end{itemize}
+
+\paragraph{How block index $k$ and block count $K$ are chosen (SORF and ORF).}
+\label{par:sorf-block-k}
+\textbf{$k$ is not a user hyperparameter.} GPPlus chooses the number of blocks and the width $b_k$ of each block
+\emph{deterministically} from only two inputs:
+\begin{itemize}[nosep]
+  \item $d = \texttt{num\_dims}$ (input dimension after any feature engineering);
+  \item $D = \texttt{num\_rff}$ (requested number of frequency columns).
+\end{itemize}
+The loop in \texttt{\_sample\_sorf\_weights} (identical structure in \texttt{\_sample\_orf\_weights}) is:
+\begin{equation}
+  \label{eq:block-loop}
+  \begin{aligned}
+    &\mathrm{remaining} \leftarrow D,\quad k \leftarrow 1 \\
+    &\textbf{while\ }\mathrm{remaining} > 0: \\
+    &\quad b_k \leftarrow \min(d,\ \mathrm{remaining}) \\
+    &\quad W^{(k)} \leftarrow \text{fresh block of } b_k \text{ columns} \\
+    &\quad \mathrm{remaining} \leftarrow \mathrm{remaining} - b_k,\quad k \leftarrow k+1 \\
+    &K \leftarrow k-1 \\
+    &W \leftarrow \bigl[\,W^{(1)} \,\|\, \cdots \,\|\, W^{(K)}\,\bigr]
+      \in \mathbb{R}^{d\times D}
+  \end{aligned}
+\end{equation}
+So $k=1,2,\ldots,K$ is simply the \textbf{loop counter} (which block you are building now).
+You never pick $K$ separately: it follows from $(d,D)$.
+
+\paragraph{Closed form for $K$ and $b_k$.}
+Let $\lfloor\cdot\rfloor$ denote the floor and $D\bmod d$ the remainder.
+\begin{equation}
+  \label{eq:K-bk}
+  K = \left\lceil \frac{D}{d} \right\rceil
+  \qquad
+  \text{($K=1$ when $D\le d$).}
+\end{equation}
+For $k=1,\ldots,K-1$ (all but the last block), $b_k = d$ whenever $D>d$.
+The last block has
+\begin{equation}
+  b_K = D - (K-1)\,d
+  = \begin{cases}
+      D & K=1 \;(D\le d), \\
+      d & D\bmod d = 0, \\
+      D\bmod d & D\bmod d > 0 \;\text{(partial final block)}.
+    \end{cases}
+\end{equation}
+Always $\sum_{k=1}^{K} b_k = D$.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.17\textwidth}p{0.10\textwidth}p{0.22\textwidth}p{0.43\textwidth}@{}}
+\toprule
+\textbf{Case} & \textbf{$K$} & \textbf{Widths $b_k$} & \textbf{Example} \\
+\midrule
+$D \le d$ & $1$ & $b_1=D$ & $d=270$, $D=256$: one block $W^{(1)}\in\mathbb{R}^{270\times 256}$ \\
+$D > d$, divides evenly & $D/d$ & all $b_k=d$ & $d=270$, $D=810$: $K=3$, each $b_k=270$ \\
+$D > d$, remainder & $\lceil D/d\rceil$ & $d,\ldots,d$, then $D\bmod d$ &
+  $d=270$, $D=1600$: $K=6$ with $(270,270,270,270,270,250)$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{diffbox}
+\textbf{Symbol clash (read carefully).}
+\begin{itemize}[nosep]
+  \item Block index $k\in\{1,\ldots,K\}$ and block matrix $W^{(k)}$ refer to \textbf{which independent SORF draw} in \eqref{eq:block-loop}.
+  \item $D_1,D_2,D_3$ are the three \textbf{Rademacher} diagonal matrices \emph{inside} one block---unrelated to block index~$k$.
+  \item $d_{\mathrm{pad}}=2^{p}$ uses exponent $p$ (smallest power of two $\ge d$); do not confuse with block~$k$.
+\end{itemize}
+Each block $W^{(k)}$ uses a \textbf{fresh} triple $(D_1,D_2,D_3)$; orthogonality is within a block, not between $W^{(k)}$ and $W^{(k')}$.
+\end{diffbox}
+
+\textbf{Algorithm} (one block of $b_k\le d$ columns, block index~$k$):
+\begin{align}
+  d_{\mathrm{pad}} &\leftarrow 2^{p},\quad
+  p=\min\bigl\{p\in\mathbb{N}_0 : 2^{p}\ge d\bigr\}, \\
+  D_1,D_2,D_3 &\leftarrow \mathrm{diag}(\text{Rademacher}(d_{\mathrm{pad}}))
+  \quad\text{(fresh draw for this block)}, \\
+  E &\leftarrow \text{first } b_k \text{ columns of } I_{d_{\mathrm{pad}}}, \\
+  W^{(k)} &\leftarrow \text{rows } 1{:}d \text{ of }
+  \bigl(\sqrt{d}\; H D_3 H D_2 H D_1 E\bigr)
+  \quad\text{(FWHT)}.
+\end{align}
+After the loop in \eqref{eq:block-loop}, form $W$ from \eqref{eq:W-concat}.
+
+\paragraph{Step-by-step construction (one SORF block).}
+\begin{center}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Step} & \textbf{Object} & \textbf{Size} & \textbf{Meaning} \\
+\midrule
+1 & $d_{\mathrm{pad}}$ & scalar & $d_{\mathrm{pad}}=2^{p}$, smallest power of two $\ge d$ (FWHT length) \\
+2 & $D_1,D_2,D_3$ & $d_{\mathrm{pad}}\times d_{\mathrm{pad}}$ & Diagonal \textbf{Rademacher}: each entry $\pm1$ i.i.d. \\
+3 & $H$ & $d_{\mathrm{pad}}\times d_{\mathrm{pad}}$ & Normalized \textbf{Walsh--Hadamard}; orthogonal, entries $\pm1/\sqrt{d_{\mathrm{pad}}}$ \\
+4 & $E$ & $d_{\mathrm{pad}}\times b_k$ & First $b_k$ columns of $I_{d_{\mathrm{pad}}}$ (basis vectors $\mathbf e_1,\ldots,\mathbf e_{b_k}$) \\
+5 & $W^{(k)}$ & $d\times b_k$ & $\sqrt{d}\,H D_3 H D_2 H D_1 E$ via FWHT, then truncate to $d$ rows \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Column formula.}
+Column $j$ of $W_{\mathrm{SORF}}$ (before truncation) is
+\begin{equation}
+  \label{eq:sorf-column}
+  \boxed{
+  \mathbf w_j
+  = \sqrt{d}\; H\, D_3\, H\, D_2\, H\, D_1\, \mathbf e_j,
+  }
+\end{equation}
+where $\mathbf e_j$ is the $j$-th standard basis vector in $\mathbb{R}^{d_{\mathrm{pad}}}$.
+\textbf{Intuition:} start from a basis direction, apply random sign flips ($D_1,D_2,D_3$) and orthogonal mixes ($H$) repeatedly;
+Hadamard spreads energy across all coordinates in a structured way; Rademacher signs randomize the mix.
+
+\paragraph{FWHT and GPPlus apply order.}
+The normalized fast Walsh--Hadamard transform (\texttt{\_fwht}) computes $H\mathbf x$ in $O(d_{\mathrm{pad}}\log d_{\mathrm{pad}})$ instead of $O(d_{\mathrm{pad}}^2)$.
+GPPlus applies the map to the first $b_k$ basis vectors in batch (\texttt{\_sorf\_apply\_columns}):
+\begin{enumerate}
+  \item $x \leftarrow E$ (columns of $I$);
+  \item $x \leftarrow x \odot D_3$ (column-wise multiply by diagonal of $D_3$);
+  \item $x \leftarrow Hx$ (FWHT);
+  \item $x \leftarrow x \odot D_2$; \quad $x \leftarrow Hx$;
+  \item $x \leftarrow x \odot D_1$; \quad $x \leftarrow Hx$;
+  \item $x \leftarrow \sqrt{d}\,x$; \quad keep rows $1{:}d$.
+\end{enumerate}
+This matches \eqref{eq:sorf-paper} right-to-left on columns of~$E$.
+The scale $\sqrt{d}$ uses $d=\texttt{num\_dims}$ (actual input dimension), \textbf{not} $d_{\mathrm{pad}}$.
+
+\paragraph{SORF vs.\ ORF (practical comparison).}
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.18\textwidth}p{0.36\textwidth}p{0.36\textwidth}@{}}
+\toprule
+ & \textbf{ORF} & \textbf{SORF} \\
+\midrule
+Draw & $G\to\mathrm{qr}\to Q$; $\mathbf w_j=s_j\mathbf q_j$ & $\sqrt{d}\,H D_3 H D_2 H D_1 \mathbf e_j$ via FWHT \\
+Orthogonality & Exact within block ($Q^{\top}Q=I$) & Structured approximation (Hadamard) \\
+Cost per block & $O(d^2)$ (QR on $d\times d$) & $O(d\log d)$ (FWHT) \\
+Marginal $\mathbf w_j$ & $\mathcal N(0,I_d)$ & Approximately $\mathcal N(0,I_d)$ \\
+Stored $W$ & Explicit $(d,D)$ & Explicit $(d,D)$ (materialized; no implicit apply-only path) \\
+After $W$ & \multicolumn{2}{c}{Identical \texttt{featurize\_rbf} $\to$ $\Ph$ $\to$ Woodbury} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{samebox}
+\textbf{SORF vs ORF in practice}
+\begin{itemize}
+  \item Both reduce kernel-estimate variance relative to i.i.d.\ RFF for the same $D$.
+  \item ORF is the ``exact'' orthogonal construction (QR + $\chi(d)$); SORF is a fast structured surrogate.
+  \item Downstream GP math is unchanged: once $W$ is fixed, all three modes produce the same $\Ph$ layout
+        and use the same Woodbury formulas.
+\end{itemize}
+\end{samebox}
+
+%=============================================================================
+\subsection{Pipeline: from $d\times d$ blocks to $d\times D$, then $\Ph$ and $\Zmat$}
+\label{sec:W-to-Ph-Z}
+%=============================================================================
+
+ORF and SORF build a \textbf{square} $d\times d$ object only as an \textbf{intermediate} (QR factor $Q$,
+or a padded Walsh--Hadamard map). The GP never stores that square matrix for inference.
+What matters for featurization is the \textbf{frequency matrix}
+\begin{equation}
+  \label{eq:W-shape}
+  \boxed{
+  W = \bigl[\,\mathbf w_1 \;\big|\; \mathbf w_2 \;\big|\; \cdots \;\big|\; \mathbf w_D \,\bigr]
+  \;\in\; \mathbb{R}^{d \times D},
+  }
+\end{equation}
+whose columns are $D$ frequency vectors in $\mathbb{R}^d$.
+From $W$, GPPlus builds $\Ph\in\mathbb{R}^{n\times m}$ ($m=2D$) and, in Woodbury notation, $\Zmat=\Ph^{\top}\in\mathbb{R}^{m\times n}$.
+
+\paragraph{Notation (avoid symbol clash).}
+\begin{itemize}[nosep]
+  \item $d$: input dimension; $D=\texttt{num\_rff}$: number of frequencies; $m=2D$: feature count.
+  \item $b_k$: number of columns produced by block~$k$ ($1\le b_k\le d$); $\sum_k b_k = D$.
+  \item $W^{(k)}\in\mathbb{R}^{d\times b_k}$: the $k$-th block (ORF/SORF draw), \textbf{not} a $d\times d$ matrix unless $b_k=d$.
+        Superscript~$(k)$ is always the \textbf{block index} ($k=1,\ldots,K$); block \textbf{width} is $b_k$, never written as a superscript
+        (older drafts used $W^{(b)}$ or $W^{(3)}$ for width---avoid that).
+  \item Do not confuse block width $b_k$ with Woodbury RHS vector $b\in\mathbb{R}^n$ (Section~\ref{sec:solve}).
+\end{itemize}
+
+\paragraph{Step 1 --- one block: $d\times d$ intermediate $\to$ $d\times b_k$ columns.}
+\textbf{ORF} (one block):
+\begin{align}
+  G^{(k)} &\in \mathbb{R}^{d\times d},\quad G^{(k)}_{ab}\stackrel{\text{i.i.d.}}{\sim}\mathcal N(0,1), \\
+  Q^{(k)} &\leftarrow \mathrm{qr}\bigl(G^{(k)}\bigr) \in \mathbb{R}^{d\times d}, \\
+  b_k &\leftarrow \min(d,\ \text{remaining frequencies}), \\
+  \mathbf w_j &\leftarrow s_j\,\mathbf q^{(k)}_{j}, \quad j=1,\ldots,b_k, \\
+  W^{(k)} &\leftarrow \bigl[\,s_1\mathbf q^{(k)}_1 \;\big|\; \cdots \;\big|\; s_{b_k}\mathbf q^{(k)}_{b_k}\,\bigr]
+  \in \mathbb{R}^{d\times b_k}.
+\end{align}
+Only the first $b_k$ columns of $Q^{(k)}$ are kept; $R^{(k)}$ from QR is discarded.
+\textbf{SORF} replaces $G^{(k)}\!\to\!Q^{(k)}$ by a structured map on $b_k$ basis vectors
+(Section~\ref{sec:sorf}), but still outputs $W^{(k)}\in\mathbb{R}^{d\times b_k}$.
+
+\paragraph{Step 2 --- concatenate blocks horizontally: $d\times D$.}
+GPPlus (\texttt{\_sample\_orf\_weights}, \texttt{\_sample\_sorf\_weights}) repeats Step~1 with fresh randomness until $D$ columns exist.
+Block count $K$ and widths $b_k$ are \textbf{not tuned}: they follow \eqref{eq:block-loop}--\eqref{eq:K-bk} from $(d,D)$ only
+(SORF/ORF; Section~\ref{par:sorf-block-k}).
+\begin{equation}
+  \label{eq:W-concat}
+  \boxed{
+  W
+  \;=\;
+  \bigl[\, W^{(1)} \;\|\; W^{(2)} \;\|\; \cdots \;\|\; W^{(K)} \,\bigr]
+  \;\in\; \mathbb{R}^{d \times D},
+  \qquad
+  \sum_{k=1}^{K} b_k = D.
+  }
+\end{equation}
+\textbf{Horizontal concat} appends columns: column $j$ of $W$ is still one frequency $\mathbf w_j\in\mathbb{R}^d$.
+\begin{itemize}[nosep]
+  \item \textbf{$D \le d$ (one block):} $K=1$, $b_1=D$, $W=W^{(1)}\in\mathbb{R}^{d\times D}$.
+        One $d\times d$ QR supplies up to $d$ directions; only the first $D$ are used.
+  \item \textbf{$D > d$ (multiple blocks):} each full block has $b_k=d$; the last block may be \textbf{partial}
+        ($b_K = D \bmod d$, or $d$ if remainder is zero). Orthogonality holds \textbf{within} each block, not across blocks
+        (Yu et al.\ Corollary~1; independent re-randomization per block).
+  \item \textbf{$D \bmod d \neq 0$ is fine:} the last block is simply shorter; no padding of $D$ or $m$ is required.
+\end{itemize}
+\textbf{RFF} skips QR entirely: \texttt{torch.randn(d, D)} draws $W\in\mathbb{R}^{d\times D}$ in one step, but
+Steps~3--5 below are identical.
+
+\paragraph{Step 3 --- projections $\mathrm{proj}=XW$ ($n\times D$).}
+Let $X\in\mathbb{R}^{n\times d}$ hold scaled inputs $\tilde{\mathbf x}_i^{\top}$ in row $i$.
+\begin{equation}
+  \label{eq:proj-matrix}
+  \mathrm{proj}
+  \;=\;
+  X W
+  \;\in\; \mathbb{R}^{n \times D},
+  \qquad
+  \mathrm{proj}_{i,j} = \tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i
+  \;\;\text{(same as \eqref{eq:proj}).}
+\end{equation}
+Each column of $W$ pairs with every training point via one dot product.
+
+\paragraph{Step 4 --- cos/sin featurization: $\Ph$ ($n\times m$, $m=2D$).}
+Apply \eqref{eq:featurize} row-wise (code: \texttt{featurize\_rbf}):
+\begin{equation}
+  \label{eq:Ph-from-W}
+  \Ph
+  \;=\;
+  \frac{1}{\sqrt{D}}
+  \bigl[\,
+    \cos(\mathrm{proj}) \;\big|\; \sin(\mathrm{proj})
+  \,\bigr]
+  \;\in\; \mathbb{R}^{n \times 2D},
+  \qquad
+  \texttt{z\_train} \equiv \Ph.
+\end{equation}
+Column $j$ of $\Ph$ is the cos feature for $\mathbf w_j$; column $D+j$ is the sin feature for the same $\mathbf w_j$.
+Output scale in \texttt{RFFGPR} multiplies $\Ph$ after this step.
+
+\paragraph{Step 5 --- Woodbury layout $\Zmat=\Ph^{\top}$ ($m\times n$).}
+\begin{equation}
+  \Zmat = \Ph^{\top} \in \mathbb{R}^{m \times n},
+  \qquad
+  \text{column $i$ of $\Zmat$ is $\mathbf z(\mathbf x_i)$ from \eqref{eq:featurize}.}
+\end{equation}
+Woodbury formulas in Sections~\ref{sec:split}--\ref{sec:logdet} use $\Ph$ or $\Zmat$ interchangeably ($\Ph=\Zmat^{\top}$).
+
+\begin{samebox}
+\textbf{End-to-end size chain (all sampling modes after $W$ is fixed)}
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Step} & \textbf{Object} & \textbf{Size} & \textbf{How it is built} \\
+\midrule
+0 & $G^{(k)}$ or SORF map & $d\times d$ (ORF) & intermediate only \\
+1 & $W^{(k)}$ & $d\times b_k$ & $b_k$ frequency columns from block~$k$ \\
+2 & $W$ & $d\times D$ & concat columns: \eqref{eq:W-concat} \\
+3 & $\mathrm{proj}=XW$ & $n\times D$ & one dot product per $(i,j)$ \\
+4 & $\Ph$ (\texttt{z\_train}) & $n\times m$, $m=2D$ & cos $\|$ sin of $\mathrm{proj}$ \\
+5 & $\Zmat=\Ph^{\top}$ & $m\times n$ & Woodbury transpose layout \\
+6 & $M=I+\Ph^{\top}\Ph/\noise$ & $m\times m$ & Cholesky this (not $n\times n$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{samebox}
+
+\paragraph{Worked example: $d=3$, $D=5$ (partial last block).}
+Input dimension $d=3$, request $D=5$ frequencies.
+\begin{itemize}[nosep]
+  \item Block~1: $b_1=3$. QR on $G^{(1)}\in\mathbb{R}^{3\times 3}$ gives $Q^{(1)}$; take all three columns
+        $\Rightarrow W^{(1)}\in\mathbb{R}^{3\times 3}$.
+  \item Block~2: $b_2=2$ (remaining). Fresh QR on $G^{(2)}$; take \textbf{first two} columns only
+        $\Rightarrow W^{(2)}\in\mathbb{R}^{3\times 2}$.
+  \item Concat: $W=[\,W^{(1)} \;\|\; W^{(2)}\,]\in\mathbb{R}^{3\times 5}$.
+  \item For $n=4$ training points: $\mathrm{proj}=XW$ is $4\times 5$; $\Ph$ is $4\times 10$; $\Zmat$ is $10\times 4$;
+        Woodbury middle $M$ is $10\times 10$.
+\end{itemize}
+
+\subsection{When $D > d$: independent blocks (detail)}
+\label{sec:blocks}
+
+When more than $d$ frequencies are needed, Yu et al.\ repeat each construction
+\textbf{independently} for every block (Corollary~1 for ORF; same convention in GPPlus for SORF).
+Block count $K=\lceil D/d\rceil$ and widths $b_k$ are fixed by \eqref{eq:K-bk} (Section~\ref{par:sorf-block-k}).
+This is Step~2 of Section~\ref{sec:W-to-Ph-Z}; GPPlus concatenates columns:
 \begin{equation}
   W = \big[\, W^{(1)} \;\|\; W^{(2)} \;\|\; \cdots \,\big],
-  \qquad W^{(b)} \in \mathbb{R}^{d\times d},
+  \qquad W^{(k)} \in \mathbb{R}^{d\times b_k},
+  \;\; b_k \le d,
+  \;\; \sum_k b_k = D.
 \end{equation}
-each $W^{(b)}$ from a fresh Gaussian $\to$ QR $\to$ $\chi(d)$ scales.
+Each block uses a fresh randomization: RFF --- i.i.d.\ Gaussians; ORF --- Gaussian $\to$ QR $\to$ $\chi(d)$; SORF --- new Rademacher triple + FWHT.
+The $d\times d$ QR matrix is \textbf{not} the final $W$; only $b_k$ of its $d$ columns (scaled) enter $W^{(k)}$.
+
+\paragraph{Worked example (TOA-scale).}
+After column dropping, TOA experiments often use $d=270$ input dimensions and $D=1600$ frequencies (\texttt{num\_rff}).
+Block concatenation yields:
+\begin{itemize}
+  \item Six full blocks of $270$ columns each ($6\times 270 = 1620 > 1600$);
+  \item Take $1600$ columns total: blocks $1,\ldots,5$ contribute $5\times 270=1350$, block~$6$ contributes $250$.
+\end{itemize}
+Each block is an independent ORF (QR + $\chi(d)$) or SORF (new $D_1,D_2,D_3$ + FWHT) draw.
+Feature dimension is $m=2D=3200$; Woodbury Cholesky is on $M\in\mathbb{R}^{3200\times 3200}$, not on the $n\times n$ training Gram matrix.
+
+\paragraph{From $W$ to matrices the GP uses (all modes).}
+Section~\ref{sec:W-to-Ph-Z} gives the full Step~0--6 chain; this table is the same summary for quick reference.
+Once $W\in\mathbb{R}^{d\times D}$ is fixed (RFF, ORF, or SORF), the downstream objects are identical:
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Matrix} & \textbf{Size} & \textbf{Role} \\
+\midrule
+$X$ (training inputs, scaled) & $n\times d$ & Rows are $\tilde{\mathbf x}_i^{\top}$ \\
+$W$ & $d\times D$ & Column $j$ is frequency $\mathbf w_j$ \\
+$\mathrm{proj}=XW$ & $n\times D$ & $\mathrm{proj}_{i,j}=\tilde{\mathbf w}_j^{\top}\tilde{\mathbf x}_i$ \\
+$\Ph$ (\texttt{z\_train}) & $n\times 2D$ & cos block cols $1{:}D$, sin block cols $D{+}1{:}2D$ \\
+$\Zmat=\Ph^{\top}$ & $2D\times n$ & column $i$ is $\mathbf z(\mathbf x_i)$; Woodbury layout \\
+$M=I+\Ph^{\top}\Ph/\noise$ & $2D\times 2D$ & Woodbury middle matrix (Cholesky this) \\
+\bottomrule
+\end{tabular}
+\end{center}
+The GP trainer never uses $W$ after $\Ph$ is built; ORF/SORF only affect \textbf{how} $W$ was sampled.
+
+\subsection{Summary: RFF vs.\ ORF vs.\ SORF}
+\label{sec:rff-orf-sorf-summary}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}p{0.12\textwidth}p{0.28\textwidth}p{0.24\textwidth}p{0.24\textwidth}@{}}
+\toprule
+ & \textbf{RFF} & \textbf{ORF} & \textbf{SORF} \\
+\midrule
+Draw $\mathbf w_j$ & i.i.d.\ $\mathcal N(0,I_d)$ & $s_j\mathbf q_j$, $Q$ from QR($G$) & $\sqrt{d}\,H D_3 H D_2 H D_1 \mathbf e_j$ \\
+Orthogonality & none & exact in each $d\times d$ block & structured (Hadamard) \\
+Cost to build $W$ & $O(dD)$ & $O(d^2\cdot D/d)$ & $O(d\log d\cdot D/d)$ \\
+Kernel variance & highest (fixed $D$) & lower & lower (approx.\ ORF) \\
+After $W$ & \multicolumn{3}{c}{Same \eqref{eq:featurize}, same $\Ph$, same Woodbury} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Identity lemma and what theory does \emph{not} prove}
+\label{sec:identity-lemma}
+
+\begin{samebox}
+\textbf{Lemma (identity across sampling modes).}
+Fix hyperparameters (lengthscales, outputscale, noise) and a realized feature matrix $\Ph\in\mathbb{R}^{n\times 2D}$.
+Then the Woodbury MLL, predictive mean, and predictive variance are \textbf{identical} for
+\texttt{rff}/\texttt{orf}/\texttt{sorf}: the sampling mode enters only through the law of $W$ that produces $\Ph$.
+\end{samebox}
+
+\noindent\textbf{Provable (Yu et al., arXiv:1610.09072).}
+\begin{itemize}
+  \item RFF is unbiased for the RBF kernel; for fixed $D$ it has the highest Monte Carlo variance of $\hat K=z(x)^{\top}z(x')$.
+  \item ORF preserves marginals $\mathbf w_j\sim\mathcal N(0,I_d)$ while enforcing within-block orthogonality $\Rightarrow$ lower $\mathrm{Var}(\hat K)$ (Theorem~1).
+  \item SORF is a structured surrogate of ORF (normalized Hadamard + Rademacher); theory ranks
+  \[
+    \mathrm{Var}(\hat K_{\mathrm{RFF}}) \;\ge\; \mathrm{Var}(\hat K_{\mathrm{ORF}})
+    \;\approx\; \mathrm{Var}(\hat K_{\mathrm{SORF}}).
+  \]
+\end{itemize}
+
+\noindent\textbf{Not a corollary of that theory.}
+A large empirical gap $\mathrm{RMSE}_{\mathrm{SORF}}\ll\mathrm{RMSE}_{\mathrm{ORF}}$ (e.g.\ on TOA) is \textbf{not} predicted.
+Such a gap must come from (i)~implementation error in the SORF draw, (ii)~optimization / ARD landscape differences for a fixed dataset, or (iii)~both---not from asymptotic dominance of SORF over ORF.
+
+\paragraph{Implementation note (FWHT).}
+$H$ is the \emph{normalized} Walsh--Hadamard transform.
+The GPPlus FWHT butterfly must clone the half-blocks before writing $a\pm b$; an in-place aliasing bug
+destroys orthogonality and shrinks column norms of $W_{\mathrm{SORF}}$ far below $\sqrt{d}$.
+After the fix, power-of-two blocks satisfy $\|\mathbf w_j\|=\sqrt{d}$ and $Q^{\top}Q=I$ (up to float error), matching Yu et al.
+
+\paragraph{Ackley vs.\ TOA (empirical reading).}
+On matched 10D Ackley ($D$ aligned, ARD, same seed/noise), theory-aligned diagnostics (kernel MSE, column norms, within-block coherence)
+should show ORF$\approx$SORF$\ll$RFF after the FWHT fix.
+A historical TOA ranking with SORF$\ll$ORF is therefore best treated as \emph{dataset/optimization-specific or pre-fix artifact}, not as a proof that SORF dominates ORF.
 
 \subsection{GPPlus mapping (code convention)}
 
@@ -485,38 +1757,18 @@ Input dimension & $d = \texttt{num\_dims}$ \\
 Number of frequencies & $D = \texttt{num\_samples} = \texttt{num\_rff}$ \\
 Feature dimension & $m = 2D$ (cos/sin pairs unchanged) \\
 Weight buffer & \texttt{randn\_weights} $\in \mathbb{R}^{d\times D}$, column $j$ is $\mathbf w_j$ \\
-ORF enabled & \texttt{RFFKernel(orthogonal=True)}, \texttt{RFFGPR(..., orthogonal=True)} \\
-Sampling & \texttt{\_sample\_orf\_weights} $\to$ \texttt{init\_rbf\_weights(..., orthogonal=True)} \\
-$\chi(d)$ draw & $\|\mathcal N(0,I_d)\|$ (norm of a $d$-dim.\ standard Gaussian) \\
-ARD on weights & Applied \textbf{after} ORF: $W \leftarrow W \odot (1/\boldsymbol{\ell})$ if \texttt{lengthscale} given \\
-Kernel bandwidth on $x$ & Still in \texttt{featurize\_rbf} via $10^{\ell/2}$; paper's $1/\sigma$ is not duplicated \\
-Multi-init draws & \texttt{RFFParameterInitializer} pre-draws one $W$ per init with the same ORF rule \\
+Sampling mode & \texttt{RFFKernel(rff\_sampling=...)} --- \texttt{"rff"}, \texttt{"orf"}, or \texttt{"sorf"} \\
+Entry point & \texttt{init\_rbf\_weights(..., rff\_sampling=...)} \\
+ORF draw & \texttt{\_sample\_orf\_weights} \\
+SORF draw & \texttt{\_sample\_sorf\_weights} (FWHT in \texttt{\_fwht}; $W\in\mathbb{R}^{d_{\mathrm{pad}}\times D}$, $d_{\mathrm{pad}}=2^{\lceil\log_2 d\rceil}$; \texttt{featurize\_rbf} zero-pads $x$) \\
+$\chi(d)$ draw (ORF) & $\|\mathcal N(0,I_d)\|$ (norm of a $d$-dim.\ standard Gaussian) \\
+ARD on weights & Applied \textbf{after} draw: $W \leftarrow W \odot (1/\boldsymbol{\ell})$ if \texttt{lengthscale} given \\
+Kernel bandwidth on $x$ & In \texttt{featurize\_rbf} via $10^{\ell/2}$; paper's $1/\sigma$ not duplicated \\
+Multi-init draws & \texttt{RFFParameterInitializer} pre-draws one $W$ per init with the same rule \\
+FWHT note & Butterfly must \texttt{clone} half-blocks before $a\pm b$ (in-place aliasing otherwise breaks $H$) \\
 \bottomrule
 \end{tabular}
 \end{center}
-
-Algorithm (one block of size $b\le d$):
-\begin{align}
-  G &\sim \mathcal N(0,I)^{d\times d}, &
-  Q &\leftarrow \mathrm{qr}(G), \\
-  s_j &\sim \chi(d), &
-  \mathbf w_j &\leftarrow s_j\,\mathbf q_j, \quad j=1,\ldots,b.
-\end{align}
-
-\begin{samebox}
-\textbf{What ORF does \emph{not} change}
-\begin{itemize}
-  \item Featurization \eqref{eq:featurize}: still cos/sin with $1/\sqrt{D}$ scaling.
-  \item Woodbury MLL, $\Sig$, $M$, and all formulas in Sections~\ref{sec:split}--\ref{sec:logdet}.
-  \item Only the \textbf{random draw} of $W$ differs from \eqref{eq:rff-iid}.
-\end{itemize}
-\end{samebox}
-
-\begin{diffbox}
-\textbf{Not implemented (out of scope):} SORF (structured orthogonal features via Walsh--Hadamard
-matrices, Eq.~(5) in the paper) and explicit materialization-free $O(d\log d)$ transforms.
-GPPlus always stores explicit $W\in\mathbb{R}^{d\times D}$.
-\end{diffbox}
 
 %=============================================================================
 \section{Highlight map (one page)}
@@ -535,12 +1787,12 @@ $I^{-1}+\cdots$ vs $I+\cdots$ & both $= M$ \\
 \midrule
 \multicolumn{2}{@{}c@{}}{\textbf{Shared}} \\
 \midrule
-\multicolumn{2}{@{}l@{}}{$\Sig = \noise I_n + \text{rank-}\le m$ term} \\
-\multicolumn{2}{@{}l@{}}{$M$ is $m\times m$; factor $M$, not $\Sig$} \\
+\multicolumn{2}{@{}l@{}}{$\Sig = \noise I_n + \Ph\Ph^{\top}$ ($n\times n$ Gram, rank $\le \min(n,m)$)} \\
+\multicolumn{2}{@{}l@{}}{$M = I_m + \Ph^{\top}\Ph/\noise$ ($m\times m$; Cholesky this, not $\Sig$)} \\
 \multicolumn{2}{@{}l@{}}{$\Sig^{-1}b$: $(\noise I)^{-1}$ by divide; $M^{-1}$ by Cholesky} \\
 \multicolumn{2}{@{}l@{}}{$\log|\Sig|$: $n\log\noise$ explicit $+$ $\log|M|$ from Cholesky} \\
 \midrule
-\multicolumn{2}{@{}l@{}}{ORF: $W=SQ$, $\chi(d)$ scales; same $\Ph$ Woodbury (Section~\ref{sec:orf})} \\
+\multicolumn{2}{@{}l@{}}{RFF/ORF/SORF: only the draw of $W$ differs; same $\Ph$ Woodbury (Section~\ref{sec:rff-sampling})} \\
 \bottomrule
 \end{tabular}
 \end{center}

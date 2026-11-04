@@ -52,7 +52,8 @@ def effective_noise_variance(
     Parameters
     ----------
     noise_y :
-        Homoskedastic output noise ``()`` / ``(B,)`` / ``(1,)``.
+        Output noise: scalar / ``(B,)`` / ``(1,)``, or per-point ``(n,)`` /
+        ``(B, n)`` (e.g. MAP ``σ_{y,het}²(x)``).
     input_noise_var :
         Per-dimension input noise variances ``(D,)`` or ``(B, D)``.
     grad_mu :
@@ -73,6 +74,7 @@ def effective_noise_variance(
         input_term = (g2 * input_noise_var).sum(dim=-1)
 
     noise = noise_y.clamp_min(1e-12)
+    # Broadcast scalar/(B,) → (..., n); per-point (n,)/(B,n) already matches.
     while noise.dim() < input_term.dim():
         noise = noise.unsqueeze(-1)
     return noise + input_term
@@ -130,15 +132,19 @@ def _posterior_mean_grad_wrt_x_autograd(
     *,
     train_x: Tensor | None = None,
     jitter: float = 1e-6,
+    feature_weights: Tensor | None = None,
 ) -> Tensor:
     """Reference path: featurize-with-graph + ``torch.autograd.grad``."""
     weight_x = (train_x if train_x is not None else x).detach()
     noise_mu = noise_for_mu.detach()
     with torch.no_grad():
-        z_det = model.scaled_features(weight_x)
-        w = _posterior_feature_weights_homoskedastic(
-            noise_mu, z_det, y_centered.detach(), jitter=jitter
-        )
+        if feature_weights is None:
+            z_det = model.scaled_features(weight_x)
+            w = _posterior_feature_weights_homoskedastic(
+                noise_mu, z_det, y_centered.detach(), jitter=jitter
+            )
+        else:
+            w = feature_weights.detach()
 
     x_req = x.detach().requires_grad_(True)
     z = model.scaled_features(x_req)
@@ -176,6 +182,10 @@ def posterior_mean_grad_wrt_x(
     *,
     train_x: Tensor | None = None,
     jitter: float = 1e-6,
+    feature_weights: Tensor | None = None,
+    proj: Tensor | None = None,
+    omega: Tensor | None = None,
+    scale_out: Tensor | None = None,
 ) -> Tensor:
     """
     Detached Jacobian ``∇_x μ`` of the Woodbury posterior mean at ``x``.
@@ -193,6 +203,11 @@ def posterior_mean_grad_wrt_x(
     featurize when ``train_x`` is omitted or aliases ``x``, plus an analytic RFF
     Jacobian. When ``train_x`` is a distinct tensor, featurizes train for ``w`` and
     eval points for ``∇μ`` separately. Other models fall back to autograd.
+
+    When ``feature_weights`` is provided it must be the frozen homoskedastic ``w``
+    for ``train_x`` (or ``x`` when ``train_x`` is omitted), skipping the train solve.
+    Optional ``proj`` / ``omega`` / ``scale_out`` reuse a prior
+    ``featurize_rbf_scaled_omega`` call on ``x`` (all three required together).
     """
     from .woodbury_mll_autograd import (
         featurize_rbf_scaled_omega,
@@ -202,6 +217,12 @@ def posterior_mean_grad_wrt_x(
     x_det = x.detach()
     weight_x = (train_x if train_x is not None else x).detach()
     same_points = train_x is None or _same_feature_points(weight_x, x_det)
+    n_proj = sum(t is not None for t in (proj, omega, scale_out))
+    if n_proj not in (0, 3):
+        raise ValueError(
+            "proj, omega, and scale_out must be provided together (or all omitted)."
+        )
+    have_proj = n_proj == 3
 
     params = _rff_logscale_params(model)
     mean_module = getattr(model, "mean_module", None)
@@ -217,6 +238,7 @@ def posterior_mean_grad_wrt_x(
             noise_for_mu,
             train_x=train_x,
             jitter=jitter,
+            feature_weights=feature_weights,
         )
 
     lengthscale, outputscale, randn_weights, num_samples = params
@@ -224,19 +246,28 @@ def posterior_mean_grad_wrt_x(
     y_c = y_centered.detach()
 
     with torch.no_grad():
-        if same_points:
-            phi, proj, omega, scale_out = featurize_rbf_scaled_omega(
-                x_det,
-                randn_weights,
-                lengthscale,
-                outputscale,
-                num_samples,
-            )
+        if feature_weights is not None:
+            w = feature_weights.detach()
+        elif same_points:
+            if have_proj:
+                phi, _, _, _ = featurize_rbf_scaled_omega(
+                    x_det,
+                    randn_weights,
+                    lengthscale,
+                    outputscale,
+                    num_samples,
+                )
+            else:
+                phi, proj, omega, scale_out = featurize_rbf_scaled_omega(
+                    x_det,
+                    randn_weights,
+                    lengthscale,
+                    outputscale,
+                    num_samples,
+                )
+                have_proj = True
             w = _posterior_feature_weights_homoskedastic(
                 noise_mu, phi, y_c, jitter=jitter
-            )
-            grad = rff_grad_mu_from_proj(
-                proj, omega, scale_out, w, num_samples
             )
         else:
             phi_train, _, _, _ = featurize_rbf_scaled_omega(
@@ -249,6 +280,8 @@ def posterior_mean_grad_wrt_x(
             w = _posterior_feature_weights_homoskedastic(
                 noise_mu, phi_train, y_c, jitter=jitter
             )
+
+        if not have_proj:
             _phi_x, proj, omega, scale_out = featurize_rbf_scaled_omega(
                 x_det,
                 randn_weights,
@@ -256,9 +289,9 @@ def posterior_mean_grad_wrt_x(
                 outputscale,
                 num_samples,
             )
-            grad = rff_grad_mu_from_proj(
-                proj, omega, scale_out, w, num_samples
-            )
+        grad = rff_grad_mu_from_proj(
+            proj, omega, scale_out, w, num_samples
+        )
     return grad.to(dtype=x.dtype).detach()
 
 

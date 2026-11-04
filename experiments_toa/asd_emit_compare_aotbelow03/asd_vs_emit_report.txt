@@ -1,0 +1,38 @@
+EMIT: emit_test_data_90to100_aotbelow03_20262608.nc  n=139689
+ASD:  asd_validation_set.nc  n=6
+
+=== Parameter ranges (EMIT vs ASD) ===
+grain_size    EMIT[30,1500] med=853.9  ASD[171.6,1426]  ASD_in_EMIT_range=100%
+cos_i         EMIT[0.06,1] med=0.749  ASD[0.4904,0.7972]  ASD_in_EMIT_range=100%
+dust          EMIT[0,1468] med=9.638e-27  ASD[49.32,701.2]  ASD_in_EMIT_range=100%
+algae         EMIT[2.803e-45,1.004e+05] med=3.204e-14  ASD[19.98,23.59]  ASD_in_EMIT_range=100%
+lwc           EMIT[7.933e-41,25] med=7.683  ASD[0.1529,19.47]  ASD_in_EMIT_range=100%
+aot           EMIT[0.01797,0.02999] med=0.0194  ASD[0.038,0.066]  ASD_in_EMIT_range=0%
+cwv           EMIT[0.2271,0.6311] med=0.3725  ASD[0.133,0.415]  ASD_in_EMIT_range=50%
+coszen        EMIT[0.7711,0.7782] med=0.7746  ASD cos(sza)[0.4904,0.7972]
+ele_km        EMIT[2.097,4.095] med=3.231  ASD[2.7,2.7]
+
+=== Radiance scale ===
+EMIT mean|rad| med=8.285  p10=5.992  p90=9.819
+ASD  mean|rad| = [9.6365120944469, 9.09985654366222, 7.984601373964382, 7.635125510110274, 9.48542486224977, 7.661588149989972]
+
+=== ASD spectral neighbors in EMIT (mean-normalized RMSE, thr=0.04) ===
+S1 20250323: n<=0.04=0  min=0.1360  ASD grain=1082 NN1 grain=863  ASD dust=49.3 NN1 dust=0.0  ASD cos_i=0.780 NN1=0.863
+S2 20250327: n<=0.04=0  min=0.1048  ASD grain=1211 NN1 grain=1132  ASD dust=320.6 NN1 dust=0.0  ASD cos_i=0.797 NN1=0.858
+S3 20260113: n<=0.04=0  min=0.1152  ASD grain=459 NN1 grain=1025  ASD dust=243.5 NN1 dust=0.0  ASD cos_i=0.490 NN1=0.646
+S4 20260124: n<=0.04=0  min=0.0984  ASD grain=1032 NN1 grain=977  ASD dust=411.5 NN1 dust=0.0  ASD cos_i=0.521 NN1=0.646
+S5 20260213: n<=0.04=0  min=0.1071  ASD grain=172 NN1 grain=387  ASD dust=109.7 NN1 dust=0.0  ASD cos_i=0.601 NN1=0.736
+S6 20260226: n<=0.04=0  min=0.0573  ASD grain=1426 NN1 grain=1456  ASD dust=701.2 NN1 dust=0.0  ASD cos_i=0.662 NN1=0.695
+
+=== Closest mean-normalized RMSE: EMIT vs pure_flat_Sep04 sim ===
+S1: EMIT_min=0.1360  sim_min=0.0297  EMIT_better=False
+S2: EMIT_min=0.1048  sim_min=0.0310  EMIT_better=False
+S3: EMIT_min=0.1152  sim_min=0.0589  EMIT_better=False
+S4: EMIT_min=0.0984  sim_min=0.0508  EMIT_better=False
+S5: EMIT_min=0.1071  sim_min=0.0380  EMIT_better=False
+S6: EMIT_min=0.0573  sim_min=0.0279  EMIT_better=False
+
+=== Recommendation ===
+0/6 ASD scenes have ≥1 EMIT neighbor within mnRMSE≤0.04; median best match=0.1060.
+S3/S4 still lack EMIT neighbors at thr=0.04.
+LOW priority for ASD coverage: EMIT is not spectrally closer to ASD at thr=0.04 than current sims for most scenes. May still help satellite eval.

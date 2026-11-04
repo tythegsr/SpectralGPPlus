@@ -1,12 +1,18 @@
 from .eval import (
     evaluate_gp_model,
     evaluate_lrnn_gp_model,
+    evaluate_moe_gp_model,
     evaluate_rff_gp_model,
     evaluate_rff_mt_gp_model,
     evaluate_svgp_gp_model,
     evaluate_vi_rff_gp_model,
 )
-from .callbacks import NIGPInputNoiseFreezeCallback, LikelihoodNoiseFreezeCallback, ValidationMetricsCallback
+from .callbacks import (
+    NIGPInputNoiseFreezeCallback,
+    HeteroNIGPScheduleCallback,
+    LikelihoodNoiseFreezeCallback,
+    ValidationMetricsCallback,
+)
 from .parameter_initializer import (
     DefaultParameterInitializer,
     ParameterInitializer,

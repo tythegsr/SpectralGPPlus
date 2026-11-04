@@ -30,6 +30,10 @@ _MODEL_INIT_KEYS = (
     "spectral_kernel",
     "nigp",
     "variational_cov",
+    "hetero_sorf",
+    "num_rff_het",
+    "hetero_mode",
+    "hetero_seed",
 )
 _MODEL_CLASSES = {"RFFGPR": RFFGPR, "VIRFFGPR": VIRFFGPR}
 
@@ -190,6 +194,10 @@ def load_toa_stgp_checkpoint(path: str | Path, device: str = "cpu") -> ToaStgpBu
     model = model.to(device=device, dtype=dtype)
     model.eval()
     model.invalidate_feature_cache()
+    # Post-train inference uses the final schedule state (hetero + NIGP when trained).
+    if getattr(model, "hetero_sorf", False):
+        model.use_hetero_noise = True
+        model.nigp_correction_enabled = True
 
     x_scaler = scaler_from_dict(payload.get("x_scaler"))
     y_scaler = scaler_from_dict(payload.get("y_scaler"))

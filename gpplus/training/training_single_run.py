@@ -32,6 +32,7 @@ from .trainer_utils import (
     check_early_stop,
     configure_woodbury_matmul_precision,
     select_epoch_train_fn,
+    _callbacks_want_endpoint_slope_refresh,
 )
 
 
@@ -256,6 +257,48 @@ class GPTrainerSingleProcess:
                     min_epochs=self.min_epochs,
                 ):
                     early_stopped = True
+                    # Extra epoch so Hetero-NIGP can run the endpoint σ_nigp slope refresh.
+                    if _callbacks_want_endpoint_slope_refresh(self.callbacks):
+                        self._emit_callbacks(
+                            "on_epoch_start",
+                            {
+                                "epoch": epoch,
+                                "model": self.model,
+                                "trainer": self,
+                                "device": self.device,
+                                "endpoint_slope_refresh": True,
+                            },
+                        )
+                        try:
+                            loss = train_epoch(optimizer, mll)
+                        except Exception as exc:
+                            if best_state_dict is not None:
+                                abort_error = str(exc)
+                                abort_epoch = epoch
+                                logger.exception(
+                                    "Endpoint slope-refresh epoch aborted; recovering best "
+                                    "checkpoint (best_loss=%.6f). Error: %s",
+                                    best_loss,
+                                    exc,
+                                )
+                                break
+                            raise
+                        self._emit_callbacks(
+                            "on_epoch_end",
+                            {
+                                "epoch": epoch,
+                                "model": self.model,
+                                "trainer": self,
+                                "loss": loss,
+                                "device": self.device,
+                                "endpoint_slope_refresh": True,
+                            },
+                        )
+                        if loss < best_loss:
+                            best_loss = loss
+                            best_state_dict = copy.deepcopy(self.model.state_dict())
+                            best_loss_epoch = epoch
+                        epochs_trained = epoch + 1
                     break
                 previous_loss = loss
 

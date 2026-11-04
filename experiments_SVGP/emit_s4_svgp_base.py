@@ -314,6 +314,8 @@ def run_s4_emit_svgp(
         f"nigp={bool(nigp)}, learn_inducing={learn_inducing_locations}, kl_beta={kl_beta}"
         + (f", pca={n_components_by_task}" if n_components_by_task is not None else "")
     )
+    if pca_components_meta.get("config_path"):
+        print(f"PCA components config: {pca_components_meta['config_path']}")
     print(
         f"Optimizer: {getattr(optimizer_class, '__name__', optimizer_class)}, "
         f"kwargs={optimizer_kwargs}"

@@ -311,6 +311,14 @@ def apply_val_rrmse_checkpoint_if_available(
     return best_state_dict, best_loss, None
 
 
+def _callbacks_want_endpoint_slope_refresh(callbacks) -> bool:
+    for cb in callbacks or []:
+        fn = getattr(cb, "wants_endpoint_slope_refresh_epoch", None)
+        if callable(fn) and bool(fn()):
+            return True
+    return False
+
+
 def check_early_stop(
     stop_conditions: list,
     stop_context: dict,

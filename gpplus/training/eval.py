@@ -116,6 +116,29 @@ def evaluate_gp_model(
         return mean, lower, upper, stddev
 
 
+def evaluate_moe_gp_model(model, test_x: torch.Tensor):
+    """
+    Evaluate a :class:`~gpplus.models.moe_gpr.MOEGPR` mixture predictive.
+
+    Returns:
+        tuple:
+            - **mean** (torch.Tensor): Mixture predictive mean.
+            - **lower** (torch.Tensor): Mean − 2·mixture_std.
+            - **upper** (torch.Tensor): Mean + 2·mixture_std.
+            - **stddev** (torch.Tensor): Mixture predictive std (law of total variance).
+            - **pred** (dict): Full ``model.predict`` payload including expert stats and gate weights.
+    """
+    get_settings().apply()
+    model.eval()
+    pred = model.predict(test_x)
+    mean = pred["mixture_mean"]
+    stddev = pred["mixture_std"]
+    lower = mean - 2.0 * stddev
+    upper = mean + 2.0 * stddev
+    logger.info("MOE-GP evaluation completed.")
+    return mean, lower, upper, stddev, pred
+
+
 def evaluate_rff_gp_model(
     model: RFFGPR,
     test_x: torch.Tensor,
@@ -133,9 +156,12 @@ def evaluate_rff_gp_model(
     Default ``woodbury_form="primal"`` uses ``M = I + ΦᵀΦ/σ²``.
     ``woodbury_form="dual"`` factors ``Λ = ΦᵀΦ + σ² I`` (stable for small ``σ²``).
 
-    When ``model.nigp`` is enabled, uses diag-noise Woodbury
-    ``Σ = diag(d) + ΦΦᵀ`` with McHutchon effective noise on train and test
-    (same correction as :meth:`~gpplus.models.rff_gpr.RFFGPR.predict`).
+    When ``model.nigp`` / hetero schedule flags are enabled, uses diag-noise Woodbury
+    ``Σ = diag(d) + ΦΦᵀ`` with the same ``σ_eff`` construction as
+    :meth:`~gpplus.models.rff_gpr.RFFGPR.predict`:
+    scalar ``σ_y``, MAP ``σ_{y,het}²(x)``, and/or ``σ_nigp²`` from ``∇μ``.
+    Homoskedastic slope weights for ``∇μ`` are computed once and reused
+    across chunks; each chunk shares a single RFF featurize for mean and ``∇μ``.
 
     Prefer this over :func:`evaluate_gp_model` for RFF models so inference avoids
     dense n x n linear algebra.
@@ -156,6 +182,10 @@ def evaluate_rff_gp_model(
     from ..utils.nigp_utils import nigp_correction_enabled
 
     use_nigp = nigp_correction_enabled(model)
+    use_hetero = bool(getattr(model, "use_hetero_noise", False)) and bool(
+        getattr(model, "hetero_sorf", False)
+    )
+    use_diag = use_nigp or use_hetero
 
     with torch.no_grad():
         train_x = _drop_singleton_batch(model.train_inputs[0])
@@ -175,29 +205,95 @@ def evaluate_rff_gp_model(
         f_var_chunks: list[torch.Tensor] = []
         step = n_test if chunk_size <= 0 else chunk_size
 
-        if use_nigp:
+        if use_diag:
             from ..utils.nigp_utils import (
+                _posterior_feature_weights_homoskedastic,
+                _rff_logscale_params,
                 effective_noise_variance,
                 posterior_mean_grad_wrt_x,
             )
             from ..utils.rff_utils import woodbury_posterior_weights_diag_noise
+            from ..utils.woodbury_mll_autograd import featurize_rbf_scaled_omega
 
-            # Gradients need an enabled graph; temporarily allow grad for ∇μ only.
-            with torch.enable_grad():
-                grad_mu_train = posterior_mean_grad_wrt_x(
-                    model, train_x, y_centered, noise, jitter=jitter
-                )
-            d_train = effective_noise_variance(
-                noise, model.input_noise_var, grad_mu_train
+            # MAP hetero nugget (or scalar likelihood) on the Woodbury diagonal.
+            base_noise_train = (
+                model.sigma_y_het(train_x) if use_hetero else noise
             )
+            # Slopes always use detached scalar likelihood noise (paper two-step).
+            slope_noise = noise.detach()
+            homo_w = _posterior_feature_weights_homoskedastic(
+                slope_noise, z_train, y_centered.detach(), jitter=jitter
+            )
+            if use_nigp:
+                with torch.enable_grad():
+                    grad_mu_train = posterior_mean_grad_wrt_x(
+                        model,
+                        train_x,
+                        y_centered,
+                        slope_noise,
+                        jitter=jitter,
+                        feature_weights=homo_w,
+                    )
+                d_train = effective_noise_variance(
+                    base_noise_train, model.input_noise_var, grad_mu_train
+                )
+            else:
+                d_train = base_noise_train.clamp_min(1e-12)
             w, chol, _z_hat = woodbury_posterior_weights_diag_noise(
                 d_train, z_train, y_centered, jitter=jitter
             )
             ones = z_train.new_ones(())
+            rff_params = _rff_logscale_params(model)
 
             for start in range(0, n_test, step):
                 chunk_x = test_x[start : start + step]
-                z_test = model.scaled_features(chunk_x)
+                if use_nigp:
+                    if rff_params is not None:
+                        lengthscale, outputscale, randn_weights, num_samples = rff_params
+                        z_test, proj, omega, scale_out = featurize_rbf_scaled_omega(
+                            chunk_x.detach(),
+                            randn_weights,
+                            lengthscale,
+                            outputscale,
+                            num_samples,
+                        )
+                        z_test = z_test.to(dtype=chunk_x.dtype)
+                        with torch.enable_grad():
+                            grad_mu_test = posterior_mean_grad_wrt_x(
+                                model,
+                                chunk_x,
+                                y_centered,
+                                slope_noise,
+                                train_x=train_x,
+                                jitter=jitter,
+                                feature_weights=homo_w,
+                                proj=proj,
+                                omega=omega,
+                                scale_out=scale_out,
+                            )
+                    else:
+                        z_test = model.scaled_features(chunk_x)
+                        with torch.enable_grad():
+                            grad_mu_test = posterior_mean_grad_wrt_x(
+                                model,
+                                chunk_x,
+                                y_centered,
+                                slope_noise,
+                                train_x=train_x,
+                                jitter=jitter,
+                                feature_weights=homo_w,
+                            )
+                    base_noise_test = (
+                        model.sigma_y_het(chunk_x) if use_hetero else noise
+                    )
+                    d_test = effective_noise_variance(
+                        base_noise_test, model.input_noise_var, grad_mu_test
+                    )
+                else:
+                    z_test = model.scaled_features(chunk_x)
+                    d_test = (
+                        model.sigma_y_het(chunk_x) if use_hetero else noise
+                    ).clamp_min(1e-12)
                 z_test_c = z_test.to(dtype=chol.dtype)
                 if w.dim() == 1:
                     f_mean = (z_test_c @ w).to(dtype=z_test.dtype)
@@ -207,18 +303,6 @@ def evaluate_rff_gp_model(
                     )
                 f_mean = f_mean + model.mean_module(chunk_x)
                 f_var = woodbury_predictive_var_diag_dual(ones, z_test, chol=chol)
-                with torch.enable_grad():
-                    grad_mu_test = posterior_mean_grad_wrt_x(
-                        model,
-                        chunk_x,
-                        y_centered,
-                        noise,
-                        train_x=train_x,
-                        jitter=jitter,
-                    )
-                d_test = effective_noise_variance(
-                    noise, model.input_noise_var, grad_mu_test
-                )
                 obs_std = woodbury_predictive_obs_std(f_var, d_test)
                 mean_chunks.append(f_mean)
                 lower_chunks.append(f_mean - 2 * obs_std)
@@ -276,10 +360,14 @@ def evaluate_rff_gp_model(
         upper = torch.cat(upper_chunks, dim=0)
         stddev = (upper - lower) / 4.0
 
-    logger.info(
-        "RFF evaluation completed%s.",
-        " (NIGP observation noise)" if use_nigp else "",
-    )
+    noise_tag = ""
+    if use_nigp and use_hetero:
+        noise_tag = " (hetero+NIGP observation noise)"
+    elif use_nigp:
+        noise_tag = " (NIGP observation noise)"
+    elif use_hetero:
+        noise_tag = " (hetero observation noise)"
+    logger.info("RFF evaluation completed%s.", noise_tag)
     if return_latent_var:
         f_var_out = torch.cat(f_var_chunks, dim=0)
         return mean, lower, upper, stddev, f_var_out

@@ -11,6 +11,7 @@ from experiments_toa.s2_constants import (
     S2_DEFAULT_KEEP_RANGES,
     S2_INPUT_DIM,
     S2_TASK_NAMES,
+    S4_BAND_CONFIG_ALIASES,
 )
 
 NComponentsSpec = int | Mapping[str, int] | str | Path
@@ -205,11 +206,12 @@ def load_task_pca_components_config(
         raise ValueError("'tasks' must be a JSON object mapping task -> n_components")
 
     names = list(task_names) if task_names is not None else list(S2_TASK_NAMES)
-    requested_unknown = [n for n in names if n not in S2_TASK_NAMES]
+    allowed_names = set(S2_TASK_NAMES) | set(S4_BAND_CONFIG_ALIASES)
+    requested_unknown = [n for n in names if n not in allowed_names]
     if requested_unknown:
         raise ValueError(f"Unknown requested task names: {requested_unknown}")
 
-    unknown = sorted(set(task_specs) - set(S2_TASK_NAMES))
+    unknown = sorted(set(task_specs) - set(S2_TASK_NAMES) - set(S4_BAND_CONFIG_ALIASES))
     if unknown:
         raise ValueError(f"Unknown tasks in PCA components config: {unknown}")
 
@@ -220,8 +222,12 @@ def load_task_pca_components_config(
 
     out: dict[str, int] = {}
     for name in names:
+        # S4 uses lwc; analysis JSON keys use liquid_water (see S4_BAND_CONFIG_ALIASES).
+        alias = S4_BAND_CONFIG_ALIASES.get(name, name)
         if name in task_specs:
             p = int(task_specs[name])
+        elif alias in task_specs:
+            p = int(task_specs[alias])
         elif default_p is not None:
             p = default_p
         else:
